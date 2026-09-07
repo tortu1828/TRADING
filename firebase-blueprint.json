@@ -1,0 +1,241 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Perfil y cuenta de inversionista o administrador del fondo",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "userCode": { "type": "string" },
+        "fullName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "phone": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "USER"] },
+        "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE", "SUSPENDED"] },
+        "currentCapital": { "type": "number" },
+        "currency": { "type": "string" },
+        "category": { "type": "string", "enum": ["AZUL", "VERDE", "NEGRA"] },
+        "userPercentage": { "type": "number" },
+        "adminPercentage": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "paymentDetails": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "entryDate": { "type": "string" },
+        "isClaimed": { "type": "boolean" }
+      },
+      "required": ["id", "fullName", "role", "status", "currentCapital"]
+    },
+    "MonthlyCycle": {
+      "title": "MonthlyCycle",
+      "description": "Ciclo operativo mensual de liquidación y TRM",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "name": { "type": "string" },
+        "status": { "type": "string", "enum": ["OPEN", "CALCULATING", "CLOSED"] },
+        "trmApplied": { "type": "number" },
+        "totalManagedCapital": { "type": "number" },
+        "totalUsersActive": { "type": "number" },
+        "totalGrossUsd": { "type": "number" },
+        "totalGrossCop": { "type": "number" },
+        "totalUsersProfitCop": { "type": "number" },
+        "totalAdminCommissionCop": { "type": "number" }
+      },
+      "required": ["id", "name", "status"]
+    },
+    "InvestorApplication": {
+      "title": "InvestorApplication",
+      "description": "Postulación de aspirante a inversionista en cola FIFO",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "queuePosition": { "type": "number" },
+        "fullName": { "type": "string" },
+        "documentId": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "phone": { "type": "string" },
+        "city": { "type": "string" },
+        "requestedCapitalCop": { "type": "number" },
+        "originBank": { "type": "string" },
+        "submissionDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING", "APPROVED", "REJECTED"] },
+        "source": { "type": "string" },
+        "priorityNotes": { "type": "string" }
+      },
+      "required": ["id", "queuePosition", "fullName", "email", "requestedCapitalCop", "status"]
+    },
+    "CycleGroupCalculation": {
+      "title": "CycleGroupCalculation",
+      "description": "Cálculos agrupados por categoría y nivel de capital de bitácora",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "category": { "type": "string" },
+        "groupCapitalCop": { "type": "number" },
+        "targetProfitUsd": { "type": "number" },
+        "grossProfitCop": { "type": "number" }
+      },
+      "required": ["id", "cycleId", "category", "groupCapitalCop"]
+    },
+    "CycleUserResult": {
+      "title": "CycleUserResult",
+      "description": "Liquidación individual de cada inversionista para un ciclo",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "userId": { "type": "string" },
+        "userCode": { "type": "string" },
+        "capitalCop": { "type": "number" },
+        "netUserProfitCop": { "type": "number" }
+      },
+      "required": ["id", "cycleId", "userId"]
+    },
+    "DailyGroupOperation": {
+      "title": "DailyGroupOperation",
+      "description": "Entrada de bitácora diaria de trading por grupo de capital",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "category": { "type": "string" },
+        "groupCapitalCop": { "type": "number" },
+        "date": { "type": "string" },
+        "amountUsd": { "type": "number" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["id", "cycleId", "category", "groupCapitalCop", "date", "amountUsd"]
+    },
+    "ReinvestmentRequest": {
+      "title": "ReinvestmentRequest",
+      "description": "Solicitud de reinversión de utilidades",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "requestedAmountCop": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "userId", "requestedAmountCop"]
+    },
+    "DisbursementRequest": {
+      "title": "DisbursementRequest",
+      "description": "Solicitud de retiro o desembolso bancario",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "amountCop": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "userId", "amountCop"]
+    },
+    "InvestmentRequest": {
+      "title": "InvestmentRequest",
+      "description": "Aporte de capital o nueva inversión",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "amountCop": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "userId", "amountCop"]
+    },
+    "NotificationItem": {
+      "title": "NotificationItem",
+      "description": "Notificación interna para usuarios",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "isRead": { "type": "boolean" }
+      },
+      "required": ["id", "userId", "title", "message"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Registro inmutable de auditoría para operaciones sensibles",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "action": { "type": "string" },
+        "performedBy": { "type": "string" },
+        "details": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "action"]
+    },
+    "GlobalConfig": {
+      "title": "GlobalConfig",
+      "description": "Configuración global de TRM y categorías",
+      "type": "object",
+      "properties": {
+        "trmReference": { "type": "number" },
+        "trmConfigured": { "type": "number" },
+        "trmMode": { "type": "string" },
+        "activeCycleId": { "type": "string" }
+      },
+      "required": ["trmConfigured"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Perfiles y cuentas de usuario"
+    },
+    "/monthlyCycles/{cycleId}": {
+      "schema": { "$ref": "#/entities/MonthlyCycle" },
+      "description": "Ciclos mensuales operativos"
+    },
+    "/investorApplications/{appId}": {
+      "schema": { "$ref": "#/entities/InvestorApplication" },
+      "description": "Postulaciones de aspirantes en cola FIFO"
+    },
+    "/cycleGroupCalculations/{groupId}": {
+      "schema": { "$ref": "#/entities/CycleGroupCalculation" },
+      "description": "Cálculos agrupados por categoría"
+    },
+    "/cycleUserResults/{resultId}": {
+      "schema": { "$ref": "#/entities/CycleUserResult" },
+      "description": "Resultados mensuales individuales"
+    },
+    "/dailyOperations/{docId}": {
+      "schema": { "$ref": "#/entities/DailyGroupOperation" },
+      "description": "Bitácoras de trading diario"
+    },
+    "/reinvestments/{reqId}": {
+      "schema": { "$ref": "#/entities/ReinvestmentRequest" },
+      "description": "Solicitudes de reinversión"
+    },
+    "/disbursements/{reqId}": {
+      "schema": { "$ref": "#/entities/DisbursementRequest" },
+      "description": "Solicitudes de desembolso"
+    },
+    "/investments/{invId}": {
+      "schema": { "$ref": "#/entities/InvestmentRequest" },
+      "description": "Solicitudes de nuevas inversiones"
+    },
+    "/notifications/{notifId}": {
+      "schema": { "$ref": "#/entities/NotificationItem" },
+      "description": "Notificaciones a inversionistas"
+    },
+    "/settings/{docId}": {
+      "schema": { "$ref": "#/entities/GlobalConfig" },
+      "description": "Ajustes del sistema y TRM"
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Logs de auditoría"
+    }
+  }
+}

@@ -1,0 +1,126 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Función de verificación de SuperAdmin por UID exacto y token
+    function isSuperAdmin() {
+      return request.auth != null && (
+        request.auth.uid == 'lpx4NLEEMkeh9EJFcG68oPMVdXF2' ||
+        request.auth.token.email == 'juanes9802@gmail.com' ||
+        request.auth.token.role == 'admin'
+      );
+    }
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && (
+        request.auth.uid == userId ||
+        (resource != null && resource.data.uid == request.auth.uid)
+      );
+    }
+
+    // 1. Acceso maestro del SuperAdmin: Control total sobre cualquier colección y documento
+    match /{document=**} {
+      allow read, write: if isSuperAdmin();
+    }
+
+    // 2. Colección de Usuarios / Inversionistas
+    // SuperAdmin: control total. Inversionista: solo ve y consulta su propio perfil
+    match /users/{userId} {
+      allow read: if isSuperAdmin() || isOwner(userId);
+      // Inversionista solo puede actualizar campos de contacto personales no sensibles
+      allow update: if isAuthenticated() && (request.auth.uid == userId || (resource != null && resource.data.uid == request.auth.uid))
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'currentCapital', 'baseCapital', 'userPercentage', 'adminPercentage', 'status', 'category']);
+      allow create, delete: if isSuperAdmin();
+    }
+
+    // 3. Postulaciones / Aspirantes a Inversionistas (Cola FIFO)
+    // Cualquier persona puede postularse desde la web pública (create)
+    // El postulante autenticado puede consultar su estado; SuperAdmin gestiona todo
+    match /applications/{appId} {
+      allow create: if true;
+      allow read: if isSuperAdmin() || (isAuthenticated() && resource.data.email == request.auth.token.email);
+      allow update, delete: if isSuperAdmin();
+    }
+    match /investorApplications/{appId} {
+      allow create: if true;
+      allow read: if isSuperAdmin() || (isAuthenticated() && resource.data.email == request.auth.token.email);
+      allow update, delete: if isSuperAdmin();
+    }
+
+    // 4. Resultados y Liquidaciones de Ciclo Individuales
+    // Cada inversionista consulta exclusivamente su liquidación individual
+    match /cycleUserResults/{resultId} {
+      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
+      allow write: if isSuperAdmin();
+    }
+
+    // 5. Ciclos Mensuales (Lectura de ciclos para ver TRM y estado activo)
+    match /monthlyCycles/{cycleId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    // 6. Solicitudes de Reinversión de Ganancias
+    // El inversionista puede crear su solicitud y ver su historial
+    match /reinvestments/{reqId} {
+      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
+      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || request.resource.data.userUid == request.auth.uid);
+      allow update, delete: if isSuperAdmin();
+    }
+    match /reinvestmentRequests/{reqId} {
+      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
+      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || request.resource.data.userUid == request.auth.uid);
+      allow update, delete: if isSuperAdmin();
+    }
+
+    // 7. Solicitudes de Desembolso / Retiro de Fondos
+    match /disbursements/{reqId} {
+      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
+      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || request.resource.data.userUid == request.auth.uid);
+      allow update, delete: if isSuperAdmin();
+    }
+
+    // 8. Solicitudes de Aportes / Nuevas Inversiones
+    match /investments/{invId} {
+      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
+      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || request.resource.data.userUid == request.auth.uid);
+      allow update, delete: if isSuperAdmin();
+    }
+
+    // 9. Notificaciones Personales
+    match /notifications/{notifId} {
+      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
+      allow update: if isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt']);
+      allow write: if isSuperAdmin();
+    }
+
+    // 10. Configuración General del Sistema (TRM oficial, categorías)
+    match /settings/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    // 11. Bitácoras y Operaciones Diarias de Trading (Exclusivo SuperAdmin)
+    match /dailyOperations/{docId} {
+      allow read, write: if isSuperAdmin();
+    }
+    match /bitacoras/{docId} {
+      allow read, write: if isSuperAdmin();
+    }
+    match /cycleGroupCalculations/{groupId} {
+      allow read, write: if isSuperAdmin();
+    }
+
+    // 12. Auditoría y Trazabilidad (Exclusivo SuperAdmin)
+    match /auditLogs/{logId} {
+      allow read, write: if isSuperAdmin();
+    }
+  }
+}
+

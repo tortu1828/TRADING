@@ -1,0 +1,6 @@
+{
+  "name": "EasyTraders - Plataforma de Gestión y Cierre Mensual",
+  "description": "Plataforma Integral de Gestión Financiera, Liquidación de Ciclos Operativos y Control de Inversionistas por Bitácoras de Capital.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
