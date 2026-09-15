@@ -5,3 +5,12 @@ runConfig:
   concurrency: 80
   cpu: 1
   memoryMiB: 512
+
+scripts:
+  runCommand: node server.cjs
+
+outputFiles:
+  serverApp:
+    include:
+      - dist
+      - server.cjs
