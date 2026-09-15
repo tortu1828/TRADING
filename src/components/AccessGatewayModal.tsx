@@ -20,8 +20,10 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { dataStore } from '../lib/dataStore';
+import { firestoreService } from '../lib/firestoreService';
 import { UserProfile } from '../types';
 import { getCategoryForCapital } from '../lib/financialEngine';
+import { getAppBaseUrl } from '../lib/constants';
 
 interface AccessGatewayModalProps {
   isOpen: boolean;
@@ -45,6 +47,7 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
   // Tab 2: Claim / Activación
   const [claimIdentifier, setClaimIdentifier] = useState('');
   const [foundUser, setFoundUser] = useState<UserProfile | null>(null);
+  const [claimActivationToken, setClaimActivationToken] = useState('');
   const [claimEmail, setClaimEmail] = useState('');
   const [claimPassword, setClaimPassword] = useState('');
   const [claimConfirmPassword, setClaimConfirmPassword] = useState('');
@@ -57,7 +60,7 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
   const [applyPhone, setApplyPhone] = useState('');
   const [applyEmail, setApplyEmail] = useState('');
   const [applyCity, setApplyCity] = useState('Medellín');
-  const [applyCapital, setApplyCapital] = useState(8_000_000);
+  const [applyCapitalStr, setApplyCapitalStr] = useState('8.000.000');
   const [applyBank, setApplyBank] = useState('Bancolombia');
   const [applyNotes, setApplyNotes] = useState('');
   const [applySuccessTurn, setApplySuccessTurn] = useState<number | null>(null);
@@ -69,7 +72,7 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
   if (!isOpen) return null;
 
   // Manejar Login
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
     if (!loginIdentifier.trim()) {
@@ -77,7 +80,7 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
       return;
     }
 
-    const res = loginWithCredentials(loginIdentifier, loginPassword);
+    const res = await loginWithCredentials(loginIdentifier, loginPassword);
     if (res.success) {
       onClose();
     } else {
@@ -86,7 +89,7 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
   };
 
   // Buscar cuenta para vincular (Paso 1 del Claim)
-  const handleSearchAccountToClaim = () => {
+  const handleSearchAccountToClaim = async () => {
     setClaimError(null);
     setFoundUser(null);
     if (!claimIdentifier.trim()) {
@@ -95,12 +98,23 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
     }
 
     const clean = claimIdentifier.trim().toUpperCase();
-    const user = dataStore.getUsers().find(
+    let user = dataStore.getUsers().find(
       (u) =>
         u.userCode.toUpperCase() === clean ||
         (u.documentId && u.documentId.trim() === claimIdentifier.trim()) ||
         (u.email && u.email.trim().toLowerCase() === claimIdentifier.trim().toLowerCase())
     );
+
+    if (!user) {
+      try {
+        const remoteUser = await firestoreService.findUserByCodeOrDoc(claimIdentifier);
+        if (remoteUser) {
+          user = remoteUser;
+        }
+      } catch (err) {
+        console.warn('Error en búsqueda remota Firestore:', err);
+      }
+    }
 
     if (!user) {
       setClaimError('No se encontró ningún inversionista registrado con ese código o cédula.');
@@ -112,10 +126,15 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
   };
 
   // Confirmar activación (Paso 2 del Claim)
-  const handleConfirmClaim = (e: React.FormEvent) => {
+  const handleConfirmClaim = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!foundUser) return;
     setClaimError(null);
+
+    if (!claimActivationToken.trim()) {
+      setClaimError('Por favor ingresa el token de activación seguro suministrado por administración.');
+      return;
+    }
 
     if (!claimEmail.trim() || !claimEmail.includes('@')) {
       setClaimError('Por favor ingresa un correo electrónico válido.');
@@ -127,7 +146,13 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
       return;
     }
 
-    const res = claimAccount(foundUser.userCode, claimEmail, claimPassword);
+    const tokenToSubmit = claimActivationToken.trim();
+    // Limpieza inmediata de memoria del token y contraseñas
+    setClaimActivationToken('');
+    setClaimPassword('');
+    setClaimConfirmPassword('');
+
+    const res = await claimAccount(foundUser.userCode, tokenToSubmit, claimEmail, claimPassword);
     if (res.success) {
       setClaimSuccess(true);
       setTimeout(() => {
@@ -138,8 +163,8 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
     }
   };
 
-  // Manejar envío de postulación de nuevo usuario
-  const handleApplySubmit = (e: React.FormEvent) => {
+  // Manejar envío de postulación de nuevo usuario (Server-Side Callable)
+  const handleApplySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setApplyError(null);
 
@@ -148,20 +173,29 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
       return;
     }
 
+    const numericCapital = parseInt(applyCapitalStr.replace(/[^0-9]/g, ''), 10) || 0;
+    if (numericCapital < 1_000_000) {
+      setApplyError('El capital mínimo de postulación es de $1.000.000 COP.');
+      return;
+    }
+
     try {
-      const newApp = dataStore.createApplication({
-        fullName: applyName,
-        documentId: applyDoc,
-        email: applyEmail,
-        phone: applyPhone,
-        city: applyCity,
-        requestedCapitalCop: applyCapital,
-        originBank: applyBank,
+      const result = await firestoreService.submitApplicationCallable({
+        fullName: applyName.trim(),
+        documentId: applyDoc.trim(),
+        email: applyEmail.trim().toLowerCase(),
+        phone: applyPhone.trim(),
+        city: applyCity.trim(),
+        requestedCapitalCop: numericCapital,
+        originBank: applyBank.trim(),
         priorityNotes: applyNotes || 'Postulación radicada desde formulario público web',
-        source: 'WEB_FORM',
       });
 
-      setApplySuccessTurn(newApp.queuePosition);
+      if (result.success) {
+        setApplySuccessTurn(result.queuePosition);
+      } else {
+        setApplyError('No se pudo radicar la solicitud.');
+      }
     } catch (err: any) {
       setApplyError(err.message || 'Error al enviar la solicitud.');
     }
@@ -169,7 +203,7 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
 
   // Copiar link de postulación para compartir
   const handleCopyPublicLink = () => {
-    const originUrl = typeof window !== 'undefined' ? window.location.origin : 'https://easytraders.app';
+    const originUrl = getAppBaseUrl();
     const textToCopy = `📈 *Postulación a EasyTraders Fondo de Inversión*\nIngresa al siguiente enlace para solicitar tu ingreso por orden de llegada:\n${originUrl}`;
     navigator.clipboard.writeText(textToCopy);
     setCopiedLink(true);
@@ -282,7 +316,7 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
                   required
                   value={loginIdentifier}
                   onChange={(e) => setLoginIdentifier(e.target.value)}
-                  placeholder="ej. USR-8F29K o admin@easytraders.com"
+                  placeholder="ej. USR-8F29K o admin@easytraders24.app"
                   className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500 font-mono text-sm"
                 />
               </div>
@@ -421,6 +455,23 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
                       <p className="font-bold text-blue-400">Categoría {foundUser.category}</p>
                     </div>
                   </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-slate-300 font-semibold">
+                      Token de Activación Seguro <span className="text-amber-400">*</span>
+                    </label>
+                    <span className="text-[10px] text-amber-400 font-mono">Entregado por Admin</span>
+                  </div>
+                  <input
+                    type="text"
+                    required
+                    value={claimActivationToken}
+                    onChange={(e) => setClaimActivationToken(e.target.value)}
+                    placeholder="Pega aquí tu token alfanumérico generado por administración"
+                    className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 font-mono text-sm focus:outline-none focus:border-amber-500"
+                  />
                 </div>
 
                 <div>
@@ -592,16 +643,30 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">Capital Propuesto (COP) *</label>
-                    <input
-                      type="number"
-                      required
-                      step="1000000"
-                      value={applyCapital}
-                      onChange={(e) => setApplyCapital(Number(e.target.value))}
-                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 font-mono focus:outline-none focus:border-blue-500"
-                    />
+                    <div className="relative">
+                      <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-amber-400 font-bold text-xs">
+                        $
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        required
+                        value={applyCapitalStr}
+                        onChange={(e) => {
+                          const raw = e.target.value.replace(/[^0-9]/g, '');
+                          if (!raw) {
+                            setApplyCapitalStr('');
+                            return;
+                          }
+                          const num = parseInt(raw, 10);
+                          setApplyCapitalStr(num.toLocaleString('es-CO'));
+                        }}
+                        placeholder="Ej: 8.000.000"
+                        className="w-full pl-6 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 font-mono focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
                     <span className="text-[10px] text-slate-500 mt-0.5 block">
-                      Bitácora sugerida: {getCategoryForCapital(applyCapital)}
+                      Bitácora sugerida: {getCategoryForCapital(parseInt(applyCapitalStr.replace(/[^0-9]/g, ''), 10) || 0)}
                     </span>
                   </div>
                   <div>
@@ -636,7 +701,7 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
                     type="submit"
                     className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold transition shadow-lg shadow-blue-900/40 cursor-pointer"
                   >
-                    Radicar Postulación en Admisión Normal
+                    Radicar Postulación en Admisión
                   </button>
 
                   <button

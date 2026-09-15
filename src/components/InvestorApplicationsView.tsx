@@ -26,9 +26,13 @@ import {
   ShieldCheck,
   UserCheck,
   Check,
+  Link,
+  Trash2,
+  RotateCcw,
 } from 'lucide-react';
 import { InvestorApplication, BitacoraCategory, UserProfile } from '../types';
 import { dataStore } from '../lib/dataStore';
+import { getAppBaseUrl } from '../lib/constants';
 import { useAuth } from '../context/AuthContext';
 import { getCategoryForCapital } from '../lib/financialEngine';
 import {
@@ -55,6 +59,10 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
   const [showManualModal, setShowManualModal] = useState(false);
   const [approvingApp, setApprovingApp] = useState<InvestorApplication | null>(null);
   const [rejectingApp, setRejectingApp] = useState<InvestorApplication | null>(null);
+  const [deletingApp, setDeletingApp] = useState<InvestorApplication | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteSuccessMsg, setDeleteSuccessMsg] = useState<string | null>(null);
+  const [showRenumberModal, setShowRenumberModal] = useState(false);
   const [rejectionReason, setRejectionReason] = useState('');
   const [generatedWelcomeModal, setGeneratedWelcomeModal] = useState<{
     app: InvestorApplication;
@@ -63,7 +71,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
   } | null>(null);
 
   // Estados para Modal de Aprobación
-  const [approvalCapital, setApprovalCapital] = useState<number>(8_000_000);
+  const [approvalCapitalStr, setApprovalCapitalStr] = useState<string>('8.000.000');
   const [approvalCategory, setApprovalCategory] = useState<BitacoraCategory>('AZUL');
   const [approvalCode, setApprovalCode] = useState<string>('');
   const [approvalBank, setApprovalBank] = useState<string>('Bancolombia');
@@ -77,6 +85,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
   const [importLoading, setImportLoading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccessCount, setImportSuccessCount] = useState<number | null>(null);
+  const [replaceQueueOnImport, setReplaceQueueOnImport] = useState(false);
 
   // Estado para creación manual
   const [manualName, setManualName] = useState('');
@@ -84,13 +93,14 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
   const [manualEmail, setManualEmail] = useState('');
   const [manualPhone, setManualPhone] = useState('');
   const [manualCity, setManualCity] = useState('Medellín');
-  const [manualCapital, setManualCapital] = useState(8_000_000);
+  const [manualCapitalStr, setManualCapitalStr] = useState('8.000.000');
   const [manualBank, setManualBank] = useState('Bancolombia');
   const [manualNotes, setManualNotes] = useState('');
   const [manualError, setManualError] = useState<string | null>(null);
 
   // Copiado al portapapeles
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedApplyLink, setCopiedApplyLink] = useState(false);
 
   // Suscripción al dataStore
   React.useEffect(() => {
@@ -139,7 +149,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
   const handleOpenApprove = (app: InvestorApplication) => {
     setApprovingApp(app);
     const capital = app.requestedCapitalCop || 8_000_000;
-    setApprovalCapital(capital);
+    setApprovalCapitalStr(capital.toLocaleString('es-CO'));
     const cat = getCategoryForCapital(capital);
     setApprovalCategory(cat);
     // Sugerir código
@@ -164,12 +174,18 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
     if (!approvingApp) return;
     try {
       setApprovalError(null);
+      const numCapital = parseInt(approvalCapitalStr.replace(/[^0-9]/g, ''), 10) || 0;
+      if (numCapital < 1_000_000) {
+        setApprovalError('Ingresa un capital válido (mínimo $1.000.000 COP).');
+        return;
+      }
+
       const res = dataStore.approveApplication(
         approvingApp.id,
         {
           userCode: approvalCode.trim().toUpperCase(),
           category: approvalCategory,
-          finalCapitalCop: approvalCapital,
+          finalCapitalCop: numCapital,
           paymentMethod: approvalBank,
           paymentDetails: approvalPaymentDetails,
         },
@@ -202,7 +218,27 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
       setRejectingApp(null);
       setRejectionReason('');
     } catch (err: any) {
-      alert(err.message || 'Error al rechazar');
+      console.error(err.message || 'Error al rechazar');
+    }
+  };
+
+  // Confirmar Eliminación definitiva en local y base de datos Firestore
+  const handleConfirmDelete = async () => {
+    if (!deletingApp) return;
+    setIsDeleting(true);
+    try {
+      await dataStore.deleteApplication(
+        deletingApp.id,
+        currentUser?.id || 'admin_root_uid',
+        currentUser?.fullName || 'Administrador Principal'
+      );
+      setDeleteSuccessMsg(`La postulación de "${deletingApp.fullName}" fue eliminada de la base de datos.`);
+      setTimeout(() => setDeleteSuccessMsg(null), 4500);
+      setDeletingApp(null);
+    } catch (err: any) {
+      console.error('Error al eliminar postulación:', err);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -258,7 +294,8 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
       const res = dataStore.importApplicationsFromExcel(
         parsedPreviewRows,
         currentUser?.id || 'admin_root_uid',
-        currentUser?.fullName || 'Administrador Principal'
+        currentUser?.fullName || 'Administrador Principal',
+        replaceQueueOnImport
       );
       setImportSuccessCount(res.importedCount);
       setParsedPreviewRows([]);
@@ -279,6 +316,11 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
       setManualError('El nombre completo y teléfono son obligatorios.');
       return;
     }
+    const numCapital = parseInt(manualCapitalStr.replace(/[^0-9]/g, ''), 10) || 0;
+    if (numCapital < 1_000_000) {
+      setManualError('Ingresa un capital propuesto válido (mínimo $1.000.000 COP).');
+      return;
+    }
     try {
       setManualError(null);
       dataStore.createApplication({
@@ -287,7 +329,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
         email: manualEmail,
         phone: manualPhone,
         city: manualCity,
-        requestedCapitalCop: manualCapital,
+        requestedCapitalCop: numCapital,
         originBank: manualBank,
         priorityNotes: manualNotes || 'Registrada manualmente por administración',
         source: 'DIRECT_ADMIN',
@@ -299,7 +341,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
       setManualEmail('');
       setManualPhone('');
       setManualCity('Medellín');
-      setManualCapital(8_000_000);
+      setManualCapitalStr('8.000.000');
       setManualBank('Bancolombia');
       setManualNotes('');
     } catch (err: any) {
@@ -309,6 +351,22 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
 
   return (
     <div className="space-y-6 pb-12 animate-in fade-in duration-200">
+      {/* Alerta de confirmación de eliminación en base de datos */}
+      {deleteSuccessMsg && (
+        <div className="flex items-center justify-between p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-500/40 text-emerald-200 text-xs shadow-lg animate-in fade-in duration-200">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="font-medium">{deleteSuccessMsg}</span>
+          </div>
+          <button
+            onClick={() => setDeleteSuccessMsg(null)}
+            className="text-emerald-400 hover:text-emerald-200 p-1 rounded-lg hover:bg-emerald-900/50 cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* 1. Header & Quick Stats */}
       <div className="bg-gradient-to-br from-slate-900 via-[#0d1527] to-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-xl relative overflow-hidden">
         <div className="absolute top-0 right-0 w-80 h-80 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
@@ -332,6 +390,33 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
           {/* Action Buttons */}
           <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 w-full lg:w-auto">
             <button
+              onClick={() => {
+                const url = `${window.location.origin}/?mode=apply`;
+                navigator.clipboard.writeText(url);
+                setCopiedApplyLink(true);
+                setTimeout(() => setCopiedApplyLink(false), 3000);
+              }}
+              className={`flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                copiedApplyLink
+                  ? 'bg-blue-950 border-blue-500 text-blue-300'
+                  : 'bg-slate-900 hover:bg-slate-800 border-slate-700 hover:border-blue-500/50 text-slate-200'
+              }`}
+              title="Copiar link público para compartir el Formulario de Admisión"
+            >
+              {copiedApplyLink ? (
+                <>
+                  <Check className="w-4 h-4 text-blue-400" />
+                  <span>¡Link Copiado!</span>
+                </>
+              ) : (
+                <>
+                  <Link className="w-4 h-4 text-blue-400" />
+                  <span>Link Admisión</span>
+                </>
+              )}
+            </button>
+
+            <button
               onClick={() => setShowImportModal(true)}
               className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-blue-700 to-indigo-700 hover:from-blue-600 hover:to-indigo-600 text-white text-xs font-semibold shadow-md shadow-blue-900/30 transition cursor-pointer"
             >
@@ -345,6 +430,15 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
             >
               <Plus className="w-4 h-4" />
               <span>Radicar Solicitud</span>
+            </button>
+
+            <button
+              onClick={() => setShowRenumberModal(true)}
+              className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer"
+              title="Renumerar turnos pendientes en orden secuencial limpio (1, 2, 3...)"
+            >
+              <RotateCcw className="w-4 h-4 text-blue-400" />
+              <span className="hidden sm:inline">Renumerar Turnos</span>
             </button>
 
             <button
@@ -725,7 +819,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                       {/* Acciones */}
                       <td className="py-3 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          {app.status === 'PENDING' ? (
+                          {app.status === 'PENDING' && (
                             <>
                               <button
                                 onClick={() => handleOpenApprove(app)}
@@ -744,7 +838,9 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                                 <XCircle className="w-3.5 h-3.5" />
                               </button>
                             </>
-                          ) : app.status === 'APPROVED' ? (
+                          )}
+
+                          {app.status === 'APPROVED' && (
                             <div className="flex items-center gap-1">
                               {app.assignedUserId && onNavigateToUser && (
                                 <button
@@ -756,8 +852,8 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                               )}
                               <button
                                 onClick={() => {
-                                  const originUrl = typeof window !== 'undefined' ? window.location.origin : 'https://easytraders.app';
-                                  const msg = `👋 ¡Hola *${app.fullName}*! Te confirmamos que tu cuenta como Inversionista en *EasyTraders* está lista.\n\n🔑 *Código:* *${app.assignedUserCode}*\n💼 *Capital:* $${app.requestedCapitalCop.toLocaleString('es-CO')} COP\n📲 *Acceso:* ${originUrl}\n\nIngresa a *"Activar Cuenta"* con tu código para definir tu clave.`;
+                                  const originUrl = getAppBaseUrl();
+                                  const msg = `👋 ¡Hola *${app.fullName}*! Te confirmamos que tu cuenta como Inversionista en *EasyTraders24* está lista.\n\n🔑 *Código:* *${app.assignedUserCode}*\n💼 *Capital:* $${app.requestedCapitalCop.toLocaleString('es-CO')} COP\n📲 *Acceso:* ${originUrl}\n\nIngresa a *"Activar Cuenta"* con tu código para definir tu clave.`;
                                   handleCopyText(msg, `copy_approved_${app.id}`);
                                 }}
                                 className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold transition cursor-pointer"
@@ -776,9 +872,20 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                                 )}
                               </button>
                             </div>
-                          ) : (
-                            <span className="text-[11px] text-slate-500 italic">Cerrada</span>
                           )}
+
+                          {app.status === 'REJECTED' && (
+                            <span className="text-[11px] text-slate-500 italic mr-1">Rechazada</span>
+                          )}
+
+                          {/* Botón de eliminación definitiva en base de datos para cualquier postulación */}
+                          <button
+                            onClick={() => setDeletingApp(app)}
+                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-950/80 text-slate-400 hover:text-red-400 border border-slate-700 hover:border-red-500/40 transition cursor-pointer"
+                            title="Eliminar postulación de la base de datos"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -865,17 +972,28 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                   <label className="block text-slate-300 font-semibold mb-1">
                     Capital Acreditado (COP) <span className="text-amber-400">*</span>
                   </label>
-                  <input
-                    type="number"
-                    value={approvalCapital}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setApprovalCapital(val);
-                      setApprovalCategory(getCategoryForCapital(val));
-                    }}
-                    step="1000000"
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-                  />
+                  <div className="relative">
+                    <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-amber-400 font-bold text-xs">
+                      $
+                    </span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={approvalCapitalStr}
+                      onChange={(e) => {
+                        const raw = e.target.value.replace(/[^0-9]/g, '');
+                        if (!raw) {
+                          setApprovalCapitalStr('');
+                          return;
+                        }
+                        const val = parseInt(raw, 10);
+                        setApprovalCapitalStr(val.toLocaleString('es-CO'));
+                        setApprovalCategory(getCategoryForCapital(val));
+                      }}
+                      placeholder="Ej: 8.000.000"
+                      className="w-full pl-6 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-sm text-slate-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
                 </div>
 
                 <div>
@@ -887,7 +1005,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                   >
                     <option value="AZUL">🔵 Azul ($7M - $9.9M)</option>
                     <option value="VERDE">🟢 Verde ($10M - $49.9M)</option>
-                    <option value="NEGRA">⚫ Negra ($50M+ Whale)</option>
+                    <option value="NEGRA">⚫ Bitácora Negra (&gt; $60M)</option>
                   </select>
                 </div>
               </div>
@@ -1167,6 +1285,27 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
               </div>
             )}
 
+            {/* Opción de Reemplazo para lista vieja */}
+            {parsedPreviewRows.length > 0 && (
+              <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-800 flex items-start gap-2.5">
+                <input
+                  type="checkbox"
+                  id="replaceQueueCheck"
+                  checked={replaceQueueOnImport}
+                  onChange={(e) => setReplaceQueueOnImport(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-amber-500 cursor-pointer"
+                />
+                <label htmlFor="replaceQueueCheck" className="text-xs text-slate-300 cursor-pointer">
+                  <span className="font-semibold text-amber-300 block">
+                    Reemplazar cola previa con esta lista de Excel (Recomendado para importar lista vieja)
+                  </span>
+                  <span className="text-slate-400 text-[11px] block mt-0.5">
+                    Garantiza que los turnos (#1, #2, #3...) coincidan exactamente y en orden con el archivo importado, limpiando registros de prueba previos.
+                  </span>
+                </label>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
               <button
                 type="button"
@@ -1189,7 +1328,8 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                     : 'bg-slate-800 text-slate-500 cursor-not-allowed'
                 }`}
               >
-                Confirmar e Incorporar {parsedPreviewRows.length} a la Cola
+                {replaceQueueOnImport ? 'Reemplazar y Cargar ' : 'Confirmar e Incorporar '}
+                {parsedPreviewRows.length} a la Cola
               </button>
             </div>
           </div>
@@ -1298,14 +1438,28 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-slate-300 font-semibold mb-1">Capital Propuesto (COP) *</label>
-                  <input
-                    type="number"
-                    required
-                    step="500000"
-                    value={manualCapital}
-                    onChange={(e) => setManualCapital(Number(e.target.value))}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-slate-100 focus:outline-none focus:border-amber-500"
-                  />
+                  <div className="relative">
+                    <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-amber-400 font-bold text-xs">
+                      $
+                    </span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      required
+                      value={manualCapitalStr}
+                      onChange={(e) => {
+                        const raw = e.target.value.replace(/[^0-9]/g, '');
+                        if (!raw) {
+                          setManualCapitalStr('');
+                          return;
+                        }
+                        const num = parseInt(raw, 10);
+                        setManualCapitalStr(num.toLocaleString('es-CO'));
+                      }}
+                      placeholder="Ej: 8.000.000"
+                      className="w-full pl-6 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-slate-100 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
                 </div>
 
                 <div>
@@ -1404,6 +1558,136 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                 className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold shadow-md shadow-red-900/30 cursor-pointer"
               >
                 Confirmar Rechazo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmación de Eliminación Definitiva */}
+      {deletingApp && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-red-500/50 rounded-2xl p-5 sm:p-6 w-full max-w-md shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5 text-red-400">
+                <div className="p-2 rounded-xl bg-red-500/10 border border-red-500/30">
+                  <Trash2 className="w-5 h-5 text-red-400" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-100">Eliminar Solicitud</h3>
+                  <p className="text-[11px] text-slate-400">Esta acción es permanente en la base de datos</p>
+                </div>
+              </div>
+              <button
+                onClick={() => !isDeleting && setDeletingApp(null)}
+                className="text-slate-400 hover:text-slate-200 text-sm p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Aspirante:</span>
+                <span className="font-bold text-slate-100">{deletingApp.fullName}</span>
+              </div>
+              {deletingApp.documentId && (
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400">Cédula:</span>
+                  <span className="font-mono text-slate-200">{deletingApp.documentId}</span>
+                </div>
+              )}
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Turno / Estado:</span>
+                <span className="font-mono font-bold text-amber-300">
+                  Turno #{deletingApp.queuePosition} ({deletingApp.status})
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Capital propuesto:</span>
+                <span className="font-mono font-bold text-emerald-400">
+                  ${deletingApp.requestedCapitalCop.toLocaleString('es-CO')} COP
+                </span>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-red-950/30 border border-red-500/30 flex items-start gap-2.5 text-xs text-red-300">
+              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+              <span>
+                La solicitud se eliminará tanto de la lista local como de la base de datos en la nube (Firestore), recalculando el turno de las demás solicitudes.
+              </span>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setDeletingApp(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={handleConfirmDelete}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 active:scale-95 text-white text-xs font-bold shadow-lg shadow-red-900/40 cursor-pointer transition disabled:opacity-50"
+              >
+                {isDeleting ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>Eliminando en base de datos...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Eliminar Definitivamente</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmación para Renumerar Turnos */}
+      {showRenumberModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-6 w-full max-w-md shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2 text-blue-400">
+                <RotateCcw className="w-5 h-5" />
+                <h3 className="text-base font-bold text-slate-100">Renumerar Turnos</h3>
+              </div>
+              <button
+                onClick={() => setShowRenumberModal(false)}
+                className="text-slate-400 hover:text-slate-200 text-sm p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              ¿Deseas renumerar consecutivamente todas las solicitudes en estado <span className="font-bold text-amber-300">Pendiente</span> (1, 2, 3...) y sincronizar los turnos en la base de datos Firestore?
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowRenumberModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  dataStore.renumberPendingQueue();
+                  setShowRenumberModal(false);
+                }}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-md shadow-blue-900/30 cursor-pointer"
+              >
+                Renumerar Turnos
               </button>
             </div>
           </div>

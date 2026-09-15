@@ -1,7 +1,8 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword, signOut as fbSignOut } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getAuth, setPersistence, browserLocalPersistence, createUserWithEmailAndPassword, signOut as fbSignOut, sendPasswordResetEmail } from 'firebase/auth';
+import { initializeFirestore, getFirestore, Firestore } from 'firebase/firestore';
 import { getAnalytics, isSupported } from 'firebase/analytics';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 
 export const firebaseConfig = {
   apiKey: "AIzaSyCuDd0HyWMlcUedTMAb3c4Sfjdb4qNkvIc",
@@ -16,7 +17,23 @@ export const firebaseConfig = {
 // Initialize Firebase App
 export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+
+// Initialize Firestore with long-polling to prevent stream 10s connection timeout in iframe and proxies
+let firestoreInstance: Firestore;
+try {
+  firestoreInstance = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+  });
+} catch {
+  firestoreInstance = getFirestore(app);
+}
+export const db = firestoreInstance;
+
+if (typeof window !== 'undefined') {
+  setPersistence(auth, browserLocalPersistence).catch((err) => {
+    console.warn('Firebase setPersistence warning:', err);
+  });
+}
 
 /**
  * Creates a new user in Firebase Auth without logging out the active Admin session
@@ -30,6 +47,36 @@ export async function createFirebaseAuthUser(email: string, pass: string): Promi
   return uid;
 }
 
+/**
+ * Sends a password reset email via Firebase Auth
+ */
+export async function sendFirebasePasswordReset(email: string): Promise<{ success: boolean; message: string }> {
+  try {
+    await sendPasswordResetEmail(auth, email.trim());
+    return {
+      success: true,
+      message: `Se ha enviado un enlace seguro de restablecimiento al correo: ${email.trim()}. Revisa tu bandeja de entrada o spam.`,
+    };
+  } catch (err: any) {
+    if (err?.code === 'auth/user-not-found') {
+      return {
+        success: false,
+        message: 'No existe ningún usuario registrado con este correo electrónico en Firebase.',
+      };
+    }
+    if (err?.code === 'auth/invalid-email') {
+      return {
+        success: false,
+        message: 'El correo electrónico ingresado no es válido.',
+      };
+    }
+    return {
+      success: false,
+      message: err?.message || 'Error al enviar el correo de restablecimiento.',
+    };
+  }
+}
+
 // Initialize Analytics conditionally
 export let analytics: any = null;
 if (typeof window !== 'undefined') {
@@ -41,5 +88,9 @@ if (typeof window !== 'undefined') {
     // Analytics optional fallback
   });
 }
+
+// Initialize Firebase Functions
+export const functions = getFunctions(app, 'us-central1');
+export { httpsCallable };
 
 export default app;

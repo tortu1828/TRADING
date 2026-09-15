@@ -27,19 +27,26 @@ import { useAuth } from '../context/AuthContext';
 interface ExcelBitacoraImportModalProps {
   isOpen: boolean;
   onClose: () => void;
+  cycle?: MonthlyCycle;
   defaultCategory?: BitacoraCategory;
   defaultCycleId?: string;
+  adminUid?: string;
+  adminName?: string;
   onSuccess?: () => void;
+  onImportSuccess?: () => void;
 }
 
 export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> = ({
   isOpen,
   onClose,
+  cycle,
   defaultCategory,
   defaultCycleId,
   onSuccess,
+  onImportSuccess,
 }) => {
-  const { user: currentAuthUser } = useAuth();
+  const { currentUser } = useAuth();
+  const currentAuthUser = currentUser;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [isDragging, setIsDragging] = useState<boolean>(false);
@@ -54,7 +61,7 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
   const cycles = dataStore.getCycles();
   const activeCycle = dataStore.getActiveCycle();
   const [selectedCycleId, setSelectedCycleId] = useState<string>(
-    defaultCycleId || activeCycle.cycleId
+    cycle?.cycleId || defaultCycleId || activeCycle.cycleId
   );
 
   const [autoCreateUsers, setAutoCreateUsers] = useState<boolean>(true);
@@ -235,9 +242,9 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
               >
                 <option value="ALL">Auto-clasificar por Capital (Azul, Verde, Negra)</option>
-                <option value="AZUL">Forzar a Bitácora Azul ($1M - $9.9M COP)</option>
-                <option value="VERDE">Forzar a Bitácora Verde ($10M - $49.9M COP)</option>
-                <option value="NEGRA">Forzar a Bitácora Negra ($50M+ COP)</option>
+                <option value="AZUL">Forzar a Bitácora Azul ($4M - $9M COP)</option>
+                <option value="VERDE">Forzar a Bitácora Verde ($10M - $50M COP)</option>
+                <option value="NEGRA">Forzar a Bitácora Negra (&gt; $60M COP)</option>
               </select>
             </div>
 

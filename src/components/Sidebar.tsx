@@ -11,6 +11,7 @@ import {
   Shield,
   Settings,
   ChevronRight,
+  ChevronLeft,
   User,
   ArrowLeftRight,
   Sparkles,
@@ -20,6 +21,7 @@ import {
   Wallet,
   UserCheck,
   LogOut,
+  BarChart3,
 } from 'lucide-react';
 import { EasyTradersLogo } from './EasyTradersLogo';
 import { useAuth } from '../context/AuthContext';
@@ -30,9 +32,10 @@ interface SidebarProps {
   setActiveTab: (tab: string) => void;
   onOpenNotifications?: () => void;
   onOpenSettings?: () => void;
-  onOpenReports?: () => void;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
+  isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -40,15 +43,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
   setActiveTab,
   onOpenNotifications,
   onOpenSettings,
-  onOpenReports,
   isOpenMobile = false,
   onCloseMobile,
+  isCollapsed = false,
+  onToggleCollapse,
 }) => {
-  const { currentUser, isSuperAdmin, switchToAdmin, switchUser, allUsers, logout } = useAuth();
+  const { currentUser, isSuperAdmin, logout } = useAuth();
   const [showSwitchMenu, setShowSwitchMenu] = React.useState(false);
 
-  const notifications = isSuperAdmin
-    ? dataStore.getAllNotifications()
+  const isAdminUser = isSuperAdmin || currentUser?.role === 'ADMIN';
+  const notifications = isAdminUser
+    ? dataStore.getAdminNotifications()
     : currentUser
     ? dataStore.getNotificationsForUser(currentUser.id)
     : [];
@@ -64,10 +69,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
       if (onOpenSettings) onOpenSettings();
       return;
     }
-    if (tabKey === 'reports') {
-      if (onOpenReports) onOpenReports();
-      return;
-    }
 
     setActiveTab(tabKey);
     if (onCloseMobile) onCloseMobile();
@@ -79,46 +80,74 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {isOpenMobile && (
         <div
           onClick={onCloseMobile}
-          className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm lg:hidden transition-opacity"
+          onTouchStart={onCloseMobile}
+          className="fixed inset-0 z-40 bg-black/80 backdrop-blur-sm lg:hidden transition-opacity cursor-pointer"
         />
       )}
 
       <aside
         className={`
-          fixed inset-y-0 left-0 z-50 w-64 bg-[#070b13] border-r border-slate-800/80
-          flex flex-col justify-between transition-transform duration-300 ease-in-out
-          ${isOpenMobile ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'}
+          fixed inset-y-0 left-0 z-[60] bg-[#070b13] border-r border-slate-800/80
+          flex flex-col justify-between transition-all duration-300 ease-in-out
+          ${
+            isOpenMobile
+              ? 'w-64 max-w-[85vw] translate-x-0 shadow-2xl shadow-amber-500/15'
+              : isCollapsed
+              ? 'w-20 -translate-x-full lg:translate-x-0'
+              : 'w-64 -translate-x-full lg:translate-x-0'
+          }
         `}
       >
         {/* Top Branding Header */}
-        <div className="px-5 pt-5 pb-4 border-b border-slate-800/60 flex items-center justify-between">
-          <EasyTradersLogo variant={isSuperAdmin ? 'admin' : 'portal'} />
-          {isOpenMobile && (
-            <button
-              onClick={onCloseMobile}
-              className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/60"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          )}
+        <div className={`pt-4 pb-3.5 border-b border-slate-800/70 flex items-center ${isCollapsed ? 'px-2 justify-center flex-col gap-2' : 'px-4 justify-between'}`}>
+          <EasyTradersLogo variant={isSuperAdmin ? 'admin' : 'portal'} collapsed={isCollapsed} size={isCollapsed ? 'sm' : 'md'} />
+          
+          <div className="flex items-center gap-1">
+            {/* Desktop Collapse / Expand toggle button */}
+            {onToggleCollapse && (
+              <button
+                type="button"
+                onClick={onToggleCollapse}
+                className="hidden lg:flex p-1.5 rounded-xl bg-slate-900/80 border border-slate-800 text-slate-400 hover:text-amber-300 hover:border-amber-500/40 hover:bg-slate-800 transition cursor-pointer"
+                title={isCollapsed ? "Expandir menú lateral" : "Colapsar menú lateral"}
+                aria-label={isCollapsed ? "Expandir menú lateral" : "Colapsar menú lateral"}
+              >
+                {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+              </button>
+            )}
+
+            {/* Mobile Close Button */}
+            {isOpenMobile && (
+              <button
+                onClick={onCloseMobile}
+                className="lg:hidden min-w-[36px] min-h-[36px] flex items-center justify-center rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white active:scale-95 transition cursor-pointer"
+                aria-label="Cerrar Menú"
+              >
+                <X className="w-4 h-4 text-amber-400" />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Navigation List matching exact order and design from uploaded image */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-3.5 py-4 space-y-1.5 custom-scrollbar overscroll-contain touch-pan-y">
+        <div className={`flex-1 min-h-0 overflow-y-auto py-3 space-y-1.5 custom-scrollbar overscroll-contain touch-pan-y ${isCollapsed ? 'px-2' : 'px-3'}`}>
           {isSuperAdmin ? (
             /* ================= ADMIN NAVIGATION ================= */
             <>
-              {/* 1. Cierre Mensual (Active highlighted gold in screenshot) */}
+              {/* 1. Cierre Mensual */}
               <button
                 onClick={() => handleNavClick('monthly_closure')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
+                title="Cierre Mensual"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
                   activeTab === 'monthly_closure'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg shadow-amber-950/40'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
                 <div
-                  className={`w-6 h-6 rounded-lg flex items-center justify-center ${
+                  className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${
                     activeTab === 'monthly_closure'
                       ? 'text-amber-400 bg-amber-500/20 border border-amber-500/40'
                       : 'text-slate-400'
@@ -126,153 +155,202 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 >
                   <Table2 className="w-4 h-4" />
                 </div>
-                <span className="flex-1 tracking-wide">Cierre Mensual</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Cierre Mensual</span>}
               </button>
 
               {/* 2. Dashboard */}
               <button
                 onClick={() => handleNavClick('dashboard')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
+                title="Dashboard"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
                   activeTab === 'dashboard'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="w-6 h-6 flex items-center justify-center text-slate-400">
+                <div className="w-6 h-6 flex items-center justify-center text-slate-400 shrink-0">
                   <Home className="w-4 h-4" />
                 </div>
-                <span>Dashboard</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Dashboard</span>}
               </button>
 
               {/* 3. Usuarios */}
               <button
                 onClick={() => handleNavClick('users')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
+                title="Usuarios"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
                   activeTab === 'users'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="w-6 h-6 flex items-center justify-center text-slate-400">
+                <div className="w-6 h-6 flex items-center justify-center text-slate-400 shrink-0">
                   <Users className="w-4 h-4" />
                 </div>
-                <span>Usuarios</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Usuarios</span>}
               </button>
 
               {/* 3.1 Admisiones FIFO (Cola de Solicitudes) */}
               <button
                 onClick={() => handleNavClick('applications')}
-                className={`w-full flex items-center justify-between px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
+                title="Admisiones"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'justify-between px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
                   activeTab === 'applications'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="flex items-center gap-3.5">
-                  <div className="w-6 h-6 flex items-center justify-center text-amber-400">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-6 h-6 flex items-center justify-center text-amber-400 shrink-0">
                     <UserCheck className="w-4 h-4" />
                   </div>
-                  <span>Admisiones Normal</span>
+                  {!isCollapsed && <span className="tracking-wide truncate">Admisiones</span>}
                 </div>
                 {pendingAppsCount > 0 && (
-                  <span className="bg-amber-500 text-slate-950 text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full shadow-sm shadow-amber-500/20">
-                    {pendingAppsCount}
-                  </span>
+                  isCollapsed ? (
+                    <span className="absolute top-1.5 right-1.5 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-[#070b13]" />
+                  ) : (
+                    <span className="bg-amber-500 text-slate-950 text-[10px] font-mono font-extrabold px-2 py-0.5 rounded-full shadow-sm shadow-amber-500/20">
+                      {pendingAppsCount}
+                    </span>
+                  )
                 )}
               </button>
 
               {/* 4. Bitácoras (with blue 'Nuevo' badge) */}
               <button
-                onClick={() => handleNavClick('monthly_closure')}
-                className="w-full flex items-center justify-between px-3.5 py-3 rounded-2xl text-sm font-semibold text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 transition text-left cursor-pointer border border-transparent"
+                onClick={() => handleNavClick('bitacoras')}
+                title="Bitácoras de Trading"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'justify-between px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
+                  activeTab === 'bitacoras'
+                    ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
+                }`}
               >
-                <div className="flex items-center gap-3.5">
-                  <div className="w-6 h-6 flex items-center justify-center text-slate-400">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className={`w-6 h-6 flex items-center justify-center shrink-0 ${
+                      activeTab === 'bitacoras' ? 'text-amber-400' : 'text-blue-400'
+                    }`}
+                  >
                     <SlidersHorizontal className="w-4 h-4" />
                   </div>
-                  <span>Bitácoras</span>
+                  {!isCollapsed && <span className="tracking-wide truncate">Bitácoras</span>}
                 </div>
-                <span className="bg-[#1c64ec] text-white text-[11px] font-bold px-2.5 py-0.5 rounded-full shadow-sm shadow-blue-600/30">
-                  Nuevo
-                </span>
+                {isCollapsed ? (
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-blue-500 ring-2 ring-[#070b13]" />
+                ) : (
+                  <span className="bg-[#1c64ec] text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-sm shadow-blue-600/30">
+                    Nuevo
+                  </span>
+                )}
               </button>
 
               {/* 5. Liquidaciones */}
               <button
                 onClick={() => handleNavClick('finance')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
+                title="Liquidaciones"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
                   activeTab === 'finance'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="w-6 h-6 flex items-center justify-center text-slate-400">
+                <div className="w-6 h-6 flex items-center justify-center text-slate-400 shrink-0">
                   <TrendingUp className="w-4 h-4" />
                 </div>
-                <span>Liquidaciones</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Liquidaciones</span>}
               </button>
 
               {/* 6. Reinversiones */}
               <button
                 onClick={() => handleNavClick('reinvestments')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
+                title="Reinversiones"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
                   activeTab === 'reinvestments'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="w-6 h-6 flex items-center justify-center text-slate-400">
+                <div className="w-6 h-6 flex items-center justify-center text-slate-400 shrink-0">
                   <RotateCcw className="w-4 h-4" />
                 </div>
-                <span>Reinversiones</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Reinversiones</span>}
               </button>
 
-              {/* 7. Reportes */}
+              {/* 6.1 Estadísticas */}
               <button
-                onClick={() => handleNavClick('reports')}
-                className="w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 transition text-left cursor-pointer border border-transparent"
-              >
-                <div className="w-6 h-6 flex items-center justify-center text-slate-400">
-                  <FileText className="w-4 h-4" />
-                </div>
-                <span>Reportes</span>
-              </button>
-
-              {/* 9. Auditoría */}
-              <button
-                onClick={() => handleNavClick('audit')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
-                  activeTab === 'audit'
+                onClick={() => handleNavClick('admin_statistics')}
+                title="Estadísticas"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
+                  activeTab === 'admin_statistics'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="w-6 h-6 flex items-center justify-center text-slate-400">
+                <div className="w-6 h-6 flex items-center justify-center text-slate-400 shrink-0">
+                  <BarChart3 className="w-4 h-4" />
+                </div>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Estadísticas</span>}
+              </button>
+
+              {/* 8. Auditoría */}
+              <button
+                onClick={() => handleNavClick('audit')}
+                title="Auditoría"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
+                  activeTab === 'audit'
+                    ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
+                }`}
+              >
+                <div className="w-6 h-6 flex items-center justify-center text-slate-400 shrink-0">
                   <Shield className="w-4 h-4" />
                 </div>
-                <span>Auditoría</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Auditoría</span>}
               </button>
 
               {/* 10. Configuración */}
               <button
                 onClick={() => handleNavClick('settings')}
-                className="w-full flex items-center justify-between px-3.5 py-3 rounded-2xl text-sm font-semibold text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 transition text-left cursor-pointer border border-transparent"
+                title="Configuración TRM"
+                className={`w-full flex items-center transition cursor-pointer border border-transparent relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'justify-between px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } text-slate-400 hover:text-slate-100 hover:bg-slate-900/60`}
               >
-                <div className="flex items-center gap-3.5">
-                  <div className="w-6 h-6 flex items-center justify-center text-slate-400">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-6 h-6 flex items-center justify-center text-slate-400 shrink-0">
                     <Settings className="w-4 h-4" />
                   </div>
-                  <span>Configuración TRM</span>
+                  {!isCollapsed && <span className="tracking-wide truncate">Configuración TRM</span>}
                 </div>
-                <span
-                  className={`text-[9px] uppercase font-mono px-2 py-0.5 rounded-full font-bold border ${
-                    dataStore.getConfig().trmMode === 'AUTOMATIC'
-                      ? 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300'
-                      : 'bg-amber-950/80 border-amber-500/40 text-amber-300'
-                  }`}
-                >
-                  {dataStore.getConfig().trmMode === 'AUTOMATIC' ? 'AUTO' : 'MANUAL'}
-                </span>
+                {!isCollapsed && (
+                  <span
+                    className={`text-[9px] uppercase font-mono px-2 py-0.5 rounded-full font-bold border ${
+                      dataStore.getConfig().trmMode === 'AUTOMATIC'
+                        ? 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300'
+                        : 'bg-amber-950/80 border-amber-500/40 text-amber-300'
+                    }`}
+                  >
+                    {dataStore.getConfig().trmMode === 'AUTOMATIC' ? 'AUTO' : 'MANUAL'}
+                  </span>
+                )}
               </button>
             </>
           ) : (
@@ -281,121 +359,155 @@ export const Sidebar: React.FC<SidebarProps> = ({
               {/* 1. Inicio & Resumen */}
               <button
                 onClick={() => handleNavClick('portal')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
+                title="Inicio & Resumen"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
                   activeTab === 'portal'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="w-6 h-6 flex items-center justify-center text-amber-400">
+                <div className="w-6 h-6 flex items-center justify-center text-amber-400 shrink-0">
                   <Home className="w-4 h-4" />
                 </div>
-                <span>Inicio & Resumen</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Inicio & Resumen</span>}
               </button>
 
               {/* 2. Historial de Ciclos */}
               <button
                 onClick={() => handleNavClick('portal_history')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
+                title="Historial de Ciclos"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
                   activeTab === 'portal_history'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="w-6 h-6 flex items-center justify-center text-blue-400">
+                <div className="w-6 h-6 flex items-center justify-center text-blue-400 shrink-0">
                   <Calendar className="w-4 h-4" />
                 </div>
-                <span>Historial de Ciclos</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Historial de Ciclos</span>}
               </button>
 
-              {/* 3. Reinversión */}
+              {/* 3. Reinversión a Capital */}
               <button
                 onClick={() => handleNavClick('portal_reinvestment')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
+                title="Reinversión a Capital"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
                   activeTab === 'portal_reinvestment'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="w-6 h-6 flex items-center justify-center text-emerald-400">
+                <div className="w-6 h-6 flex items-center justify-center text-emerald-400 shrink-0">
                   <RotateCcw className="w-4 h-4" />
                 </div>
-                <span>Reinversión</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Reinversión a Capital</span>}
               </button>
 
-              {/* 4. Retiros */}
+              {/* 3.1 Estadísticas */}
               <button
-                onClick={() => handleNavClick('portal_withdrawals')}
-                className={`w-full flex items-center gap-3.5 px-3.5 py-3 rounded-2xl text-sm font-semibold transition text-left cursor-pointer ${
-                  activeTab === 'portal_withdrawals'
+                onClick={() => handleNavClick('portal_statistics')}
+                title="Estadísticas"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
+                  activeTab === 'portal_statistics'
                     ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 border border-transparent'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
                 }`}
               >
-                <div className="w-6 h-6 flex items-center justify-center text-amber-400">
-                  <Wallet className="w-4 h-4" />
+                <div className="w-6 h-6 flex items-center justify-center text-amber-400 shrink-0">
+                  <BarChart3 className="w-4 h-4" />
                 </div>
-                <span>Retiros</span>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Estadísticas</span>}
               </button>
 
-              {/* 5. Notificaciones */}
+              {/* 4. Notificaciones */}
               <button
                 onClick={() => handleNavClick('notifications')}
-                className="w-full flex items-center justify-between px-3.5 py-3 rounded-2xl text-sm font-semibold text-slate-400 hover:text-slate-100 hover:bg-slate-900/50 transition text-left cursor-pointer"
+                title="Notificaciones"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'justify-between px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent`}
               >
-                <div className="flex items-center gap-3.5">
-                  <div className="w-6 h-6 flex items-center justify-center text-slate-400">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-6 h-6 flex items-center justify-center text-slate-400 shrink-0">
                     <Bell className="w-4 h-4" />
                   </div>
-                  <span>Notificaciones</span>
+                  {!isCollapsed && <span className="tracking-wide truncate">Notificaciones</span>}
                 </div>
                 {unreadCount > 0 && (
-                  <span className="w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-mono font-bold flex items-center justify-center">
-                    {unreadCount}
-                  </span>
+                  isCollapsed ? (
+                    <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500 ring-2 ring-[#070b13]" />
+                  ) : (
+                    <span className="w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-mono font-bold flex items-center justify-center">
+                      {unreadCount}
+                    </span>
+                  )
                 )}
               </button>
             </>
           )}
         </div>
 
-        {/* Bottom Profile Footer from Screenshot */}
-        <div className="p-3 border-t border-slate-800/80 bg-[#060a12] relative">
-          <button
-            onClick={() => setShowSwitchMenu(!showSwitchMenu)}
-            className="w-full flex items-center justify-between p-2 rounded-2xl bg-[#0a0f19] border border-slate-800/90 hover:border-slate-700 transition cursor-pointer text-left group"
-            title="Haz clic para cambiar entre Administrador e Inversionistas"
-          >
-            <div className="flex items-center gap-3 min-w-0">
-              {/* Gold User Icon with Green online indicator dot */}
-              <div className="relative shrink-0">
-                <div className="w-10 h-10 rounded-xl bg-[#171308] border border-amber-500/40 flex items-center justify-center text-amber-400 shadow-sm">
-                  <User className="w-5 h-5" />
+        {/* Bottom Profile Footer */}
+        <div className={`p-2.5 border-t border-slate-800/80 bg-[#060a12] relative ${isCollapsed ? 'flex justify-center' : ''}`}>
+          {isCollapsed ? (
+            <button
+              onClick={() => setShowSwitchMenu(!showSwitchMenu)}
+              className="w-12 h-12 rounded-xl bg-[#0a0f19] border border-slate-800/90 hover:border-amber-500/50 transition cursor-pointer flex items-center justify-center relative"
+              title={`${isSuperAdmin ? 'Administrador' : 'Inversionista'}: ${currentUser?.fullName || 'Usuario'}`}
+            >
+              <div className="relative">
+                <div className="w-8 h-8 rounded-lg bg-[#171308] border border-amber-500/40 flex items-center justify-center text-amber-400 shadow-sm">
+                  <User className="w-4 h-4" />
                 </div>
-                <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#0a0f19]" />
+                <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-[#0a0f19]" />
+              </div>
+            </button>
+          ) : (
+            <button
+              onClick={() => setShowSwitchMenu(!showSwitchMenu)}
+              className="w-full flex items-center justify-between p-2 rounded-xl bg-[#0a0f19] border border-slate-800/90 hover:border-slate-700 transition cursor-pointer text-left group"
+              title="Opciones de cuenta"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                {/* Gold User Icon with Green online indicator dot */}
+                <div className="relative shrink-0">
+                  <div className="w-9 h-9 rounded-xl bg-[#171308] border border-amber-500/40 flex items-center justify-center text-amber-400 shadow-sm">
+                    <User className="w-4 h-4" />
+                  </div>
+                  <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-[#0a0f19]" />
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs sm:text-sm font-bold text-slate-100 truncate group-hover:text-white transition">
+                    {isSuperAdmin ? (currentUser?.fullName || 'Juan Esteban') : currentUser?.fullName || 'Inversionista'}
+                  </p>
+                  <p className="text-[11px] text-slate-400 truncate">
+                    {isSuperAdmin ? (currentUser?.email || 'juanes9802@gmail.com') : currentUser?.email || 'usuario@easytraders24.app'}
+                  </p>
+                </div>
               </div>
 
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-bold text-slate-100 truncate group-hover:text-white transition">
-                  {isSuperAdmin ? (currentUser?.fullName || 'Juan Esteban') : currentUser?.fullName || 'Inversionista'}
-                </p>
-                <p className="text-xs text-slate-400 truncate">
-                  {isSuperAdmin ? (currentUser?.email || 'juanes9802@gmail.com') : currentUser?.email || 'usuario@easytraders.com'}
-                </p>
-              </div>
-            </div>
+              {/* Bright Green Chevron */}
+              <ChevronRight className="w-4 h-4 text-emerald-400 shrink-0 stroke-[2.5] group-hover:translate-x-0.5 transition-transform" />
+            </button>
+          )}
 
-            {/* Bright Green Chevron from Mockup */}
-            <ChevronRight className="w-4 h-4 text-emerald-400 shrink-0 stroke-[2.5] group-hover:translate-x-0.5 transition-transform" />
-          </button>
-
-          {/* Profile Switcher Popover */}
+          {/* Profile Menu Popover */}
           {showSwitchMenu && (
-            <div className="absolute bottom-20 left-3 right-3 bg-slate-900 border border-slate-800 rounded-2xl p-3 shadow-2xl z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
+            <div className={`absolute ${isCollapsed ? 'left-20 bottom-1 w-64' : 'bottom-16 left-2 right-2'} bg-slate-900 border border-slate-800 rounded-2xl p-3 shadow-2xl z-50 animate-in fade-in slide-in-from-bottom-2 duration-150`}>
               <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800 text-xs">
                 <span className="font-bold text-slate-200 flex items-center gap-1.5">
                   <User className="w-3.5 h-3.5 text-blue-400" />
-                  {isSuperAdmin ? 'Cambiar Rol / Simular Sesión' : 'Mi Cuenta Inversionista'}
+                  {isSuperAdmin ? 'Mi Cuenta Administrador' : 'Mi Cuenta Inversionista'}
                 </span>
                 <button
                   onClick={() => setShowSwitchMenu(false)}
@@ -406,69 +518,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
 
               {isSuperAdmin ? (
-                <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
-                  {/* Option 1: Panel Administrador */}
-                  <button
-                    onClick={() => {
-                      switchToAdmin();
-                      setActiveTab('monthly_closure');
-                      setShowSwitchMenu(false);
-                    }}
-                    className={`w-full p-2.5 rounded-xl text-left text-xs font-bold transition flex items-center gap-2.5 ${
-                      isSuperAdmin
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                        : 'text-slate-300 hover:bg-slate-800'
-                    }`}
-                  >
-                    <div className="w-6 h-6 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 text-xs">
-                      👑
-                    </div>
-                    <div className="flex-1">
-                      <p className="leading-none text-slate-100">Panel Administrador</p>
-                      <span className="text-[10px] text-slate-400 font-normal">{currentUser?.email || 'juanes9802@gmail.com'}</span>
-                    </div>
-                  </button>
-
-                  <div className="px-2 pt-2 pb-1 text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
-                    Simular Vista Inversionista
+                <div className="space-y-2 text-xs p-1">
+                  <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800">
+                    <p className="font-bold text-slate-100 flex items-center gap-1.5">
+                      <span className="text-amber-400">👑</span>
+                      {currentUser?.fullName || 'Juan Esteban'}
+                    </p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">{currentUser?.email || 'juanes9802@gmail.com'}</p>
+                    <span className="inline-block mt-2 px-2 py-0.5 rounded text-[10px] font-mono bg-amber-950 text-amber-400 border border-amber-500/30">
+                      Rol: Super Administrador
+                    </span>
                   </div>
-
-                  {/* Investors */}
-                  {allUsers
-                    .filter((u) => u.role === 'USER')
-                    .slice(0, 5)
-                    .map((u) => (
-                      <button
-                        key={u.id}
-                        onClick={() => {
-                          switchUser(u.id);
-                          setActiveTab('portal');
-                          setShowSwitchMenu(false);
-                        }}
-                        className={`w-full p-2 rounded-xl text-left text-xs font-medium transition flex items-center gap-2.5 ${
-                          currentUser?.id === u.id
-                            ? 'bg-blue-600/30 text-blue-300 border border-blue-500/40'
-                            : 'text-slate-300 hover:bg-slate-800'
-                        }`}
-                      >
-                        <div className="w-6 h-6 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 text-xs font-bold">
-                          {u.fullName.charAt(0)}
-                        </div>
-                        <div className="truncate flex-1">
-                          <p className="leading-none truncate text-slate-200">{u.fullName}</p>
-                          <span className="text-[10px] text-slate-400 font-mono font-normal">
-                            {u.userCode} • {u.category}
-                          </span>
-                        </div>
-                      </button>
-                    ))}
                 </div>
               ) : (
                 <div className="space-y-2 text-xs p-1">
-                  <div className="p-2 rounded-xl bg-slate-950 border border-slate-800">
+                  <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800">
                     <p className="font-bold text-slate-100">{currentUser?.fullName}</p>
-                    <p className="text-[11px] text-slate-400">{currentUser?.email}</p>
-                    <span className="inline-block mt-1 px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-950 text-emerald-400 border border-emerald-500/30">
+                    <p className="text-[11px] text-slate-400 mt-0.5">{currentUser?.email}</p>
+                    <span className="inline-block mt-2 px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-950 text-emerald-400 border border-emerald-500/30">
                       Rol: Inversionista ({currentUser?.userCode || 'CÓDIGO'})
                     </span>
                   </div>

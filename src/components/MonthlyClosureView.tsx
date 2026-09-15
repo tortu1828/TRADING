@@ -30,8 +30,10 @@ import {
   Activity,
   FileSpreadsheet,
   RotateCcw,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { dataStore } from '../lib/dataStore';
+import { firestoreService } from '../lib/firestoreService';
 import { useAuth } from '../context/AuthContext';
 import {
   BitacoraCategory,
@@ -44,13 +46,21 @@ import { formatCOP, formatUSD, formatTRM } from '../lib/financialEngine';
 import { fetchLiveTRM, LiveTRMResult } from '../lib/trmService';
 import { DailyOperationsModal } from './DailyOperationsModal';
 import { ExcelBitacoraImportModal } from './ExcelBitacoraImportModal';
+import { CycleReportViewer } from './CycleReportViewer';
 import confetti from 'canvas-confetti';
 
-export const MonthlyClosureView: React.FC = () => {
-  const { currentUser } = useAuth();
+interface MonthlyClosureViewProps {
+  onNavigate?: (tab: string) => void;
+}
+
+export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNavigate }) => {
+  const { currentUser, isSuperAdmin } = useAuth();
   const activeCycle = dataStore.getActiveCycle();
   const allCycles = dataStore.getCycles();
   const activeUsers = dataStore.getActiveUsers();
+
+  // Sub-pestañas: Cierre del ciclo vs Informes Oficiales (exclusivo SuperAdmin)
+  const [activeSubTab, setActiveSubTab] = useState<'closure' | 'reports'>('closure');
 
   const [selectedCycleId, setSelectedCycleId] = useState<string>(activeCycle.cycleId);
   const currentCycle = dataStore.getCycleById(selectedCycleId) || activeCycle;
@@ -93,6 +103,7 @@ export const MonthlyClosureView: React.FC = () => {
   const [trmError, setTrmError] = useState<string | null>(null);
   const [liveTrmResult, setLiveTrmResult] = useState<LiveTRMResult | null>(null);
   const [isFetchingTrm, setIsFetchingTrm] = useState<boolean>(false);
+  const [isUpdatingTrm, setIsUpdatingTrm] = useState<boolean>(false);
 
   const fetchMarketTrm = async () => {
     setIsFetchingTrm(true);
@@ -133,20 +144,74 @@ export const MonthlyClosureView: React.FC = () => {
   };
 
   const categoryGroups = dataStore.getCategoryGroups(selectedCycleId);
-  const userResults = dataStore.getUserResults(selectedCycleId);
+  const rawUserResults = dataStore.getUserResults(selectedCycleId);
 
-  const totalActiveUsers = activeUsers.length;
-  const calculatedUsersCount = userResults.length;
-  const is100Percent = totalActiveUsers > 0 && calculatedUsersCount === totalActiveUsers;
+  // Separación estricta entre Ciclo Activo y Ciclo Cerrado (Secciones 2, 3 y 4):
+  // Si el ciclo está CERRADO: snapshot histórico inmutable (no filtrar usuarios que hoy no existan).
+  // Si el ciclo está ACTIVO: filtrar estrictamente a usuarios que actualmente forman parte del ciclo activo.
+  // Usuarios elegibles activos para el ciclo operativo actual (USER con status ACTIVE)
+  const eligibleActiveUsers = activeUsers.filter((u) => u.status === 'ACTIVE' && u.role === 'USER');
+  const eligibleActiveUids = new Set(eligibleActiveUsers.map((u) => u.uid || u.id));
 
-  const missingUsers = activeUsers.filter((u) => !userResults.some((r) => r.userId === u.id));
+  const userResults = isClosed
+    ? rawUserResults
+    : rawUserResults.filter((r) => {
+        const uid = r.userUid || r.userId;
+        return eligibleActiveUids.has(uid);
+      });
 
-  // Top KPI calculations matching mockup
-  const totalManagedCapital = activeUsers.reduce((sum, u) => sum + (u.currentCapital || 0), 0);
-  const totalUsdOperated = userResults.reduce((sum, r) => sum + (r.totalUsdOperated || 0), 0);
-  const totalGrossCop = userResults.reduce((sum, r) => sum + (r.totalGrossCop || 0), 0);
-  const totalUserProfitCop = userResults.reduce((sum, r) => sum + (r.userProfitCop || 0), 0);
-  const totalAdminCommissionCop = userResults.reduce((sum, r) => sum + (r.adminCommissionCop || 0), 0);
+  const totalActiveUsers = isClosed
+    ? (currentCycle.totalUsersActive || rawUserResults.length)
+    : eligibleActiveUsers.length;
+
+  // calculatedEligibleUids: Set de UIDs únicos para evitar que duplicados sumen más de 100%
+  const calculatedEligibleUids = new Set(
+    userResults.map((r) => r.userUid || r.userId).filter(Boolean)
+  );
+
+  const calculatedUsersCount = isClosed
+    ? (currentCycle.calculatedUsersCount || userResults.length)
+    : calculatedEligibleUids.size;
+
+  // Cálculo de progreso exacto sin parches de Math.min(100, ...)
+  const progressPercentage = totalActiveUsers === 0
+    ? 0
+    : (calculatedEligibleUids.size / totalActiveUsers) * 100;
+
+  const is100Percent = totalActiveUsers > 0 && calculatedEligibleUids.size >= totalActiveUsers;
+
+  const missingUsers = isClosed
+    ? []
+    : eligibleActiveUsers.filter((u) => !calculatedEligibleUids.has(u.uid || u.id));
+
+  // Top KPI calculations:
+  // Si está CERRADO usa los agregados históricos o el consolidado snapshot.
+  // Si está ACTIVO calcula estrictamente sobre los usuarios actualmente elegibles.
+  const totalManagedCapital = isClosed
+    ? (currentCycle.totalManagedCapital || userResults.reduce((sum, r) => sum + (r.cycleCapitalCop || r.groupCapitalCop || 0), 0))
+    : eligibleActiveUsers.reduce((sum, u) => sum + (u.currentCapital || 0), 0);
+  const totalUsdOperated = isClosed
+    ? (currentCycle.totalGrossUsd || userResults.reduce((sum, r) => sum + (r.totalUsdOperated || 0), 0))
+    : userResults.reduce((sum, r) => sum + (r.totalUsdOperated || 0), 0);
+  const totalGrossCop = isClosed
+    ? (currentCycle.totalGrossCop || userResults.reduce((sum, r) => sum + (r.totalGrossCop || 0), 0))
+    : userResults.reduce((sum, r) => sum + (r.totalGrossCop || 0), 0);
+  const totalUserProfitCop = isClosed
+    ? (currentCycle.totalUsersProfitCop || userResults.reduce((sum, r) => sum + (r.userProfitCop || 0), 0))
+    : userResults.reduce((sum, r) => sum + (r.userProfitCop || 0), 0);
+  const totalAdminCommissionCop = isClosed
+    ? (currentCycle.totalAdminCommissionCop || userResults.reduce((sum, r) => sum + (r.adminCommissionCop || 0), 0))
+    : userResults.reduce((sum, r) => sum + (r.adminCommissionCop || 0), 0);
+
+  // Solicitudes de Reinversión e Inyección asociadas al ciclo
+  const cycleReinvestments = dataStore.getReinvestments().filter((r) => r.sourceCycleId === selectedCycleId);
+  const pendingRequestsCount = cycleReinvestments.filter((r) => r.status === 'PENDING').length;
+  const needsReviewRequestsCount = cycleReinvestments.filter((r) => r.status === 'NEEDS_REVIEW').length;
+  const approvedRequestsCount = cycleReinvestments.filter((r) => r.status === 'APPROVED').length;
+  const rejectedRequestsCount = cycleReinvestments.filter((r) => r.status === 'REJECTED').length;
+  const appliedRequestsCount = cycleReinvestments.filter((r) => r.status === 'APPLIED').length;
+  const hasUnresolvedRequests = pendingRequestsCount > 0 || needsReviewRequestsCount > 0;
+  const isClosing = currentCycle.isClosing === true;
 
   const totalGroups = currentCycle.totalGroupsCount || (categoryGroups.AZUL.length + categoryGroups.VERDE.length + categoryGroups.NEGRA.length);
   const calculatedGroups = currentCycle.calculatedGroupsCount || (
@@ -155,7 +220,7 @@ export const MonthlyClosureView: React.FC = () => {
     categoryGroups.NEGRA.filter((g) => g.isCalculated).length
   );
 
-  const handleSaveTrm = (e: React.FormEvent) => {
+  const handleSaveTrm = async (e: React.FormEvent) => {
     e.preventDefault();
     setTrmError(null);
     const parsed = parseFloat(newTrmInput.replace(/[^0-9.]/g, ''));
@@ -163,18 +228,43 @@ export const MonthlyClosureView: React.FC = () => {
       setTrmError('Ingresa un valor numérico de TRM válido mayor a cero.');
       return;
     }
+
+    setIsUpdatingTrm(true);
+    const clientRequestId = `trm_${selectedCycleId}_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
     try {
-      const res = dataStore.updateCycleTrm(
+      // 1. Invocar Cloud Function autoritativa (SUPERADMIN)
+      const res = await firestoreService.adminUpdateCycleTrm({
+        cycleId: selectedCycleId,
+        newTrm: parsed,
+        clientRequestId,
+        reason: trmReason.trim() || 'Ajuste oficial de TRM para liquidación del período',
+      });
+
+      // 2. Sincronizar espejo en memoria local (DataStore)
+      dataStore.updateCycleTrm(
         selectedCycleId,
         parsed,
         trmReason,
         currentUser?.uid || 'admin_root_uid',
         currentUser?.fullName || 'Administrador Principal'
       );
-      setStatusMessage({ type: 'success', text: res.message });
+
+      let msg = res.message || `TRM actualizada exitosamente a $${parsed.toLocaleString('es-CO')} COP.`;
+      if (res.needsReviewCount && res.needsReviewCount > 0) {
+        msg += ` ⚠️ Atención: ${res.needsReviewCount} solicitud(es) de reinversión/inyección pasaron a estado "Requiere Revisión (NEEDS_REVIEW)" debido al ajuste. Por favor verifícalas antes del cierre.`;
+      }
+
+      setStatusMessage({
+        type: res.needsReviewCount && res.needsReviewCount > 0 ? 'info' : 'success',
+        text: msg,
+      });
       setShowTrmModal(false);
     } catch (err: any) {
-      setTrmError(err.message || 'Error al actualizar la TRM.');
+      console.error('[MonthlyClosureView] Error actualizando TRM:', err);
+      setTrmError(err.message || 'Error al actualizar y recalcular la TRM en el servidor.');
+    } finally {
+      setIsUpdatingTrm(false);
     }
   };
 
@@ -386,10 +476,20 @@ export const MonthlyClosureView: React.FC = () => {
   };
 
   // Handle Close Cycle
-  const handleCloseCycle = () => {
-    if (window.confirm(`¿Estás seguro de congelar y CERRAR formalmente el ciclo ${currentCycle.name}? Esta acción bloqueará cualquier edición financiera.`)) {
+  const handleCloseCycle = async () => {
+    if (isClosing) {
+      alert('El ciclo ya se encuentra en proceso de cierre transaccional.');
+      return;
+    }
+
+    if (hasUnresolvedRequests) {
+      alert(`No puedes cerrar el ciclo todavía.\n\nExisten solicitudes asociadas al ciclo que requieren decisión administrativa previa:\n• Pendientes: ${pendingRequestsCount}\n• En Revisión: ${needsReviewRequestsCount}\n\nPor favor aprueba, rechaza o resuelve todas las solicitudes antes de cerrar.`);
+      return;
+    }
+
+    if (window.confirm(`¿Estás seguro de congelar y CERRAR formalmente el ciclo ${currentCycle.name}?\n\n• Solicitudes Aprobadas que se aplicarán a capital: ${approvedRequestsCount}\n• Solicitudes Rechazadas: ${rejectedRequestsCount}\n\nEsta acción ejecutará el Pre-Flight financiero y bloqueará cualquier edición posterior.`)) {
       try {
-        const res = dataStore.closeCycle(
+        const res = await dataStore.closeCycle(
           selectedCycleId,
           currentUser?.uid || 'admin_root_uid',
           currentUser?.fullName || 'Administrador Principal'
@@ -407,8 +507,60 @@ export const MonthlyClosureView: React.FC = () => {
     }
   };
 
+  // Handle Unlock Cycle (SuperAdmin recovery for orphaned closure lock)
+  const handleUnlockCycle = async () => {
+    if (!currentCycle) return;
+    
+    const attemptId = currentCycle.closureAttemptId || '';
+    const startedAt = currentCycle.closingStartedAt || 'Desconocido';
+    const startedBy = currentCycle.closingByName || currentCycle.closingByUid || 'Administrador';
+
+    const confirmText = prompt(
+      `⚠️ RECUPERACIÓN EXCLUSIVA DE SUPERADMIN\n\n` +
+      `Estás a punto de forzar la liberación del lock de cierre huérfano para el ciclo ${currentCycle.name}.\n\n` +
+      `Detalles del Lock Activo:\n` +
+      `• Attempt ID: ${attemptId || 'Sin ID registrado'}\n` +
+      `• Iniciado el: ${startedAt}\n` +
+      `• Iniciado por: ${startedBy}\n\n` +
+      `Para autorizar el desbloqueo, escribe exactamente 'DESBLOQUEAR CIERRE':`
+    );
+
+    if (confirmText !== 'DESBLOQUEAR CIERRE') {
+      if (confirmText !== null) {
+        alert('Confirmación incorrecta. La operación de desbloqueo fue cancelada.');
+      }
+      return;
+    }
+
+    const reason = prompt('Ingresa el motivo obligatorio para la auditoría de desbloqueo (mínimo 5 caracteres):', 'Liberación manual por interrupción de cierre');
+    if (!reason || reason.trim().length < 5) {
+      alert('Se requiere un motivo justificado de al menos 5 caracteres.');
+      return;
+    }
+
+    try {
+      const res = await dataStore.unlockCycle(
+        selectedCycleId,
+        attemptId,
+        'DESBLOQUEAR CIERRE',
+        reason.trim(),
+        currentUser?.uid || 'admin_root_uid',
+        currentUser?.fullName || 'SuperAdmin Principal'
+      );
+      setStatusMessage({
+        type: 'success',
+        text: res.message,
+      });
+    } catch (err: any) {
+      setStatusMessage({
+        type: 'error',
+        text: err.message || 'Error al liberar el lock de cierre.',
+      });
+    }
+  };
+
   // Handle Reopen Cycle
-  const handleReopenCycle = (e: React.FormEvent) => {
+  const handleReopenCycle = async (e: React.FormEvent) => {
     e.preventDefault();
     setReopenError(null);
     if (!reopenReason || reopenReason.trim().length < 5) {
@@ -417,7 +569,7 @@ export const MonthlyClosureView: React.FC = () => {
     }
 
     try {
-      const res = dataStore.reopenCycle(
+      const res = await dataStore.reopenCycle(
         selectedCycleId,
         reopenReason,
         currentUser?.uid || 'admin_root_uid',
@@ -506,6 +658,44 @@ export const MonthlyClosureView: React.FC = () => {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
+      {/* Sub-navegación: Cierre del Ciclo vs Informes Oficiales */}
+      <div className="flex items-center gap-2 border-b border-slate-800/80 pb-3">
+        <button
+          type="button"
+          onClick={() => setActiveSubTab('closure')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+            activeSubTab === 'closure'
+              ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
+              : 'text-slate-400 hover:text-white hover:bg-slate-850'
+          }`}
+        >
+          <Lock className="w-3.5 h-3.5" />
+          Cierre del Ciclo
+        </button>
+
+        {isSuperAdmin && (
+          <button
+            type="button"
+            onClick={() => setActiveSubTab('reports')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+              activeSubTab === 'reports'
+                ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
+                : 'text-slate-400 hover:text-white hover:bg-slate-850'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            Informes Oficiales
+            <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-slate-950 text-amber-300 ml-1 border border-amber-500/20">
+              SuperAdmin
+            </span>
+          </button>
+        )}
+      </div>
+
+      {activeSubTab === 'reports' ? (
+        <CycleReportViewer />
+      ) : (
+        <>
       {/* Alert Status Banner */}
       {statusMessage && (
         <div
@@ -525,7 +715,7 @@ export const MonthlyClosureView: React.FC = () => {
             ) : (
               <Info className="w-5 h-5 shrink-0 text-blue-400" />
             )}
-            <span>{statusMessage.text}</span>
+            <span className="whitespace-pre-line">{statusMessage.text}</span>
           </div>
           <button
             onClick={() => setStatusMessage(null)}
@@ -536,72 +726,81 @@ export const MonthlyClosureView: React.FC = () => {
         </div>
       )}
 
+      {/* Lock Status Banner (isClosing === true) */}
+      {isClosing && (
+        <div className="p-4 rounded-2xl bg-amber-950/80 border border-amber-500/60 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 shrink-0">
+              <Lock className="w-5 h-5 animate-pulse" />
+            </div>
+            <div>
+              <h4 className="text-sm font-extrabold text-amber-200">
+                🔒 Cierre Transaccional en Proceso (Lock Atómico Activo)
+              </h4>
+              <p className="text-xs text-amber-300/80 mt-0.5">
+                El ciclo {currentCycle.name} está siendo procesado en el servidor. Las radicaciones y cálculos están bloqueados.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleUnlockCycle}
+            className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-slate-950 font-black text-xs shadow-md transition cursor-pointer shrink-0"
+            title="Liberar el lock si una transacción anterior quedó interrumpida o bloqueada"
+          >
+            🔓 Liberar Lock Huérfano (Recovery)
+          </button>
+        </div>
+      )}
+
       {/* Top Header Bar from Mockup */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-2 border-b border-slate-800/80">
         <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-black text-slate-100 tracking-tight flex items-center gap-2">
-              Panel del Administrador
-            </h1>
-            <span
-              className={`text-[11px] px-2.5 py-0.5 rounded-full font-bold font-mono uppercase tracking-wider ${
-                currentCycle.status === 'OPEN'
-                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
-                  : currentCycle.status === 'CLOSED'
-                  ? 'bg-red-950 text-red-300 border border-red-500/40'
-                  : 'bg-amber-950 text-amber-300 border border-amber-500/40'
-              }`}
-            >
-              {currentCycle.status === 'OPEN'
-                ? '🟢 Operativo'
-                : currentCycle.status === 'CLOSED'
-                ? '🔒 Cerrado'
-                : 'Reabierto'}
-            </span>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Gestión de Cierre Mensual por Grupos de Capital
-          </p>
+          <h1 className="text-2xl font-black text-slate-100 tracking-tight flex items-center gap-2">
+            Panel del Administrador
+          </h1>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          {/* Excel Import Button */}
-          <button
-            type="button"
-            onClick={() => {
-              setExcelImportCategory(undefined);
-              setShowExcelImportModal(true);
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 hover:text-blue-200 border border-blue-500/40 text-xs font-bold shadow-sm transition cursor-pointer"
-            title="Importar y migrar archivo Excel de bitácoras y usuarios"
-          >
-            <FileSpreadsheet className="w-3.5 h-3.5 text-blue-400" />
-            <span>Importar Excel</span>
-          </button>
-
-          {/* Active Cycle Selector */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs">
-            <span className="text-slate-400">Ciclo Activo:</span>
-            <select
-              value={selectedCycleId}
-              onChange={(e) => setSelectedCycleId(e.target.value)}
-              className="bg-transparent font-bold text-slate-200 focus:outline-none cursor-pointer font-mono"
+        <div className="flex flex-col sm:flex-row lg:flex-wrap items-stretch sm:items-center gap-2.5 w-full lg:w-auto">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full lg:w-auto">
+            {/* Excel Import Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setExcelImportCategory(undefined);
+                setShowExcelImportModal(true);
+              }}
+              className="min-h-[40px] flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 hover:text-blue-200 border border-blue-500/40 text-xs font-bold shadow-sm transition cursor-pointer"
+              title="Importar y migrar archivo Excel de bitácoras y usuarios"
             >
-              {allCycles.map((c) => (
-                <option key={c.cycleId} value={c.cycleId} className="bg-slate-900 text-slate-100">
-                  {c.name}
-                </option>
-              ))}
-            </select>
+              <FileSpreadsheet className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+              <span>Importar Excel</span>
+            </button>
+
+            {/* Active Cycle Selector */}
+            <div className="min-h-[40px] flex items-center justify-between sm:justify-start gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs">
+              <span className="text-slate-400 shrink-0">Ciclo Activo:</span>
+              <select
+                value={selectedCycleId}
+                onChange={(e) => setSelectedCycleId(e.target.value)}
+                className="bg-transparent font-bold text-slate-200 focus:outline-none cursor-pointer font-mono"
+              >
+                {allCycles.map((c) => (
+                  <option key={c.cycleId} value={c.cycleId} className="bg-slate-900 text-slate-100">
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {/* Configured TRM */}
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs">
-            <span className="text-slate-400">TRM Configurada:</span>
-            <div className="flex items-center gap-1.5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3 py-2 sm:py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs w-full lg:w-auto">
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-slate-400">TRM Configurada:</span>
               <span className="text-blue-400 font-bold font-mono">{formatTRM(currentCycle.trmApplied)} COP</span>
               <span
-                className={`text-[9px] uppercase font-bold px-1.5 py-0.2 rounded ${
+                className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded ${
                   dataStore.getConfig().trmMode === 'AUTOMATIC'
                     ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30'
                     : 'bg-amber-950 text-amber-300 border border-amber-500/30'
@@ -611,40 +810,41 @@ export const MonthlyClosureView: React.FC = () => {
               </span>
             </div>
             {!isClosed && (
-              <button
-                type="button"
-                onClick={() => {
-                  setNewTrmInput(currentCycle.trmApplied.toString());
-                  setShowTrmModal(true);
-                  fetchMarketTrm();
-                }}
-                className="text-[11px] font-bold text-amber-400 hover:text-amber-300 transition cursor-pointer flex items-center gap-1 border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 px-2 py-0.5 rounded-lg ml-1"
-                title="Ajustar o sincronizar TRM del ciclo"
-              >
-                <Edit3 className="w-3 h-3" />
-                <span>Ajustar TRM</span>
-              </button>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {onNavigate && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('bitacoras')}
+                    className="min-h-[36px] text-[11px] font-bold text-blue-300 hover:text-blue-200 transition cursor-pointer flex items-center justify-center gap-1 border border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20 px-2.5 py-1 rounded-lg"
+                    title="Ir a gestionar las bitácoras y registrar trades diarios"
+                  >
+                    <SlidersHorizontal className="w-3 h-3 shrink-0" />
+                    <span>Bitácoras Diarias</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewTrmInput(currentCycle.trmApplied.toString());
+                    setShowTrmModal(true);
+                    fetchMarketTrm();
+                  }}
+                  className="min-h-[36px] text-[11px] font-bold text-amber-400 hover:text-amber-300 transition cursor-pointer flex items-center justify-center gap-1 border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 px-2.5 py-1 rounded-lg"
+                  title="Ajustar o sincronizar TRM del ciclo"
+                >
+                  <Edit3 className="w-3 h-3 shrink-0" />
+                  <span>Ajustar TRM</span>
+                </button>
+              </div>
             )}
           </div>
-
-          {/* Notifications Trigger */}
-          <button
-            type="button"
-            onClick={() => setShowNotifyModal(true)}
-            className="relative p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition cursor-pointer"
-            title="Ver notificaciones y despachos masivos"
-          >
-            <Bell className="w-4 h-4" />
-            <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-slate-950 font-black text-[10px] rounded-full flex items-center justify-center">
-              2
-            </span>
-          </button>
 
           {/* Reopen Button if Closed */}
           {isClosed && (
             <button
               onClick={() => setShowReopenModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-600/30 border border-amber-500/50 hover:bg-amber-600/50 text-amber-200 text-xs font-bold transition cursor-pointer"
+              className="min-h-[40px] flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-600/30 border border-amber-500/50 hover:bg-amber-600/50 text-amber-200 text-xs font-bold transition cursor-pointer w-full lg:w-auto"
             >
               <Unlock className="w-3.5 h-3.5" />
               <span>Reabrir</span>
@@ -745,7 +945,7 @@ export const MonthlyClosureView: React.FC = () => {
           </div>
           <div className="min-w-0">
             <p className="text-xs sm:text-base font-black text-slate-100 font-mono tracking-tight truncate">
-              {Math.round((calculatedUsersCount / (totalActiveUsers || 1)) * 100)}%
+              {Math.round(progressPercentage)}%
             </p>
             <span className="text-[9px] sm:text-[10px] text-slate-500 font-mono truncate block">
               {calculatedUsersCount}/{totalActiveUsers} users
@@ -768,7 +968,7 @@ export const MonthlyClosureView: React.FC = () => {
                   : 'bg-amber-950 text-amber-300 border border-amber-500/40'
               }`}
             >
-              {is100Percent ? '100% COMPLETO ✓' : `${Math.round((calculatedUsersCount / (totalActiveUsers || 1)) * 100)}% PROCESADO`}
+              {is100Percent ? '100% COMPLETO ✓' : `${Math.round(progressPercentage)}% PROCESADO`}
             </span>
           </div>
 
@@ -792,7 +992,7 @@ export const MonthlyClosureView: React.FC = () => {
             className={`h-full transition-all duration-500 ${
               is100Percent ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : 'bg-blue-600'
             }`}
-            style={{ width: `${Math.min(100, (calculatedUsersCount / (totalActiveUsers || 1)) * 100)}%` }}
+            style={{ width: `${progressPercentage}%` }}
           />
         </div>
 
@@ -871,7 +1071,7 @@ export const MonthlyClosureView: React.FC = () => {
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(totalCap)}</p>
-                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas • $7M a $9.999.999</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas • $4M a $9M COP</p>
               </button>
             );
           })()}
@@ -907,7 +1107,7 @@ export const MonthlyClosureView: React.FC = () => {
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(totalCap)}</p>
-                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas • $10M a $49.999.999</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas • $10M a $50M COP</p>
               </button>
             );
           })()}
@@ -936,14 +1136,14 @@ export const MonthlyClosureView: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <div className="w-2.5 h-2.5 rounded-full bg-slate-300" />
-                    <span className="font-extrabold text-xs">Bitácora Negra / Whale</span>
+                    <span className="font-extrabold text-xs">Bitácora Negra</span>
                   </div>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 border border-slate-600 text-slate-300">
                     {calcCount}/{groups.length} Calcs
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(totalCap)}</p>
-                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas • $50M a $1.000M</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas • &gt; $60M COP</p>
               </button>
             );
           })()}
@@ -1102,7 +1302,7 @@ export const MonthlyClosureView: React.FC = () => {
             dot: 'bg-emerald-500',
           },
           NEGRA: {
-            title: 'Ventana Bitácora Negra / Whale',
+            title: 'Ventana Bitácora Negra',
             range: '$60.000.000 hasta $4.000.000.000 COP',
             tag: 'TIER_BLACK_WHALE_DESK',
             accent: 'slate',
@@ -1339,14 +1539,37 @@ export const MonthlyClosureView: React.FC = () => {
                             {/* Expanded user list */}
                             {isExpanded && (
                               <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-2 text-xs">
-                                <div className="text-[10px] uppercase font-bold text-slate-400">Inversionistas vinculados:</div>
-                                <div className="space-y-1.5">
-                                  {group.users.map((u) => (
-                                    <div key={u.id} className="flex items-center justify-between text-[11px] font-mono py-1 border-b border-slate-800/60 last:border-0">
-                                      <span className="text-slate-200 font-semibold truncate max-w-[170px]">{u.fullName}</span>
-                                      <span className="text-slate-400">{u.userCode}</span>
-                                    </div>
-                                  ))}
+                                <div className="text-[10px] uppercase font-bold text-slate-400">Inversionistas vinculados ({group.users.length}):</div>
+                                <div className="space-y-2">
+                                  {group.users.map((u) => {
+                                    const rawUserPct = u.userPercentage !== undefined ? u.userPercentage : 75;
+                                    const rawAdminPct = u.adminPercentage !== undefined ? u.adminPercentage : 25;
+                                    const userPct = rawUserPct > 1 ? rawUserPct / 100 : rawUserPct;
+                                    const adminPct = rawAdminPct > 1 ? rawAdminPct / 100 : rawAdminPct;
+                                    const appliedUsd = group.calculation?.totalUsdApplied || group.totalUsdApplied || 0;
+                                    const grossCop = appliedUsd * currentCycle.trmApplied;
+                                    const clientProfitCop = grossCop * userPct;
+                                    const adminCommissionCop = grossCop * adminPct;
+
+                                    return (
+                                      <div key={u.id} className="p-2 rounded-lg bg-slate-950 border border-slate-800/80 text-[11px] font-mono space-y-1">
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-slate-200 font-bold truncate max-w-[170px]">{u.fullName}</span>
+                                          <span className="text-blue-400 font-bold">{formatUSD(appliedUsd)}</span>
+                                        </div>
+                                        <div className="flex items-center justify-between text-[10px] text-slate-400">
+                                          <span>{u.userCode}</span>
+                                          <span>Base: {formatCOP(u.currentCapital)}</span>
+                                        </div>
+                                        {isCalc && (
+                                          <div className="flex items-center justify-between text-[10px] pt-1 border-t border-slate-800">
+                                            <span className="text-emerald-400 font-semibold">G. Cliente: {formatCOP(clientProfitCop)}</span>
+                                            <span className="text-amber-400 font-semibold">Com. Admin: {formatCOP(adminCommissionCop)}</span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               </div>
                             )}
@@ -1630,18 +1853,21 @@ export const MonthlyClosureView: React.FC = () => {
                                         {/* User Cards Grid */}
                                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                                           {group.users.map((user) => {
-                                            const userPerResult = isCalc
-                                              ? {
-                                                  totalCop: group.totalCopPerUser,
-                                                  netProfit: Math.round(group.totalCopPerUser * 0.75),
-                                                  adminCut: Math.round(group.totalCopPerUser * 0.25),
-                                                }
-                                              : null;
+                                            const rawUserPct = user.userPercentage !== undefined ? user.userPercentage : 75;
+                                            const userPct = rawUserPct > 1 ? rawUserPct / 100 : rawUserPct;
+                                            const rawAdminPct = user.adminPercentage !== undefined ? user.adminPercentage : 25;
+                                            const adminPct = rawAdminPct > 1 ? rawAdminPct / 100 : rawAdminPct;
+                                            const appliedUsd = group.calculation?.totalUsdApplied || group.totalUsdApplied || 0;
+                                            const grossCop = appliedUsd * currentCycle.trmApplied;
+                                            const clientProfitCop = grossCop * userPct;
+                                            const adminCommissionCop = grossCop * adminPct;
+                                            const clientProfitUsd = appliedUsd * userPct;
+                                            const adminCommissionUsd = appliedUsd * adminPct;
 
                                             return (
                                               <div
                                                 key={user.id}
-                                                className="p-3 rounded-xl bg-slate-950 border border-slate-800/90 hover:border-slate-700 transition flex flex-col justify-between gap-2.5"
+                                                className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/90 hover:border-slate-700 transition flex flex-col justify-between gap-3 shadow-sm"
                                               >
                                                 <div className="flex items-start justify-between gap-2">
                                                   <div className="flex items-center gap-2.5">
@@ -1653,18 +1879,51 @@ export const MonthlyClosureView: React.FC = () => {
                                                         {user.fullName}
                                                       </h4>
                                                       <p className="text-[11px] text-slate-400 font-mono">
-                                                        {user.userCode} • {user.email}
+                                                        {user.userCode} {user.documentId ? `• CC ${user.documentId}` : ''}
                                                       </p>
                                                     </div>
                                                   </div>
+                                                  {isCalc && (
+                                                    <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold font-mono">
+                                                      ✓ {formatUSD(appliedUsd)}
+                                                    </span>
+                                                  )}
                                                 </div>
 
-                                                {/* Financial Status Breakdown */}
-                                                <div className="pt-2 border-t border-slate-800/70 flex items-center justify-between text-xs font-mono">
+                                                {/* Financial Breakdown per User */}
+                                                <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/70 text-xs font-mono">
                                                   <div>
                                                     <span className="text-[10px] text-slate-500 block">Capital Base:</span>
                                                     <span className="text-slate-300 font-bold">
                                                       {formatCOP(user.currentCapital)}
+                                                    </span>
+                                                  </div>
+                                                  <div>
+                                                    <span className="text-[10px] text-slate-500 block">USD Aplicado:</span>
+                                                    <span className="text-blue-400 font-bold">
+                                                      {formatUSD(appliedUsd)}
+                                                    </span>
+                                                  </div>
+                                                  <div>
+                                                    <span className="text-[10px] text-emerald-400 block font-semibold">
+                                                      Ganancia Cliente:
+                                                    </span>
+                                                    <span className="text-emerald-300 font-bold block">
+                                                      {formatCOP(clientProfitCop)}
+                                                    </span>
+                                                    <span className="text-[10px] text-emerald-500/80 font-normal">
+                                                      {formatUSD(clientProfitUsd)}
+                                                    </span>
+                                                  </div>
+                                                  <div>
+                                                    <span className="text-[10px] text-amber-400 block font-semibold">
+                                                      Comisión Admin:
+                                                    </span>
+                                                    <span className="text-amber-300 font-bold block">
+                                                      {formatCOP(adminCommissionCop)}
+                                                    </span>
+                                                    <span className="text-[10px] text-amber-500/80 font-normal">
+                                                      {formatUSD(adminCommissionUsd)}
                                                     </span>
                                                   </div>
                                                 </div>
@@ -1743,13 +2002,13 @@ export const MonthlyClosureView: React.FC = () => {
 
         {/* Master Execution Action Bar from Mockup */}
         <div className="flex flex-col lg:flex-row items-center justify-between gap-4 pt-4 border-t border-slate-800">
-          <div className="flex flex-wrap items-center gap-4 text-xs font-mono">
+          <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
             <div className="flex items-center gap-2 bg-slate-950 px-3.5 py-2 rounded-xl border border-slate-800">
               <div className={`w-2 h-2 rounded-full ${is100Percent ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
               <span className="text-slate-400">Usuarios Calculados:</span>
               <strong className="text-slate-100 font-bold">{calculatedUsersCount} / {totalActiveUsers}</strong>
               <span className={is100Percent ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
-                ({Math.round((calculatedUsersCount / (totalActiveUsers || 1)) * 100)}%)
+                ({Math.round(progressPercentage)}%)
               </span>
             </div>
 
@@ -1760,52 +2019,96 @@ export const MonthlyClosureView: React.FC = () => {
                 ({Math.round((currentCycle.calculatedGroupsCount / (currentCycle.totalGroupsCount || 1)) * 100)}%)
               </span>
             </div>
+
+            {/* Solicitudes del Ciclo (Gate 1 & Gate 2 status) */}
+            <div className="flex items-center gap-2 bg-slate-950 px-3.5 py-2 rounded-xl border border-slate-800">
+              <RotateCcw className="w-3.5 h-3.5 text-teal-400" />
+              <span className="text-slate-400">Solicitudes:</span>
+              {hasUnresolvedRequests ? (
+                <span className="text-amber-400 font-bold flex items-center gap-1">
+                  ⚠️ {pendingRequestsCount + needsReviewRequestsCount} por resolver ({pendingRequestsCount} pend, {needsReviewRequestsCount} rev)
+                </span>
+              ) : (
+                <span className="text-emerald-400 font-bold">
+                  ✓ {approvedRequestsCount} aprobadas {rejectedRequestsCount > 0 ? `• ${rejectedRequestsCount} rech` : ''} {appliedRequestsCount > 0 ? `• ${appliedRequestsCount} aplicadas` : ''}
+                </span>
+              )}
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="grid grid-cols-1 sm:flex sm:items-center gap-3 w-full lg:w-auto">
             {/* Send Notifications Button (Blue in mockup) */}
             <button
               onClick={() => setShowNotifyModal(true)}
-              disabled={!is100Percent || isClosed}
-              className={`flex items-center gap-2 px-6 py-3 rounded-xl text-xs font-extrabold shadow-lg transition cursor-pointer ${
-                is100Percent && !isClosed
+              disabled={!is100Percent || isClosed || isClosing}
+              className={`min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg transition cursor-pointer w-full sm:w-auto active:scale-95 ${
+                is100Percent && !isClosed && !isClosing
                   ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/30'
                   : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
               }`}
-              title={!is100Percent ? 'Debes calcular todos los usuarios antes de enviar notificaciones' : ''}
+              title={!is100Percent ? 'Debes calcular todos los usuarios antes de enviar notificaciones' : isClosing ? 'Cierre en proceso' : ''}
             >
-              <Bell className="w-4 h-4" />
+              <Bell className="w-4 h-4 shrink-0" />
               <span>🔔 ENVIAR NOTIFICACIONES</span>
             </button>
 
             {/* Close Cycle Button (Amber in mockup) */}
             <button
               onClick={handleCloseCycle}
-              disabled={!is100Percent || isClosed}
-              className={`flex items-center gap-2 px-6 py-3 rounded-xl text-xs font-extrabold shadow-lg transition cursor-pointer ${
-                is100Percent && !isClosed
+              disabled={!is100Percent || isClosed || isClosing || hasUnresolvedRequests}
+              className={`min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg transition cursor-pointer w-full sm:w-auto active:scale-95 ${
+                is100Percent && !isClosed && !isClosing && !hasUnresolvedRequests
                   ? 'bg-amber-600 hover:bg-amber-500 text-slate-950 shadow-amber-600/30 font-black'
                   : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
               }`}
-              title={!is100Percent ? 'Debes calcular todos los usuarios antes de cerrar el ciclo' : ''}
+              title={
+                !is100Percent
+                  ? 'Debes calcular todos los usuarios antes de cerrar el ciclo'
+                  : isClosing
+                  ? 'Cierre en proceso...'
+                  : hasUnresolvedRequests
+                  ? `Bloqueado: existen ${pendingRequestsCount + needsReviewRequestsCount} solicitudes pendientes/en revisión que deben resolverse antes de cerrar`
+                  : ''
+              }
             >
-              <Lock className="w-4 h-4" />
-              <span>🔒 CERRAR CICLO</span>
+              <Lock className="w-4 h-4 shrink-0" />
+              <span className="text-center">{isClosing ? '⏳ PROCESANDO CIERRE...' : hasUnresolvedRequests ? '🔒 CIERRE BLOQUEADO (SOLICITUDES)' : '🔒 CERRAR CICLO'}</span>
             </button>
           </div>
         </div>
+
+        {/* Warning if requests block closure */}
+        {hasUnresolvedRequests && !isClosed && (
+          <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>
+                <strong>Atención (Gate 1 de Cierre):</strong> No se puede congelar el ciclo porque hay <strong>{pendingRequestsCount}</strong> solicitud(es) pendiente(s) y <strong>{needsReviewRequestsCount}</strong> en revisión. Debes resolverlas en la sección de Reinversiones antes de ejecutar el cierre.
+              </span>
+            </div>
+            {onNavigate && (
+              <button
+                type="button"
+                onClick={() => onNavigate('reinvestments')}
+                className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg shrink-0 cursor-pointer text-xs"
+              >
+                Ir a Reinversiones →
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* MODAL: Group Detail & Correction */}
       {selectedGroupForDetail && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-3xl max-h-[90vh] shadow-2xl flex flex-col text-slate-100 overflow-hidden">
+        <div className="fixed inset-0 z-50 flex justify-center items-start sm:items-center p-2 sm:p-4 bg-black/85 backdrop-blur-sm overflow-y-auto overscroll-contain animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-3xl max-h-[90vh] shadow-2xl flex flex-col text-slate-100 overflow-hidden my-2 sm:my-8">
             {/* Modal Header */}
-            <div className="p-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+            <div className="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/60 shrink-0">
               <div>
-                <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                <h3 className="text-sm sm:text-base font-bold text-slate-100 flex items-center gap-2">
                   <span>Detalle de Liquidación: {selectedGroupForDetail.category}</span>
-                  <span className="font-mono text-blue-400">
+                  <span className="font-mono text-blue-400 text-xs sm:text-sm">
                     {formatCOP(selectedGroupForDetail.groupCapitalCop)}
                   </span>
                 </h3>
@@ -1822,13 +2125,13 @@ export const MonthlyClosureView: React.FC = () => {
             </div>
 
             {/* Modal Body: Users List */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
               <div>
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
                   Liquidación Individual de Inversionistas
                 </h4>
-                <div className="border border-slate-800 rounded-xl overflow-hidden">
-                  <table className="w-full text-left text-xs border-collapse">
+                <div className="border border-slate-800 rounded-xl overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse min-w-[560px]">
                     <thead>
                       <tr className="bg-slate-950 text-slate-400 font-semibold border-b border-slate-800 text-[11px]">
                         <th className="p-2.5">Código / Nombre</th>
@@ -2243,15 +2546,24 @@ export const MonthlyClosureView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowTrmModal(false)}
-                  className="px-4 py-2 text-xs font-medium text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700 rounded-xl transition cursor-pointer"
+                  disabled={isUpdatingTrm}
+                  className="px-4 py-2 text-xs font-medium text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700 rounded-xl transition cursor-pointer disabled:opacity-50"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl shadow-lg shadow-blue-600/30 transition cursor-pointer"
+                  disabled={isUpdatingTrm}
+                  className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl shadow-lg shadow-blue-600/30 transition cursor-pointer disabled:opacity-50 flex items-center gap-2"
                 >
-                  Guardar y Recalcular
+                  {isUpdatingTrm ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Recalculando en Servidor...</span>
+                    </>
+                  ) : (
+                    <span>Guardar y Recalcular</span>
+                  )}
                 </button>
               </div>
             </form>
@@ -2285,6 +2597,8 @@ export const MonthlyClosureView: React.FC = () => {
           });
         }}
       />
+        </>
+      )}
     </div>
   );
 };

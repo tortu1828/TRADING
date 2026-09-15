@@ -11,6 +11,7 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        injectRegister: null,
         includeAssets: [
           'easytraders-logo.svg',
           'apple-touch-icon.png',
@@ -58,6 +59,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          importScripts: ['/firebase-messaging-sw.js'],
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           runtimeCaching: [

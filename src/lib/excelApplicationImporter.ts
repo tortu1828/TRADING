@@ -70,7 +70,16 @@ function mapRawRowToApplication(rawRow: Record<string, any>, index: number): Par
     normalizedKeys['puesto'] ||
     normalizedKeys['num'] ||
     normalizedKeys['item'] ||
-    normalizedKeys['consecutivo'];
+    normalizedKeys['consecutivo'] ||
+    normalizedKeys['no'] ||
+    normalizedKeys['nro'] ||
+    normalizedKeys['n'] ||
+    normalizedKeys['fila'] ||
+    normalizedKeys['prioridad'] ||
+    normalizedKeys['idturno'] ||
+    rawRow['#'] ||
+    rawRow['No.'] ||
+    rawRow['N°'];
 
   const parsedTurno = rawTurno ? parseInt(String(rawTurno).replace(/[^0-9]/g, ''), 10) : undefined;
 
@@ -223,10 +232,16 @@ export function parsePastedApplicationsText(pastedText: string): ParsedApplicati
   const results: ParsedApplicationRow[] = [];
 
   dataLines.forEach((line, idx) => {
-    const cols = line.split('\t').map((c) => c.trim());
+    let cols = line.split('\t').map((c) => c.trim());
     if (cols.length === 0 || !cols[0]) return;
 
-    // Si tiene al menos 2 columnas
+    let explicitTurno: number | undefined = undefined;
+    // Si la primera columna es un número o turno (ej: "1", "#1", "Turno 1")
+    if (/^[#]?\s*\d+$/.test(cols[0]) && cols.length > 1) {
+      explicitTurno = parseInt(cols[0].replace(/[^0-9]/g, ''), 10);
+      cols = cols.slice(1); // El resto son los datos del aspirante
+    }
+
     let fullName = '';
     let documentId = '';
     let phone = '';
@@ -250,7 +265,7 @@ export function parsePastedApplicationsText(pastedText: string): ParsedApplicati
 
     if (fullName) {
       results.push({
-        excelTurno: idx + 1,
+        excelTurno: explicitTurno && !isNaN(explicitTurno) ? explicitTurno : idx + 1,
         fullName,
         documentId,
         phone,

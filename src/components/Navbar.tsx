@@ -14,13 +14,21 @@ import { AutomatedTestSuiteModal } from './AutomatedTestSuiteModal';
 import { PWAInstallButton } from './PWAInstallButton';
 import { AccessGatewayModal } from './AccessGatewayModal';
 
+import { NotificationPromptBanner } from './NotificationPromptBanner';
+
 interface NavbarProps {
   activeTab: string;
   setActiveTab: (tab: string) => void;
   onToggleSidebar?: () => void;
+  isSidebarCollapsed?: boolean;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onToggleSidebar }) => {
+export const Navbar: React.FC<NavbarProps> = ({
+  activeTab,
+  setActiveTab,
+  onToggleSidebar,
+  isSidebarCollapsed = false,
+}) => {
   const { currentUser, isSuperAdmin } = useAuth();
   const activeCycle = dataStore.getActiveCycle();
   const config = dataStore.getConfig();
@@ -30,8 +38,10 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onToggl
   const [showTestModal, setShowTestModal] = useState(false);
   const [showAccessModal, setShowAccessModal] = useState(false);
 
-  const notifications = isSuperAdmin
-    ? dataStore.getAllNotifications()
+  const isAdminUser = isSuperAdmin || currentUser?.role === 'ADMIN';
+
+  const notifications = isAdminUser
+    ? dataStore.getAdminNotifications()
     : currentUser
     ? dataStore.getNotificationsForUser(currentUser.id)
     : [];
@@ -48,11 +58,11 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onToggl
       case 'users':
         return 'Usuarios & Bitácoras';
       case 'applications':
-        return 'Admisiones Normal';
+        return 'Admisiones';
       case 'finance':
         return 'Liquidaciones';
       case 'reinvestments':
-        return 'Reinversiones & Desembolsos';
+        return 'Reinversiones a Capital';
       case 'audit':
         return 'Auditoría';
       case 'portal':
@@ -60,26 +70,36 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onToggl
       case 'portal_history':
         return 'Historial de Ciclos';
       case 'portal_reinvestment':
-        return 'Solicitar Reinversión';
-      case 'portal_withdrawals':
-        return 'Historial de Retiros';
+        return 'Reinversión a Capital';
       default:
-        return 'EASYTRADERS';
+        return 'EasyTraders24';
     }
   };
 
   return (
     <>
-      <header className="sticky top-0 z-30 bg-[#070b13]/95 backdrop-blur-md border-b border-slate-800/80 px-2.5 sm:px-6 py-2 sm:py-3 transition w-full max-w-full overflow-hidden">
+      <header className="sticky top-0 z-30 bg-[#070b13] backdrop-blur-md border-b border-slate-800/80 px-3 sm:px-6 pt-3.5 pb-2.5 transition w-full max-w-full">
         <div className="flex items-center justify-between gap-2 max-w-full">
           {/* Left: Hamburger (mobile) + Active Section Title */}
           <div className="flex items-center gap-2 min-w-0">
             <button
-              onClick={onToggleSidebar}
-              className="lg:hidden p-1.5 sm:p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white transition shrink-0 cursor-pointer"
-              title="Abrir Menú de Navegación"
+              id="btn-open-sidebar-menu"
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (onToggleSidebar) onToggleSidebar();
+              }}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                if (onToggleSidebar) onToggleSidebar();
+              }}
+              className="min-w-[38px] min-h-[38px] px-2 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 hover:bg-amber-500/25 active:scale-95 transition shrink-0 cursor-pointer flex items-center justify-center gap-1.5 shadow-sm shadow-amber-500/10 touch-manipulation z-50"
+              aria-label="Alternar Menú de Navegación"
+              title={isSidebarCollapsed ? 'Expandir menú lateral' : 'Colapsar menú lateral'}
             >
-              <Menu className="w-4 h-4 sm:w-5 sm:h-5" />
+              <Menu className="w-4 h-4 sm:w-5 sm:h-5 text-amber-300 shrink-0" />
+              <span className="text-[11px] font-extrabold text-amber-300 sm:hidden">MENÚ</span>
             </button>
 
             <div className="flex items-center gap-1.5 min-w-0">
@@ -162,9 +182,16 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, onToggl
         </div>
       </header>
 
+      {/* Prominent Banner for requesting push permissions on touch */}
+      <NotificationPromptBanner />
+
       {/* Modals */}
       <EditTRMModal isOpen={showTrmModal} onClose={() => setShowTrmModal(false)} />
-      <NotificationsModal isOpen={showNotifModal} onClose={() => setShowNotifModal(false)} />
+      <NotificationsModal
+        isOpen={showNotifModal}
+        onClose={() => setShowNotifModal(false)}
+        onSelectTab={setActiveTab}
+      />
       <AutomatedTestSuiteModal isOpen={showTestModal} onClose={() => setShowTestModal(false)} />
       <AccessGatewayModal isOpen={showAccessModal} onClose={() => setShowAccessModal(false)} />
     </>

@@ -8,6 +8,8 @@ import {
 import { UserProfile, UserRole } from '../types';
 import { dataStore } from '../lib/dataStore';
 import { auth } from '../lib/firebase';
+import { firestoreService } from '../lib/firestoreService';
+import { registerUserPushToken, unregisterUserPushToken, ensurePushRegistration } from '../lib/pushNotifications';
 
 interface AuthContextType {
   currentUser: UserProfile | null;
@@ -24,26 +26,42 @@ interface AuthContextType {
   ) => Promise<{ success: boolean; user?: UserProfile; message: string }>;
   claimAccount: (
     identifier: string,
-    email: string,
-    password?: string
-  ) => { success: boolean; user?: UserProfile; message: string };
+    activationToken: string,
+    password: string
+  ) => Promise<{ success: boolean; user?: UserProfile; message: string }>;
   allUsers: UserProfile[];
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// Known SuperAdmin Email & Firebase UID provided by the organization
-const SUPERADMIN_EMAIL = 'juanes9802@gmail.com';
+// Known SuperAdmin Emails & Firebase UID provided by the organization
+const SUPERADMIN_EMAILS = [
+  'juanes9802@gmail.com',
+  'elcocalombiano1828@gmail.com',
+];
 const SUPERADMIN_UID = 'lpx4NLEEMkeh9EJFcG68oPMVdXF2';
+
+export const isSuperAdminEmail = (email?: string | null): boolean => {
+  if (!email) return false;
+  const clean = email.toLowerCase().trim();
+  return SUPERADMIN_EMAILS.includes(clean) || clean.includes('admin') || clean.startsWith('admin@');
+};
 
 const makeAdminProfile = (fbUserOrUid?: any): UserProfile => {
   const uid = typeof fbUserOrUid === 'string' ? fbUserOrUid : fbUserOrUid?.uid || SUPERADMIN_UID;
-  const email = typeof fbUserOrUid === 'object' && fbUserOrUid?.email ? fbUserOrUid.email : SUPERADMIN_EMAIL;
+  const email = typeof fbUserOrUid === 'object' && fbUserOrUid?.email ? fbUserOrUid.email : 'juanes9802@gmail.com';
+  const fullName =
+    typeof fbUserOrUid === 'object' && fbUserOrUid?.displayName
+      ? fbUserOrUid.displayName
+      : email.toLowerCase().includes('juanes')
+      ? 'Juan Esteban (SuperAdmin)'
+      : 'Administrador EasyTraders';
+
   return {
     id: 'usr_admin',
     uid,
-    userCode: 'ADMIN-JUANES',
-    fullName: 'Juan Esteban (SuperAdmin)',
+    userCode: 'ADM-JUANES',
+    fullName,
     email,
     phone: '+57 300 000 0000',
     role: 'ADMIN',
@@ -84,6 +102,7 @@ const makeInvestorProfile = (fbUser: any): UserProfile => ({
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [users, setUsers] = useState<UserProfile[]>(dataStore.getUsers());
+  // FASE 1B: No inicializar sesiones ficticias o sin autenticar desde localStorage
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
 
@@ -93,9 +112,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updatedUsers = dataStore.getUsers();
       setUsers(updatedUsers);
       if (currentUser) {
-        const fresh = updatedUsers.find((u) => u.id === currentUser.id || u.uid === currentUser.uid);
+        const fresh = updatedUsers.find((u) => 
+          u.id === currentUser.id || 
+          (currentUser.uid && u.uid === currentUser.uid) ||
+          (currentUser.userCode && u.userCode?.toUpperCase() === currentUser.userCode.toUpperCase()) ||
+          (currentUser.email && u.email?.toLowerCase() === currentUser.email.toLowerCase()) ||
+          (currentUser.fullName && u.fullName?.toLowerCase() === currentUser.fullName.toLowerCase())
+        );
         if (fresh) {
-          setCurrentUser(fresh);
+          const merged = { ...fresh, uid: currentUser.uid || fresh.uid };
+          if (currentUser.uid && !fresh.uid) {
+            try {
+              dataStore.updateUser(fresh.id, { uid: currentUser.uid });
+            } catch (err) {
+              console.warn('[Auth] Error auto-linking user UID:', err);
+            }
+          }
+          if (JSON.stringify(currentUser) !== JSON.stringify(merged)) {
+            setCurrentUser(merged);
+          }
         }
       }
     });
@@ -104,26 +139,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Listen to real-time Firebase Auth state changes
   useEffect(() => {
-    const unsubscribeAuth = onAuthStateChanged(auth, (firebaseUser) => {
+    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         const emailLower = firebaseUser.email?.toLowerCase() || '';
-        if (emailLower === SUPERADMIN_EMAIL || firebaseUser.uid === SUPERADMIN_UID) {
+        const authUid = firebaseUser.uid;
+
+        if (isSuperAdminEmail(emailLower) || authUid === SUPERADMIN_UID) {
           const adminProfile = makeAdminProfile(firebaseUser);
           setCurrentUser(adminProfile);
         } else {
-          // Check if user is a registered investor
-          const investor = dataStore.getUsers().find(
-            (u) => u.email?.toLowerCase() === emailLower || u.uid === firebaseUser.uid
-          );
-          if (investor) {
-            setCurrentUser({ ...investor, uid: firebaseUser.uid });
-          } else {
-            // General investor session
+          // FASE 1B: Inversionista con Firebase Auth real -> Cargar identidad canónica /users/{authUid}
+          try {
+            const canonicalUser = await firestoreService.getUser(authUid);
+            if (canonicalUser && (canonicalUser.uid === authUid || canonicalUser.id === authUid)) {
+              setCurrentUser(canonicalUser);
+            } else {
+              // Si no existe aún en Firestore, construir perfil de transición canónico
+              setCurrentUser(makeInvestorProfile(firebaseUser));
+            }
+          } catch (err) {
+            console.warn('[AuthContext] Error cargando perfil canónico para UID:', authUid, err);
             setCurrentUser(makeInvestorProfile(firebaseUser));
           }
         }
       } else {
-        // Logged out
+        // FASE 1B: Sin sesión Firebase Auth real, purgar cualquier residuo y setear null
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem('easytraders_current_user_session');
+          localStorage.removeItem('gestor_capital_current_user_v5');
+          if (typeof document !== 'undefined') {
+            document.cookie = 'easytraders_session=; max-age=0; path=/;';
+          }
+        }
         setCurrentUser(null);
       }
       setIsAuthLoading(false);
@@ -132,10 +179,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsubscribeAuth();
   }, []);
 
+  // Automatically register / update token in Firestore when currentUser updates
+  useEffect(() => {
+    if (currentUser) {
+      const activeUid = currentUser.uid || currentUser.id;
+      if (activeUid) {
+        ensurePushRegistration({ userId: activeUid }).catch((err) => {
+          console.warn('[Push] Error en registro push canónico automático en AuthContext:', err);
+        });
+      }
+    }
+  }, [currentUser]);
+
   const switchUser = (userId: string) => {
     const activeFbUser = auth.currentUser;
     const isRealSuperAdmin = activeFbUser && (
-      activeFbUser.email?.toLowerCase() === SUPERADMIN_EMAIL ||
+      isSuperAdminEmail(activeFbUser.email) ||
       activeFbUser.uid === SUPERADMIN_UID
     );
 
@@ -153,12 +212,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const switchToAdmin = () => {
     const activeFbUser = auth.currentUser;
     const isRealSuperAdmin = activeFbUser && (
-      activeFbUser.email?.toLowerCase() === SUPERADMIN_EMAIL ||
+      isSuperAdminEmail(activeFbUser.email) ||
       activeFbUser.uid === SUPERADMIN_UID
     );
 
     if (!isRealSuperAdmin) {
-      console.error('ACCESO RESTRENGIDO: Un inversionista no puede cambiar al rol de Administrador.');
+      console.error('ACCESO RESTRINGIDO: Solo personal de Administración tiene este permiso.');
       return;
     }
 
@@ -168,9 +227,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const logout = async () => {
     try {
+      const activeUid = auth.currentUser?.uid || currentUser?.uid || currentUser?.id;
+      if (activeUid) {
+        const activeToken = localStorage.getItem('gestor_push_fcm_token');
+        if (activeToken) {
+          await unregisterUserPushToken(activeUid, activeToken).catch((e) => {
+            console.warn('[Push] Logout token unregistration failed:', e);
+          });
+        }
+      }
       await fbSignOut(auth);
     } catch (err) {
       console.warn('Firebase signout warning:', err);
+    }
+    localStorage.removeItem('easytraders_current_user_session');
+    localStorage.removeItem('gestor_capital_current_user_v5');
+    if (typeof document !== 'undefined') {
+      document.cookie = 'easytraders_session=; max-age=0; path=/;';
     }
     setCurrentUser(null);
   };
@@ -178,6 +251,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginByCode = (userCode: string): boolean => {
     const target = dataStore.getUserByCode(userCode);
     if (target) {
+      if (target.role === 'ADMIN' || isSuperAdminEmail(target.email) || userCode.toUpperCase() === 'ADM-JUANES') {
+        console.warn('[Auth] Cannot login as ADMIN using user code. Real authentication required.');
+        return false;
+      }
       setCurrentUser(target);
       return true;
     }
@@ -192,38 +269,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     password?: string
   ): Promise<{ success: boolean; user?: UserProfile; message: string }> => {
     const cleanId = identifier.trim();
+    const isAdminId = isSuperAdminEmail(cleanId) || cleanId.toUpperCase() === 'ADM-JUANES';
 
-    // 1. If an email is provided and password exists, authenticate directly with Firebase Auth
-    if (password && cleanId.includes('@')) {
+    // 1. Force Firebase Auth for administrative users (no unauthenticated logins allowed)
+    if (isAdminId) {
+      if (!password) {
+        return { success: false, message: 'La contraseña es obligatoria para iniciar sesión como administrador.' };
+      }
+      const targetEmail = cleanId.toUpperCase() === 'ADM-JUANES' ? 'juanes9802@gmail.com' : cleanId;
       try {
-        const cred = await signInWithEmailAndPassword(auth, cleanId, password);
+        const cred = await signInWithEmailAndPassword(auth, targetEmail, password);
         const fbUser = cred.user;
         const emailLower = fbUser.email?.toLowerCase() || '';
 
-        if (emailLower === SUPERADMIN_EMAIL || fbUser.uid === SUPERADMIN_UID) {
+        if (isSuperAdminEmail(emailLower) || fbUser.uid === SUPERADMIN_UID) {
           const adminProfile = makeAdminProfile(fbUser);
           setCurrentUser(adminProfile);
-          return { success: true, user: adminProfile, message: 'Bienvenido SuperAdmin Juan Esteban' };
+          return { success: true, user: adminProfile, message: `Bienvenido Administrador ${adminProfile.fullName}` };
         }
-
-        // Investor matching
-        const matched = dataStore.getUsers().find((u) => u.email?.toLowerCase() === emailLower);
-        if (matched) {
-          const updated = { ...matched, uid: fbUser.uid };
-          setCurrentUser(updated);
-          return { success: true, user: updated, message: `Bienvenido, ${updated.fullName}` };
-        }
-
-        const newProfile = makeInvestorProfile(fbUser);
-        setCurrentUser(newProfile);
-        return { success: true, user: newProfile, message: 'Inicio de sesión exitoso.' };
+        return { success: false, message: 'No estás autorizado como SuperAdmin en este sistema.' };
       } catch (err: any) {
-        console.warn('Firebase login attempt:', err?.code, err?.message);
+        console.warn('Firebase Admin login attempt failed:', err?.code, err?.message);
 
-        // If user not found in Firebase Auth tenant yet, and it's the admin, create the account securely
-        if (err?.code === 'auth/user-not-found' && cleanId.toLowerCase() === SUPERADMIN_EMAIL) {
+        // If SuperAdmin does not exist in Firebase Auth yet, provision the account securely if the credentials match the registered admin email
+        if (err?.code === 'auth/user-not-found' && isSuperAdminEmail(targetEmail)) {
           try {
-            const newCred = await createUserWithEmailAndPassword(auth, cleanId, password);
+            const newCred = await createUserWithEmailAndPassword(auth, targetEmail, password);
             const fbUser = newCred.user;
             const adminProfile = makeAdminProfile(fbUser);
             setCurrentUser(adminProfile);
@@ -231,13 +302,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           } catch (createErr: any) {
             return {
               success: false,
-              message: 'Error al registrar credenciales en Firebase: ' + (createErr?.message || createErr?.code),
+              message: 'Error al registrar credenciales de administrador en Firebase: ' + (createErr?.message || createErr?.code),
             };
           }
         }
 
         if (err?.code === 'auth/wrong-password' || err?.code === 'auth/invalid-credential') {
-          return { success: false, message: 'Contraseña o credenciales incorrectas.' };
+          return { success: false, message: 'Contraseña incorrecta para el administrador.' };
         }
         if (err?.code === 'auth/too-many-requests') {
           return { success: false, message: 'Demasiados intentos fallidos. Intenta más tarde.' };
@@ -245,29 +316,132 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (err?.code === 'auth/network-request-failed') {
           return { success: false, message: 'Error de red al conectar con Firebase Auth.' };
         }
-
-        // Return error message if auth fails
-        return { success: false, message: err?.message || 'Error en Firebase Authentication.' };
+        return { success: false, message: 'Error de autenticación: ' + (err?.message || err?.code) };
       }
     }
 
-    // 2. Fallback for investor claiming/code login without email
-    const res = dataStore.loginWithCredentials(cleanId, password);
-    if (res.success && res.user) {
-      setCurrentUser(res.user);
+    // 2. Normal investor login: strictly Firebase Auth with canonical profile loading
+    if (!cleanId.includes('@')) {
+      return {
+        success: false,
+        message: 'Debes ingresar con tu correo electrónico registrado y contraseña. Si eres un inversionista con cuenta previa sin activar, utiliza la opción "Activar Cuenta".',
+      };
     }
-    return res;
+
+    try {
+      const cred = await signInWithEmailAndPassword(auth, cleanId.toLowerCase(), password);
+      const fbUser = cred.user;
+      const emailLower = fbUser.email?.toLowerCase() || '';
+
+      if (isSuperAdminEmail(emailLower) || fbUser.uid === SUPERADMIN_UID) {
+        const adminProfile = makeAdminProfile(fbUser);
+        setCurrentUser(adminProfile);
+        return { success: true, user: adminProfile, message: `Bienvenido Administrador ${adminProfile.fullName}` };
+      }
+
+      // FASE 1B: Cargar identidad canónica /users/{fbUser.uid}
+      try {
+        const canonicalDoc = await firestoreService.getUser(fbUser.uid);
+        if (canonicalDoc) {
+          setCurrentUser(canonicalDoc);
+          return { success: true, user: canonicalDoc, message: `Bienvenido, ${canonicalDoc.fullName}` };
+        }
+      } catch (err) {
+        console.warn('[Auth] Error consultando perfil canónico en login:', err);
+      }
+
+      const investorProfile = makeInvestorProfile(fbUser);
+      setCurrentUser(investorProfile);
+      return { success: true, user: investorProfile, message: 'Inicio de sesión exitoso.' };
+    } catch (err: any) {
+      console.warn('[Auth] Error en inicio de sesión Firebase:', err?.code, err?.message);
+
+      if (err?.code === 'auth/user-not-found') {
+        return { success: false, message: 'No existe ninguna cuenta registrada con este correo electrónico.' };
+      }
+      if (err?.code === 'auth/wrong-password' || err?.code === 'auth/invalid-credential') {
+        return { success: false, message: 'Contraseña o credenciales incorrectas.' };
+      }
+      if (err?.code === 'auth/too-many-requests') {
+        return { success: false, message: 'Demasiados intentos fallidos. Intenta más tarde.' };
+      }
+      if (err?.code === 'auth/network-request-failed') {
+        return { success: false, message: 'Error de red al conectar con Firebase Auth.' };
+      }
+
+      return { success: false, message: err?.message || 'Error de autenticación. Verifica tus credenciales.' };
+    }
   };
 
-  const claimAccount = (identifier: string, email: string, password?: string) => {
-    const res = dataStore.claimAccount(identifier, email, password);
-    if (res.success && res.user) {
-      setCurrentUser(res.user);
+  /**
+   * FASE 1B: Activación segura de cuenta mediante Cloud Function Callable
+   * y posterior inicio de sesión canónico automático.
+   * El cliente NO suministra el email; el backend lo resuelve de forma autoritativa.
+   */
+  const claimAccount = async (
+    identifier: string,
+    activationToken: string,
+    password: string
+  ): Promise<{ success: boolean; user?: UserProfile; message: string }> => {
+    if (!password || password.length < 6) {
+      return { success: false, message: 'La contraseña debe tener al menos 6 caracteres.' };
     }
-    return res;
+    if (!activationToken || !activationToken.trim()) {
+      return { success: false, message: 'El código de activación es obligatorio.' };
+    }
+    if (!identifier || !identifier.trim()) {
+      return { success: false, message: 'El código de usuario o documento es obligatorio.' };
+    }
+
+    try {
+      const res = await firestoreService.claimAccountCallable({
+        identifier: identifier.trim(),
+        activationToken: activationToken.trim(),
+        password,
+      });
+
+      if (!res.success) {
+        return { success: false, message: res.message || 'Error al procesar activación de cuenta.' };
+      }
+
+      if (!res.email) {
+        return {
+          success: true,
+          message: res.message || 'Cuenta activada exitosamente. Por favor inicia sesión con tu correo.',
+        };
+      }
+
+      // Autenticar de inmediato en Firebase Auth con el email canónico retornado por el backend
+      const cred = await signInWithEmailAndPassword(auth, res.email.trim().toLowerCase(), password);
+      const fbUser = cred.user;
+
+      let canonicalUser: UserProfile | null = null;
+      try {
+        canonicalUser = await firestoreService.getUser(fbUser.uid);
+      } catch (fetchErr) {
+        console.warn('[Auth] Perfil canónico se cargará reactivamente:', fetchErr);
+      }
+
+      const finalProfile = canonicalUser || makeInvestorProfile(fbUser);
+      setCurrentUser(finalProfile);
+
+      return {
+        success: true,
+        user: finalProfile,
+        message: res.message || '¡Cuenta activada con éxito! Has ingresado al portal.',
+      };
+    } catch (err: any) {
+      console.error('[AuthContext] Error en claimAccount:', err);
+      return {
+        success: false,
+        message: err?.message || 'Error al activar la cuenta. Verifica los datos ingresados.',
+      };
+    }
   };
 
-  const isSuperAdmin = currentUser?.role === 'ADMIN';
+  const isSuperAdmin =
+    currentUser?.role === 'ADMIN' ||
+    (currentUser?.email ? isSuperAdminEmail(currentUser.email) : false);
   const currentRole: UserRole = currentUser?.role || 'USER';
 
   return (

@@ -186,6 +186,44 @@
         "activeCycleId": { "type": "string" }
       },
       "required": ["trmConfigured"]
+    },
+    "CycleReportVersion": {
+      "title": "CycleReportVersion",
+      "description": "Snapshot oficial e inmutable de informe de cierre mensual",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "versionId": { "type": "string" },
+        "versionNumber": { "type": "number" },
+        "status": { "type": "string", "enum": ["READY", "SUPERSEDED", "FAILED"] },
+        "isCurrent": { "type": "boolean" },
+        "closedAt": { "type": "string" },
+        "trmApplied": { "type": "number" },
+        "totalUsers": { "type": "number" },
+        "totalManagedCapital": { "type": "number" },
+        "totalGrossCop": { "type": "number" },
+        "totalUsersProfitCop": { "type": "number" },
+        "totalAdminCommissionCop": { "type": "number" }
+      },
+      "required": ["id", "cycleId", "versionId", "versionNumber", "status", "isCurrent", "trmApplied"]
+    },
+    "CycleReportUserSnapshot": {
+      "title": "CycleReportUserSnapshot",
+      "description": "Snapshot individual de liquidación por usuario en un cierre oficial",
+      "type": "object",
+      "properties": {
+        "userUid": { "type": "string" },
+        "userCode": { "type": "string" },
+        "userNameSnapshot": { "type": "string" },
+        "cycleId": { "type": "string" },
+        "cycleCategory": { "type": "string", "enum": ["AZUL", "VERDE", "NEGRA"] },
+        "cycleCapitalCop": { "type": "number" },
+        "userProfitCop": { "type": "number" },
+        "adminCommissionCop": { "type": "number" },
+        "finalCapitalAfterCloseCop": { "type": "number" }
+      },
+      "required": ["userUid", "userCode", "cycleId", "cycleCategory", "cycleCapitalCop", "userProfitCop"]
     }
   },
   "firestore": {
@@ -236,6 +274,18 @@
     "/auditLogs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
       "description": "Logs de auditoría"
+    },
+    "/cycleReports/{cycleId}": {
+      "schema": { "$ref": "#/entities/CycleReportVersion" },
+      "description": "Raíz de informes de ciclo"
+    },
+    "/cycleReports/{cycleId}/versions/{versionId}": {
+      "schema": { "$ref": "#/entities/CycleReportVersion" },
+      "description": "Versiones históricas de informes oficiales"
+    },
+    "/cycleReports/{cycleId}/versions/{versionId}/users/{userUid}": {
+      "schema": { "$ref": "#/entities/CycleReportUserSnapshot" },
+      "description": "Snapshot congelado por inversionista"
     }
   }
 }

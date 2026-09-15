@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   RotateCcw,
   Calendar,
@@ -8,13 +8,18 @@ import {
   Clock,
   BarChart2,
   TrendingUp,
-  Wallet,
   Home,
   DollarSign,
   ArrowRight,
-  ShieldCheck,
-  Building2,
   FileCheck2,
+  Bell,
+  Wallet,
+  Banknote,
+  Coins,
+  ShieldCheck,
+  Loader2,
+  X,
+  Lock,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -27,31 +32,56 @@ import {
 } from 'recharts';
 import { useAuth } from '../context/AuthContext';
 import { dataStore } from '../lib/dataStore';
-import { formatCOP, formatUSD, formatTRM, getCategoryForCapital } from '../lib/financialEngine';
+import { StatisticsView } from './StatisticsView';
+import { formatCOP, formatUSD, formatTRM, getCategoryForCapital, calculateUserMonthlyResult } from '../lib/financialEngine';
+import {
+  getNotificationPermissionState,
+  requestNotificationPermission,
+  sendBrowserPushNotification,
+  playPushNotificationSound,
+  ensurePushRegistration,
+} from '../lib/pushNotifications';
 import confetti from 'canvas-confetti';
 
 interface UserPortalViewProps {
   activeSection?: string;
   onNavigate?: (tab: string) => void;
+  selectedCycleId?: string;
+  onSelectCycle?: (cycleId: string) => void;
 }
 
 export const UserPortalView: React.FC<UserPortalViewProps> = ({
   activeSection,
   onNavigate,
+  selectedCycleId: propSelectedCycleId,
+  onSelectCycle,
 }) => {
-  const { currentUser } = useAuth();
+  const { currentUser: authUser } = useAuth();
   const activeCycle = dataStore.getActiveCycle();
   const allCycles = dataStore.getCycles();
 
+  // Siempre obtener el perfil más completo y fresco desde dataStore (sincronizado en tiempo real)
+  const currentUser = React.useMemo(() => {
+    if (!authUser) return null;
+    const freshUser = dataStore.getUsers().find(
+      (u) =>
+        (authUser.id && u.id === authUser.id) ||
+        (authUser.uid && (u.uid === authUser.uid || u.id === authUser.uid)) ||
+        (authUser.userCode && u.userCode?.toUpperCase() === authUser.userCode.toUpperCase()) ||
+        (authUser.email && u.email?.toLowerCase() === authUser.email.toLowerCase())
+    );
+    return freshUser ? { ...freshUser, uid: authUser.uid || freshUser.uid } : authUser;
+  }, [authUser, dataStore.getUsers()]);
+
   // Internal tab state synchronized with activeSection
-  const getTabFromSection = (section?: string): 'summary' | 'history' | 'reinvestment' | 'withdrawals' => {
+  const getTabFromSection = (section?: string): 'summary' | 'history' | 'reinvestment' | 'statistics' => {
     if (section === 'portal_history' || section === 'history') return 'history';
     if (section === 'portal_reinvestment' || section === 'reinvestment') return 'reinvestment';
-    if (section === 'portal_withdrawals' || section === 'withdrawals') return 'withdrawals';
+    if (section === 'portal_statistics' || section === 'statistics') return 'statistics';
     return 'summary';
   };
 
-  const [currentTab, setCurrentTab] = useState<'summary' | 'history' | 'reinvestment' | 'withdrawals'>(
+  const [currentTab, setCurrentTab] = useState<'summary' | 'history' | 'reinvestment' | 'statistics'>(
     getTabFromSection(activeSection)
   );
 
@@ -62,26 +92,146 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
     }
   }, [activeSection]);
 
-  const handleTabChange = (tab: 'summary' | 'history' | 'reinvestment' | 'withdrawals') => {
+  const handleTabChange = (tab: 'summary' | 'history' | 'reinvestment' | 'statistics') => {
     setCurrentTab(tab);
     window.scrollTo({ top: 0, behavior: 'smooth' });
     if (onNavigate) {
       if (tab === 'summary') onNavigate('portal');
       else if (tab === 'history') onNavigate('portal_history');
       else if (tab === 'reinvestment') onNavigate('portal_reinvestment');
-      else if (tab === 'withdrawals') onNavigate('portal_withdrawals');
+      else if (tab === 'statistics') onNavigate('portal_statistics');
     }
   };
 
-  const [selectedCycleId, setSelectedCycleId] = useState<string>(
-    activeCycle ? activeCycle.cycleId : '2026-08'
-  );
+  // Real-time synchronization with dataStore and Firestore
+  const [, setTick] = useState<number>(0);
+  useEffect(() => {
+    const unsub = dataStore.subscribe(() => {
+      setTick((t) => t + 1);
+    });
+    return () => unsub();
+  }, []);
+
+  const [selectedCycleId, setSelectedCycleId] = useState<string>(() => {
+    return propSelectedCycleId || (activeCycle ? activeCycle.cycleId : (dataStore.getCycles()[0]?.cycleId || '2026-09'));
+  });
+
+  // Secure unidimensional propagation to prevent react state update loops
+  useEffect(() => {
+    if (propSelectedCycleId && propSelectedCycleId !== selectedCycleId) {
+      setSelectedCycleId(propSelectedCycleId);
+    }
+  }, [propSelectedCycleId]);
+
+  // Fail-safe initialization to activeCycleId
+  useEffect(() => {
+    if (activeCycle && (!selectedCycleId || !dataStore.getCycleById(selectedCycleId))) {
+      const targetCycleId = propSelectedCycleId || activeCycle.cycleId;
+      setSelectedCycleId(targetCycleId);
+      if (onSelectCycle) {
+        onSelectCycle(targetCycleId);
+      }
+    }
+  }, [activeCycle]);
+
   const currentCycle = dataStore.getCycleById(selectedCycleId) || activeCycle;
 
-  // Reinvestment Form State
-  const [reinvestAmount, setReinvestAmount] = useState<string>('');
+  // Push notifications activation state
+  const [notifPermission, setNotifPermission] = useState<string>(getNotificationPermissionState());
+  const [isActivatingNotif, setIsActivatingNotif] = useState(false);
+  const [notifFeedback, setNotifFeedback] = useState<string | null>(null);
+  const [hasConfigError, setHasConfigError] = useState(false);
+
+  useEffect(() => {
+    if (notifPermission === 'granted') {
+      const token = localStorage.getItem('gestor_push_fcm_token');
+      if (!token) {
+        setHasConfigError(true);
+      } else {
+        setHasConfigError(false);
+      }
+    } else {
+      setHasConfigError(false);
+    }
+  }, [notifPermission]);
+
+  const handleEnableNotifications = async () => {
+    setIsActivatingNotif(true);
+    setNotifFeedback(null);
+    setHasConfigError(false);
+    try {
+      const res = await requestNotificationPermission();
+      setNotifPermission(getNotificationPermissionState());
+      if (res.granted) {
+        if (res.token) {
+          sendBrowserPushNotification('¡Notificaciones Push Activadas!', {
+            body: `Hola ${currentUser?.fullName || 'Inversionista'}, recibirás tus reportes y ganancias de trading en tiempo real.`,
+            tag: 'welcome_portal_push',
+          });
+          playPushNotificationSound();
+          setHasConfigError(false);
+        } else if (res.error) {
+          setNotifFeedback(res.error);
+          setHasConfigError(true);
+        }
+      } else if (res.error) {
+        setNotifFeedback(res.error);
+        setHasConfigError(true);
+      }
+    } catch (e) {
+      console.warn('Error solicitando permisos push:', e);
+      setHasConfigError(true);
+    } finally {
+      setIsActivatingNotif(false);
+    }
+  };
+
+  const handleRetryPushConfig = async () => {
+    setIsActivatingNotif(true);
+    setNotifFeedback(null);
+    setHasConfigError(false);
+    try {
+      const res = await ensurePushRegistration({ forceRepair: false });
+      setNotifPermission(getNotificationPermissionState());
+      if (res.success && res.token) {
+        setHasConfigError(false);
+        sendBrowserPushNotification('¡Notificaciones Configuradas!', {
+          body: 'Configuración restablecida con éxito.',
+          icon: '/favicon.png',
+        });
+      } else {
+        setHasConfigError(true);
+        setNotifFeedback(res.error || 'No se pudo registrar en la base de datos.');
+      }
+    } catch (e) {
+      console.warn('Error reintentando configuración push:', e);
+      setHasConfigError(true);
+    } finally {
+      setIsActivatingNotif(false);
+    }
+  };
+
+  // Reinvestment State (2-Modality Architecture)
+  const [profitReinvestSelectedCop, setProfitReinvestSelectedCop] = useState<number>(0);
+  const [desiredCapitalIncreaseCop, setDesiredCapitalIncreaseCop] = useState<number>(1_000_000);
+  const [isSubmittingReinvest, setIsSubmittingReinvest] = useState<boolean>(false);
   const [reinvestSubmitted, setReinvestSubmitted] = useState<boolean>(false);
+  const [reinvestSuccessMessage, setReinvestSuccessMessage] = useState<string | null>(null);
   const [reinvestError, setReinvestError] = useState<string | null>(null);
+  const [reinvestModalConfig, setReinvestModalConfig] = useState<{
+    modality: 'PROFIT_REINVESTMENT' | 'CAPITAL_INJECTION';
+    selectedReinvestmentCop?: number;
+    desiredCapitalIncreaseCop?: number;
+    currentCapitalSnapshotCop: number;
+    cycleProfitSnapshotCop: number;
+    reinvestableProfitCop: number;
+    profitAppliedCop: number;
+    cashInjectionCop: number;
+    profitToDisburseCop: number;
+    totalIncreaseCop: number;
+    projectedCapitalCop: number;
+    projectedCategory: string;
+  } | null>(null);
 
   if (!currentUser) {
     return (
@@ -91,17 +241,26 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
     );
   }
 
-  const userResult = dataStore.getUserResultForUser(currentUser.id, selectedCycleId);
+  const userResult =
+    dataStore.getUserResultForUser(currentUser.id, selectedCycleId) ||
+    (currentUser.uid ? dataStore.getUserResultForUser(currentUser.uid, selectedCycleId) : undefined) ||
+    dataStore.getUserResultForUser(currentUser.userCode, selectedCycleId) ||
+    (currentUser.email ? dataStore.getUserResultForUser(currentUser.email, selectedCycleId) : undefined);
+
   const allUserHistoricalResults = dataStore.getUserResults().filter(
-    (r) => r.userId === currentUser.id
+    (r) =>
+      r.userId === currentUser.id ||
+      r.userCode === currentUser.userCode ||
+      (currentUser.uid && (r.userUid === currentUser.uid || r.userId === currentUser.uid)) ||
+      (currentUser.email && r.email && currentUser.email.toLowerCase() === currentUser.email.toLowerCase())
   );
 
-  // User Reinvestments and Disbursements
+  // User Reinvestments
   const userReinvestments = dataStore.getReinvestments().filter(
-    (r) => r.userId === currentUser.id
-  );
-  const userDisbursements = dataStore.getDisbursements().filter(
-    (d) => d.userId === currentUser.id
+    (r) =>
+      r.userId === currentUser.id ||
+      r.userCode === currentUser.userCode ||
+      (currentUser.uid && (r.userUid === currentUser.uid || r.userId === currentUser.uid))
   );
 
   // Reference TRM for USD calculations
@@ -109,9 +268,46 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
     userResult?.trmUsed || currentCycle?.trmApplied || activeCycle?.trmApplied || 4028.5;
   const capitalEquivalentUsd = Math.round(currentUser.currentCapital / referenceTrm);
 
-  const numReinvest = parseFloat(reinvestAmount) || 0;
-  const simulatedNewCapital = currentUser.currentCapital + numReinvest;
-  const simulatedNewCapitalUsd = Math.round(simulatedNewCapital / referenceTrm);
+  // FINANCIAL SNAPSHOTS FOR REINVESTMENT
+  const selectedCycleObj = allCycles.find((c) => c.cycleId === selectedCycleId);
+  const isCycleClosing = selectedCycleObj?.isClosing === true;
+
+  const cycleProfitCop = userResult ? Math.round(Number(userResult.userProfitCop) || 0) : 0;
+  // Regla de redondeo obligatoria: múltiplos de $1.000.000 COP siempre hacia abajo.
+  // NO transformar pérdidas en valores positivos.
+  const reinvestableProfitCop = cycleProfitCop >= 1_000_000 ? Math.floor(cycleProfitCop / 1_000_000) * 1_000_000 : 0;
+  const profitRemainderCop = Math.max(0, cycleProfitCop - reinvestableProfitCop);
+
+  // Solicitud PENDING existente para el ciclo
+  const pendingRequestForCycle = userReinvestments.find(
+    (r) => r.sourceCycleId === selectedCycleId && r.status === 'PENDING'
+  );
+
+  // Initialize selected profit reinvestment whenever cycle or profit changes
+  useEffect(() => {
+    if (reinvestableProfitCop >= 1_000_000) {
+      setProfitReinvestSelectedCop(reinvestableProfitCop);
+    } else {
+      setProfitReinvestSelectedCop(0);
+    }
+  }, [reinvestableProfitCop, selectedCycleId]);
+
+  // Calculations for Card 1 (PROFIT_REINVESTMENT)
+  const card1SelectedReinvest = Math.min(
+    Math.max(0, Math.floor(profitReinvestSelectedCop / 1_000_000) * 1_000_000),
+    reinvestableProfitCop
+  );
+  const card1ProfitRemainder = Math.max(0, cycleProfitCop - card1SelectedReinvest);
+  const card1ProjectedCapital = currentUser.currentCapital + card1SelectedReinvest;
+  const card1ProjectedCategory = getCategoryForCapital(card1ProjectedCapital);
+
+  // Calculations for Card 2 (CAPITAL_INJECTION)
+  const card2DesiredIncrease = Math.max(1_000_000, Math.floor(desiredCapitalIncreaseCop / 1_000_000) * 1_000_000);
+  const card2ProfitApplied = Math.min(reinvestableProfitCop, card2DesiredIncrease);
+  const card2CashInjection = Math.max(0, card2DesiredIncrease - card2ProfitApplied);
+  const card2ProfitToDisburse = Math.max(0, cycleProfitCop - card2ProfitApplied);
+  const card2ProjectedCapital = currentUser.currentCapital + card2DesiredIncrease;
+  const card2ProjectedCategory = getCategoryForCapital(card2ProjectedCapital);
 
   // User Performance Chart Data
   const userPerformanceData = allUserHistoricalResults.map((r) => ({
@@ -135,24 +331,94 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
       ? Math.round(totalAccumulatedProfitCop / allUserHistoricalResults.length)
       : 0;
 
-  const handleRequestReinvestment = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleOpenCard1Modal = () => {
     setReinvestError(null);
-    if (numReinvest <= 0) {
-      setReinvestError('Ingresa un monto de reinversión válido mayor a cero.');
+    if (selectedCycleId !== activeCycle?.cycleId) {
+      setReinvestError('Solo se pueden radicar solicitudes de reinversión en el ciclo operativo activo.');
       return;
     }
+    if (isCycleClosing) {
+      setReinvestError('El ciclo se encuentra en proceso de cierre transaccional. No se pueden radicar nuevas solicitudes en este momento.');
+      return;
+    }
+    if (reinvestableProfitCop < 1_000_000) {
+      setReinvestError('Tus ganancias todavía no alcanzan el mínimo de $1.000.000 necesario para reinvertir.');
+      return;
+    }
+    const selected = card1SelectedReinvest > 0 ? card1SelectedReinvest : reinvestableProfitCop;
+    setReinvestModalConfig({
+      modality: 'PROFIT_REINVESTMENT',
+      selectedReinvestmentCop: selected,
+      currentCapitalSnapshotCop: currentUser.currentCapital,
+      cycleProfitSnapshotCop: cycleProfitCop,
+      reinvestableProfitCop,
+      profitAppliedCop: selected,
+      cashInjectionCop: 0,
+      profitToDisburseCop: Math.max(0, cycleProfitCop - selected),
+      totalIncreaseCop: selected,
+      projectedCapitalCop: currentUser.currentCapital + selected,
+      projectedCategory: getCategoryForCapital(currentUser.currentCapital + selected),
+    });
+  };
+
+  const handleOpenCard2Modal = () => {
+    setReinvestError(null);
+    if (selectedCycleId !== activeCycle?.cycleId) {
+      setReinvestError('Solo se pueden radicar solicitudes de reinversión en el ciclo operativo activo.');
+      return;
+    }
+    if (isCycleClosing) {
+      setReinvestError('El ciclo se encuentra en proceso de cierre transaccional. No se pueden radicar nuevas solicitudes en este momento.');
+      return;
+    }
+    if (card2DesiredIncrease <= 0 || card2DesiredIncrease % 1_000_000 !== 0) {
+      setReinvestError('El aumento de capital debe ser un múltiplo de $1.000.000 COP.');
+      return;
+    }
+    setReinvestModalConfig({
+      modality: 'CAPITAL_INJECTION',
+      desiredCapitalIncreaseCop: card2DesiredIncrease,
+      currentCapitalSnapshotCop: currentUser.currentCapital,
+      cycleProfitSnapshotCop: cycleProfitCop,
+      reinvestableProfitCop,
+      profitAppliedCop: card2ProfitApplied,
+      cashInjectionCop: card2CashInjection,
+      profitToDisburseCop: card2ProfitToDisburse,
+      totalIncreaseCop: card2DesiredIncrease,
+      projectedCapitalCop: card2ProjectedCapital,
+      projectedCategory: card2ProjectedCategory,
+    });
+  };
+
+  const handleConfirmSubmit = async () => {
+    if (!reinvestModalConfig) return;
+    if (selectedCycleId !== activeCycle?.cycleId) {
+      setReinvestError('Solo se pueden radicar solicitudes de reinversión en el ciclo operativo activo.');
+      return;
+    }
+    setIsSubmittingReinvest(true);
+    setReinvestError(null);
 
     try {
-      dataStore.createReinvestmentRequest(
-        currentUser.id,
-        selectedCycleId,
-        numReinvest,
-        0,
-        `Reinversión solicitada por portal de inversionista (${currentUser.userCode})`
-      );
+      if (reinvestModalConfig.modality === 'PROFIT_REINVESTMENT') {
+        await dataStore.submitReinvestmentRequest({
+          userId: currentUser.id,
+          sourceCycleId: selectedCycleId,
+          modality: 'PROFIT_REINVESTMENT',
+          selectedReinvestmentCop: reinvestModalConfig.selectedReinvestmentCop || 0,
+        });
+      } else {
+        await dataStore.submitReinvestmentRequest({
+          userId: currentUser.id,
+          sourceCycleId: selectedCycleId,
+          modality: 'CAPITAL_INJECTION',
+          desiredCapitalIncreaseCop: reinvestModalConfig.desiredCapitalIncreaseCop || 0,
+        });
+      }
 
       setReinvestSubmitted(true);
+      setReinvestSuccessMessage('¡Solicitud de reinversión radicada con éxito ante la administración!');
+      setReinvestModalConfig(null);
       confetti({
         particleCount: 50,
         spread: 60,
@@ -160,10 +426,12 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
       });
       setTimeout(() => {
         setReinvestSubmitted(false);
-        setReinvestAmount('');
-      }, 2500);
+        setReinvestSuccessMessage(null);
+      }, 4000);
     } catch (err: any) {
-      setReinvestError(err.message || 'Error al enviar la solicitud.');
+      setReinvestError(err.message || 'Error al radicar la solicitud de reinversión.');
+    } finally {
+      setIsSubmittingReinvest(false);
     }
   };
 
@@ -209,7 +477,11 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
             <span className="text-xs text-slate-400 shrink-0">Período:</span>
             <select
               value={selectedCycleId}
-              onChange={(e) => setSelectedCycleId(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setSelectedCycleId(val);
+                onSelectCycle?.(val);
+              }}
               className="bg-transparent text-xs font-bold text-slate-100 focus:outline-none cursor-pointer w-full"
             >
               {allCycles.map((c) => (
@@ -221,6 +493,74 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Push Notification Banner */}
+      {notifPermission !== 'unsupported' && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-slate-950 via-slate-900 to-indigo-950/20 border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xl">
+          {hasConfigError && notifPermission === 'granted' ? (
+            // State C: Error de Configuración
+            <>
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-500 shrink-0">
+                  <span className="text-xl">⚠️</span>
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-amber-200">No pudimos configurar las notificaciones.</p>
+                  {notifFeedback ? (
+                    <p className="text-[11px] text-amber-400 font-semibold mt-0.5">{notifFeedback}</p>
+                  ) : (
+                    <p className="text-[11px] text-slate-400 mt-0.5">Ocurrió un inconveniente al registrar tu dispositivo en la base de datos.</p>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleRetryPushConfig}
+                disabled={isActivatingNotif}
+                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shrink-0 transition flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/10 cursor-pointer disabled:opacity-50"
+              >
+                <span>{isActivatingNotif ? 'Configurando...' : 'Reintentar'}</span>
+              </button>
+            </>
+          ) : notifPermission === 'granted' ? (
+            // State A: Activado
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
+                <span className="text-lg">🔔</span>
+              </div>
+              <div>
+                <p className="text-xs font-bold text-emerald-400">Notificaciones activadas</p>
+                <p className="text-[11px] text-slate-300 mt-0.5">
+                  Recibirás avisos de tus operaciones.
+                </p>
+              </div>
+            </div>
+          ) : (
+            // State B: Sin Permiso
+            <>
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-500 shrink-0">
+                  <span className="text-lg">🔔</span>
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-slate-100">Activa las notificaciones</p>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Mantente informado sobre tus operaciones.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleEnableNotifications}
+                disabled={isActivatingNotif}
+                className="w-full sm:w-auto px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shrink-0 transition flex items-center justify-center gap-1.5 shadow-md shadow-blue-600/20 cursor-pointer disabled:opacity-50"
+              >
+                <span>{isActivatingNotif ? 'Activando...' : 'Activar notificaciones'}</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       {/* 2. Top Navigation Tabs */}
       <div className="flex items-center gap-1.5 p-1 bg-slate-900/90 backdrop-blur-md rounded-xl border border-slate-800/90 overflow-x-auto">
@@ -262,157 +602,177 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
           }`}
         >
           <RotateCcw className="w-4 h-4 text-emerald-400" />
-          <span>Solicitar Reinversión</span>
+          <span>Solicitar Reinversión a Capital</span>
         </button>
 
         <button
-          onClick={() => handleTabChange('withdrawals')}
+          onClick={() => handleTabChange('statistics')}
           className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
-            currentTab === 'withdrawals'
-              ? 'bg-amber-600 text-white shadow-md shadow-amber-600/30'
+            currentTab === 'statistics'
+              ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/30'
               : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
           }`}
         >
-          <Wallet className="w-4 h-4 text-amber-400" />
-          <span>Historial de Retiros</span>
-          {userDisbursements.length > 0 && (
-            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 font-mono">
-              {userDisbursements.length}
-            </span>
-          )}
+          <BarChart2 className="w-4 h-4 text-amber-500" />
+          <span>Estadísticas</span>
         </button>
       </div>
 
       {/* ========================================================================= */}
       {/* VIEW 1: SUMMARY (Inicio & Resumen) */}
       {/* ========================================================================= */}
-      {currentTab === 'summary' && (
-        <div className="space-y-6">
-          {/* Main Result of the Selected Month */}
-          {isCyclePending ? (
-            <div className="p-8 rounded-2xl bg-slate-900 border border-slate-800 text-center space-y-3 shadow-xl">
-              <Clock className="w-12 h-12 mx-auto text-amber-400/80 animate-pulse" />
-              <h3 className="text-base font-bold text-slate-200">
-                Liquidación en proceso para {currentCycle?.name || selectedCycleId}
-              </h3>
-              <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
-                Tu capital ({formatCOP(currentUser.currentCapital)}) se encuentra pendiente por liquidar en la mesa de operaciones. En cuanto el administrador complete la liquidación mensual, se acreditará tu rendimiento.
-              </p>
-            </div>
-          ) : (
-            <div className="p-4 sm:p-6 rounded-2xl bg-slate-900 border border-blue-500/40 shadow-2xl space-y-6 relative overflow-hidden">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
-                <div>
-                  <span className="text-[10px] uppercase font-bold tracking-wider text-blue-400 font-mono">
-                    Liquidación Oficial de Rendimientos
-                  </span>
-                  <h3 className="text-base sm:text-lg font-black text-slate-100">
-                    Período Liquidado: {currentCycle?.name || selectedCycleId}
-                  </h3>
-                </div>
-                <span className="text-xs px-3 py-1 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-300 font-mono font-bold shadow-sm shadow-emerald-500/20">
-                  ✓ Liquidado Oficial
-                </span>
+      {currentTab === 'summary' && (() => {
+        const targetCycleId = selectedCycleId || activeCycle?.cycleId || currentCycle?.cycleId || '2026-09';
+        const userCategory = currentUser.category || getCategoryForCapital(currentUser.currentCapital) || 'AZUL';
+
+        // 1. Obtener de forma estricta ÚNICAMENTE las operaciones reales de este usuario (o de su grupo exacto)
+        const userDailyOps = dataStore.getDailyOperationsForUser(currentUser, targetCycleId);
+        const sumDailyUsd = userDailyOps.reduce((sum, op) => sum + op.amountUsd, 0);
+
+        // Si hay operaciones diarias registradas en este ciclo (ej: 3 trades de 123 USD = 369 USD),
+        // esa es la verdad operativa en tiempo real para este inversionista.
+        // Si no hay operaciones diarias aún, consultar el userResult del ciclo si existe.
+        const liveTotalUsd = userDailyOps.length > 0 ? sumDailyUsd : (userResult?.totalUsdOperated ?? 0);
+        const liveTrm = userResult?.trmUsed ?? currentCycle?.trmApplied ?? activeCycle?.trmApplied ?? 4028.5;
+
+        const liveCalc = calculateUserMonthlyResult(
+          liveTotalUsd,
+          liveTrm,
+          currentUser.userPercentage,
+          currentUser.adminPercentage
+        );
+
+        const displayGrossCop = liveCalc.grossCop;
+        const displayUserProfitCop = liveCalc.userProfitCop;
+        const displayUserProfitUsd = liveCalc.userProfitUsd;
+        const displayAdminCommissionCop = liveCalc.adminCommissionCop;
+
+        const hasActivity = userDailyOps.length > 0 || (userResult && userResult.totalUsdOperated > 0);
+
+        return (
+          <div className="space-y-6">
+            {!hasActivity ? (
+              <div className="p-8 rounded-2xl bg-slate-900 border border-slate-800 text-center space-y-3 shadow-xl">
+                <Clock className="w-12 h-12 mx-auto text-amber-400/80 animate-pulse" />
+                <h3 className="text-base font-bold text-slate-200">
+                  Sin Operaciones Diarias Registradas Aún en {currentCycle?.name || selectedCycleId}
+                </h3>
+                <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                  Tu capital (<strong className="text-slate-200">{formatCOP(currentUser.currentCapital)}</strong>, Categoría <span className="text-blue-400 font-bold">{userCategory}</span>) se encuentra activo en la mesa de operaciones. Tan pronto como la mesa de trading registre las primeras operaciones diarias de tu grupo, se actualizarán tus métricas automáticamente en tiempo real.
+                </p>
               </div>
-
-              {/* Highlights Row */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {/* Total USD Operado */}
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 shadow-sm">
-                  <span className="text-[11px] text-slate-400 uppercase font-semibold">Total USD Operado</span>
-                  <p className="text-xl sm:text-2xl font-black text-slate-100 font-mono mt-1">
-                    {formatUSD(userResult.totalUsdOperated)}
-                  </p>
-                  <p className="text-[10px] text-slate-500 mt-1">Valor mensual íntegro asignado</p>
+            ) : (
+              <div className="p-4 sm:p-6 rounded-2xl bg-slate-900 border border-blue-500/40 shadow-2xl space-y-6 relative overflow-hidden">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
+                  <div>
+                    <span className="text-[10px] uppercase font-bold tracking-wider text-blue-400 font-mono">
+                      {userResult ? 'Liquidación Oficial de Rendimientos' : '⚡ Bitácora y Operación Diaria en Tiempo Real'}
+                    </span>
+                    <h3 className="text-base sm:text-lg font-black text-slate-100">
+                      Período: {currentCycle?.name || selectedCycleId}
+                    </h3>
+                  </div>
+                  {userResult ? (
+                    <span className="text-xs px-3 py-1 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-300 font-mono font-bold shadow-sm shadow-emerald-500/20">
+                      ✓ Liquidado Oficial
+                    </span>
+                  ) : (
+                    <span className="text-xs px-3 py-1 rounded-full bg-blue-950 border border-blue-500/40 text-blue-300 font-mono font-bold shadow-sm shadow-blue-500/20 flex items-center gap-1.5 animate-pulse">
+                      <span className="w-2 h-2 rounded-full bg-blue-400" />
+                      Ciclo Activo en Tiempo Real
+                    </span>
+                  )}
                 </div>
 
-                {/* TRM Aplicada */}
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 shadow-sm">
-                  <span className="text-[11px] text-slate-400 uppercase font-semibold">TRM Liquidación</span>
-                  <p className="text-xl sm:text-2xl font-black text-blue-400 font-mono mt-1">
-                    {formatTRM(userResult.trmUsed)} COP
-                  </p>
-                  <p className="text-[10px] text-slate-500 mt-1">Tasa inmutable del período</p>
-                </div>
-
-                {/* Total Convertido COP */}
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 shadow-sm">
-                  <span className="text-[11px] text-slate-400 uppercase font-semibold">Total Generado (100%)</span>
-                  <p className="text-xl sm:text-2xl font-black text-slate-200 font-mono mt-1">
-                    {formatCOP(userResult.totalGrossCop)}
-                  </p>
-                  <p className="text-[10px] text-slate-500 mt-1">USD operado × TRM fija</p>
-                </div>
-
-                {/* TU GANANCIA NETA */}
-                <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-950/90 to-slate-950 border border-emerald-500/60 shadow-xl shadow-emerald-500/10">
-                  <div className="flex items-center justify-between text-emerald-400">
-                    <span className="text-[11px] uppercase font-bold tracking-wider">Tu Ganancia Neta</span>
-                  </div>
-                  <p className="text-xl sm:text-2xl font-black text-emerald-300 font-mono mt-1">
-                    {formatCOP(userResult.userProfitCop)}
-                  </p>
-                  <p className="text-[10px] text-emerald-400/90 font-mono mt-1">
-                    Equivalente: {formatUSD(userResult.userProfitUsd).replace('$', '$')} USD
-                  </p>
-                </div>
-              </div>
-
-              {/* Step-by-Step Transparency Roadmap */}
-              <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                  <Info className="w-4 h-4 text-blue-400" />
-                  Flujo de Liquidación y Transparencia
-                </h4>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs font-mono">
-                  <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <span className="text-slate-500 text-[10px] uppercase font-bold">1. Operación del Mes</span>
-                    <p className="text-slate-100 font-bold">{formatUSD(userResult.totalUsdOperated)}</p>
-                    <p className="text-[10px] text-slate-400">Total operado en el período</p>
+                {/* Highlights Row */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* Total USD Operado */}
+                  <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 shadow-sm">
+                    <span className="text-[11px] text-slate-400 uppercase font-semibold">Total USD Operado</span>
+                    <p className="text-xl sm:text-2xl font-black text-slate-100 font-mono mt-1">
+                      {formatUSD(liveTotalUsd)}
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-1">Operaciones acumuladas del grupo</p>
                   </div>
 
-                  <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <span className="text-slate-500 text-[10px] uppercase font-bold">2. Conversión a COP</span>
-                    <p className="text-blue-300 font-bold">{formatCOP(userResult.totalGrossCop)}</p>
-                    <p className="text-[10px] text-slate-400">TRM: {formatTRM(userResult.trmUsed)}</p>
+                  {/* TRM Aplicada */}
+                  <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 shadow-sm">
+                    <span className="text-[11px] text-slate-400 uppercase font-semibold">TRM Período</span>
+                    <p className="text-xl sm:text-2xl font-black text-blue-400 font-mono mt-1">
+                      {formatTRM(liveTrm)} COP
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-1">Tasa de cambio de referencia</p>
                   </div>
 
-                  <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <span className="text-slate-500 text-[10px] uppercase font-bold">3. Tu Ganancia</span>
-                    <p className="text-emerald-400 font-bold">{formatCOP(userResult.userProfitCop)}</p>
-                    <p className="text-[10px] text-slate-400">Rendimiento neto acreditado</p>
+                  {/* Total Convertido COP */}
+                  <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 shadow-sm">
+                    <span className="text-[11px] text-slate-400 uppercase font-semibold">Total Generado (100%)</span>
+                    <p className="text-xl sm:text-2xl font-black text-slate-200 font-mono mt-1">
+                      {formatCOP(displayGrossCop)}
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-1">USD operado × TRM</p>
                   </div>
 
-                  <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
-                    <span className="text-slate-500 text-[10px] uppercase font-bold">4. Comisión de Administración</span>
-                    <p className="text-amber-400 font-bold">{formatCOP(userResult.adminCommissionCop)}</p>
-                    <p className="text-[10px] text-slate-400">Honorarios de administración</p>
+                  {/* TU GANANCIA NETA */}
+                  <div className="p-4 rounded-xl bg-gradient-to-br from-emerald-950/90 to-slate-950 border border-emerald-500/60 shadow-xl shadow-emerald-500/10">
+                    <div className="flex items-center justify-between text-emerald-400">
+                      <span className="text-[11px] uppercase font-bold tracking-wider">Tu Ganancia Neta</span>
+                    </div>
+                    <p className="text-xl sm:text-2xl font-black text-emerald-300 font-mono mt-1">
+                      {formatCOP(displayUserProfitCop)}
+                    </p>
+                    <p className="text-[10px] text-emerald-400/90 font-mono mt-1">
+                      Equivalente: {formatUSD(displayUserProfitUsd)} USD
+                    </p>
                   </div>
                 </div>
-              </div>
 
-              {/* Daily Operations Ledger Breakdown */}
-              {(() => {
-                const userCategory = getCategoryForCapital(currentUser.currentCapital);
-                const groupDailyOps = dataStore.getDailyOperations(
-                  selectedCycleId,
-                  userCategory,
-                  currentUser.currentCapital
-                );
-                if (groupDailyOps.length === 0) return null;
+                {/* Step-by-Step Transparency Roadmap */}
+                <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                    <Info className="w-4 h-4 text-blue-400" />
+                    Flujo de Liquidación y Transparencia
+                  </h4>
 
-                return (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs font-mono">
+                    <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
+                      <span className="text-slate-500 text-[10px] uppercase font-bold">1. Operación del Mes</span>
+                      <p className="text-slate-100 font-bold">{formatUSD(liveTotalUsd)}</p>
+                      <p className="text-[10px] text-slate-400">Total operado en el período</p>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
+                      <span className="text-slate-500 text-[10px] uppercase font-bold">2. Conversión a COP</span>
+                      <p className="text-blue-300 font-bold">{formatCOP(displayGrossCop)}</p>
+                      <p className="text-[10px] text-slate-400">TRM: {formatTRM(liveTrm)}</p>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
+                      <span className="text-slate-500 text-[10px] uppercase font-bold">3. Tu Ganancia</span>
+                      <p className="text-emerald-400 font-bold">{formatCOP(displayUserProfitCop)}</p>
+                      <p className="text-[10px] text-slate-400">Rendimiento neto acreditado</p>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1">
+                      <span className="text-slate-500 text-[10px] uppercase font-bold">4. Comisión de Administración</span>
+                      <p className="text-amber-400 font-bold">{formatCOP(displayAdminCommissionCop)}</p>
+                      <p className="text-[10px] text-slate-400">Honorarios de administración</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Daily Operations Ledger Breakdown */}
+                {userDailyOps.length > 0 && (
                   <div className="p-4 rounded-xl bg-slate-950/90 border border-slate-800 space-y-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
                         <Clock className="w-4 h-4 text-blue-400" />
-                        Operaciones Diarias del Ciclo ({groupDailyOps.length} operaciones)
+                        Tus Operaciones de Trading del Ciclo ({userDailyOps.length} trades)
                       </h4>
                       <span className="text-[11px] text-slate-400 font-mono">
                         Total Operado:{' '}
                         <strong className="text-emerald-400">
-                          {formatUSD(groupDailyOps.reduce((s, o) => s + o.amountUsd, 0))}
+                          {formatUSD(userDailyOps.reduce((s, o) => s + o.amountUsd, 0))}
                         </strong>
                       </span>
                     </div>
@@ -424,34 +784,51 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
                             <th className="py-2.5 px-3"># / Fecha</th>
                             <th className="py-2.5 px-3">Operación (USD)</th>
                             <th className="py-2.5 px-3">Equivalente (COP)</th>
+                            <th className="py-2.5 px-3">Tu Ganancia Neta ({currentUser.userPercentage || 75}%)</th>
+                            <th className="py-2.5 px-3">Notas</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800/50 font-mono text-[11px]">
-                          {groupDailyOps.map((op, idx) => (
-                            <tr key={op.id} className="hover:bg-slate-900/40">
-                              <td className="py-2 px-3 text-slate-300">
-                                <span className="text-slate-500 mr-1.5">{idx + 1}.</span>
-                                {op.date}
-                              </td>
-                              <td className="py-2 px-3 font-bold text-emerald-400">
-                                {formatUSD(op.amountUsd)}
-                              </td>
-                              <td className="py-2 px-3 text-blue-300">
-                                {formatCOP(op.amountUsd * userResult.trmUsed)}
-                              </td>
-                            </tr>
-                          ))}
+                          {userDailyOps.map((op, idx) => {
+                            const rawPct = currentUser.userPercentage !== undefined ? currentUser.userPercentage : 75;
+                            const userPctRatio = rawPct > 1 ? rawPct / 100 : rawPct;
+                            const opProfitCop = op.amountUsd * liveTrm * userPctRatio;
+                            const opProfitUsd = op.amountUsd * userPctRatio;
+
+                            return (
+                              <tr key={op.id} className="hover:bg-slate-900/40">
+                                <td className="py-2 px-3 text-slate-300">
+                                  <span className="text-slate-500 mr-1.5">{idx + 1}.</span>
+                                  {op.date}
+                                </td>
+                                <td className="py-2 px-3 font-bold text-emerald-400">
+                                  {formatUSD(op.amountUsd)}
+                                </td>
+                                <td className="py-2 px-3 text-blue-300">
+                                  {formatCOP(op.amountUsd * liveTrm)}
+                                </td>
+                                <td className="py-2 px-3 text-emerald-300 font-bold">
+                                  {formatCOP(opProfitCop)}
+                                  <span className="block text-[9px] text-emerald-500/80 font-normal">
+                                    {formatUSD(opProfitUsd)}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-3 text-slate-400 text-[10px] font-sans italic">
+                                  {op.notes || (op.userName ? `Trade para ${op.userName}` : 'Operación de trading diario')}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
                   </div>
-                );
-              })()}
-            </div>
-          )}
+                )}
+              </div>
+            )}
 
           {/* Quick Action Navigation Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <button
               onClick={() => handleTabChange('history')}
               className="p-4 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-blue-500/50 transition cursor-pointer text-left flex items-center justify-between group shadow-lg"
@@ -477,31 +854,16 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
                   <RotateCcw className="w-5 h-5" />
                 </div>
                 <div>
-                  <h4 className="text-xs font-bold text-slate-200">Solicitar Reinversión</h4>
-                  <p className="text-[11px] text-slate-400">Sumar utilidades al capital</p>
+                  <h4 className="text-xs font-bold text-slate-200">Solicitar Reinversión a Capital</h4>
+                  <p className="text-[11px] text-slate-400">Sumar utilidades directamente a tu capital</p>
                 </div>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 group-hover:translate-x-1 transition" />
             </button>
-
-            <button
-              onClick={() => handleTabChange('withdrawals')}
-              className="p-4 rounded-xl bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-amber-500/50 transition cursor-pointer text-left flex items-center justify-between group shadow-lg"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 group-hover:bg-amber-600 group-hover:text-white transition">
-                  <Wallet className="w-5 h-5" />
-                </div>
-                <div>
-                  <h4 className="text-xs font-bold text-slate-200">Historial de Retiros</h4>
-                  <p className="text-[11px] text-slate-400">Desembolsos y transferencias</p>
-                </div>
-              </div>
-              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-amber-400 group-hover:translate-x-1 transition" />
-            </button>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* ========================================================================= */}
       {/* VIEW 2: HISTORY (Historial de Ciclos) */}
@@ -673,325 +1035,683 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
       )}
 
       {/* ========================================================================= */}
-      {/* VIEW 3: REINVESTMENT (Solicitar Reinversión) */}
+      {/* VIEW 3: REINVESTMENT & CAPITAL INJECTION (2 MODALITIES) */}
       {/* ========================================================================= */}
       {currentTab === 'reinvestment' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Formulario de Reinversión */}
-            <div className="p-4 sm:p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-5">
-              <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
+          {/* Header Card with Cycle Selection & Rules Notice */}
+          <div className="p-4 sm:p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-600/30 to-teal-600/30 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
                   <RotateCcw className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-slate-100">Solicitar Reinversión de Capital</h3>
-                  <p className="text-xs text-slate-400">Reinvierte tus utilidades o suma capital adicional para el próximo ciclo</p>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-100">
+                    Módulo de Reinversión e Inyección de Capital
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Elige entre reinvertir tus ganancias o inyectar capital adicional para el próximo ciclo
+                  </p>
                 </div>
               </div>
 
-              {/* Current Status Overview */}
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 grid grid-cols-2 gap-3 text-xs font-mono">
+              {/* Cycle Selector */}
+              <div className="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 self-start sm:self-auto">
+                <Calendar className="w-4 h-4 text-slate-400 shrink-0" />
+                <span className="text-xs text-slate-400 font-semibold">Ciclo:</span>
+                <select
+                  value={selectedCycleId}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSelectedCycleId(val);
+                    onSelectCycle?.(val);
+                  }}
+                  className="bg-transparent text-xs font-mono font-bold text-slate-200 focus:outline-none cursor-pointer"
+                >
+                  {allCycles.map((c) => (
+                    <option key={c.id} value={c.cycleId} className="bg-slate-900 text-slate-100">
+                      {c.cycleId} {c.status === 'CLOSED' ? '(Cerrado)' : '(Activo)'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Financial Overview Cards */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs font-mono">
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80">
+                <span className="text-slate-400 block text-[11px] font-sans">Capital Actual</span>
+                <span className="text-slate-100 font-bold text-sm block mt-0.5">
+                  {formatCOP(currentUser.currentCapital)}
+                </span>
+                <span className="text-[10px] text-blue-400 font-sans block mt-0.5">
+                  ${capitalEquivalentUsd.toLocaleString('es-CO')} USD
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80">
+                <span className="text-slate-400 block text-[11px] font-sans">Ganancia Ciclo {selectedCycleId}</span>
+                <span
+                  className={`font-bold text-sm block mt-0.5 ${
+                    cycleProfitCop > 0
+                      ? 'text-emerald-400'
+                      : cycleProfitCop < 0
+                      ? 'text-red-400'
+                      : 'text-slate-300'
+                  }`}
+                >
+                  {formatCOP(cycleProfitCop)}
+                </span>
+                <span className="text-[10px] text-slate-400 font-sans block mt-0.5">
+                  {userResult ? `${formatUSD(userResult.userProfitUsd)} USD` : '$0 USD'}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80">
+                <span className="text-slate-400 block text-[11px] font-sans">Ganancia Reinvertible (Múltiplos $1M)</span>
+                <span className="text-teal-300 font-bold text-sm block mt-0.5">
+                  {formatCOP(reinvestableProfitCop)}
+                </span>
+                <span className="text-[10px] text-slate-400 font-sans block mt-0.5">
+                  Redondeo exacto hacia abajo
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80">
+                <span className="text-slate-400 block text-[11px] font-sans">Saldo Restante a Consignar</span>
+                <span className="text-slate-200 font-bold text-sm block mt-0.5">
+                  {formatCOP(profitRemainderCop)}
+                </span>
+                <span className="text-[10px] text-emerald-400/90 font-sans block mt-0.5">
+                  A transferir a tu cuenta
+                </span>
+              </div>
+            </div>
+
+            {/* Mandatory Business Rule Notice */}
+            <div className="p-3.5 rounded-xl bg-blue-950/30 border border-blue-500/30 text-xs text-blue-200/90 flex items-start gap-2.5">
+              <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+              <p className="leading-relaxed">
+                <strong>Regla de Operación:</strong> Para mantener capitales cerrados, las reinversiones se realizan en millones completos ($1.000.000 COP). Cualquier saldo restante de tus ganancias será consignado a tu cuenta bancaria. Los cambios se aplicarán formalmente al capital del próximo ciclo una vez sean aprobados por la mesa de control.
+              </p>
+            </div>
+          </div>
+
+          {/* Cycle Closing Alert */}
+          {isCycleClosing && (
+            <div className="p-4 sm:p-5 rounded-2xl bg-amber-950/50 border border-amber-500/50 text-amber-200 text-xs space-y-2 shadow-lg animate-pulse">
+              <div className="flex items-center gap-2">
+                <Lock className="w-5 h-5 text-amber-400 shrink-0" />
+                <h4 className="font-bold text-amber-300 text-sm">
+                  Cierre de Ciclo en Proceso ({selectedCycleId})
+                </h4>
+              </div>
+              <p className="text-[11px] text-amber-300/90 leading-relaxed">
+                El ciclo se encuentra actualmente en proceso de liquidación y congelamiento formal. La radicación de nuevas solicitudes de reinversión o inyección de capital está bloqueada temporalmente hasta que finalice el proceso de cierre.
+              </p>
+            </div>
+          )}
+
+          {/* Pending Request Alert for Selected Cycle */}
+          {pendingRequestForCycle && (
+            <div className="p-4 sm:p-5 rounded-2xl bg-amber-950/40 border border-amber-500/50 text-amber-200 text-xs space-y-3 shadow-lg">
+              <div className="flex items-center gap-2">
+                <Clock className="w-5 h-5 text-amber-400 shrink-0" />
+                <h4 className="font-bold text-amber-300 text-sm">
+                  Ya tienes una solicitud pendiente para el ciclo {selectedCycleId}
+                </h4>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-950/60 p-3 rounded-xl border border-amber-500/20 font-mono text-[11px]">
                 <div>
-                  <span className="text-slate-400 block text-[11px]">Capital Actual:</span>
-                  <span className="text-slate-200 font-bold text-sm">{formatCOP(currentUser.currentCapital)}</span>
-                  <p className="text-[10px] text-blue-400 font-sans mt-0.5">
-                    ${capitalEquivalentUsd.toLocaleString('es-CO')} USD
-                  </p>
-                </div>
-                <div>
-                  <span className="text-slate-400 block text-[11px]">Ganancia Neta Ciclo:</span>
-                  <span className="text-emerald-400 font-bold text-sm">
-                    {userResult ? formatCOP(userResult.userProfitCop) : '$0 COP'}
+                  <span className="text-slate-400 block font-sans text-[10px]">Modalidad</span>
+                  <span className="text-amber-200 font-bold">
+                    {pendingRequestForCycle.modality === 'CAPITAL_INJECTION' ? 'Inyección de Capital' : 'Reinversión de Ganancias'}
                   </span>
-                  <p className="text-[10px] text-slate-400 font-sans mt-0.5">
-                    {userResult ? `${formatUSD(userResult.userProfitUsd)} USD` : '$0 USD'}
-                  </p>
+                </div>
+                <div>
+                  <span className="text-slate-400 block font-sans text-[10px]">Aumento Solicitado</span>
+                  <span className="text-emerald-400 font-bold">
+                    +{formatCOP(pendingRequestForCycle.totalIncreaseCop || pendingRequestForCycle.reinvestAmountCop)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block font-sans text-[10px]">Capital Proyectado</span>
+                  <span className="text-slate-200 font-bold">
+                    {formatCOP(pendingRequestForCycle.projectedCapitalCop || pendingRequestForCycle.newCapitalTargetCop)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block font-sans text-[10px]">Radicada el</span>
+                  <span className="text-slate-300">
+                    {new Date(pendingRequestForCycle.createdAt).toLocaleDateString('es-CO')}
+                  </span>
                 </div>
               </div>
+              <p className="text-[11px] text-amber-300/80">
+                Tu solicitud está siendo revisada por la administración. No es posible radicar una nueva solicitud para este ciclo hasta que sea procesada.
+              </p>
+            </div>
+          )}
 
-              {reinvestSubmitted ? (
-                <div className="p-5 rounded-2xl bg-emerald-950/70 border border-emerald-500/50 text-emerald-300 text-xs flex items-center gap-3">
-                  <CheckCircle2 className="w-7 h-7 text-emerald-400 shrink-0" />
-                  <div>
-                    <p className="font-bold text-sm text-emerald-200">¡Solicitud de reinversión radicada!</p>
-                    <p className="text-[11px] text-emerald-300/90 mt-1">
-                      El administrador procesará tu solicitud formal para su acreditación en el siguiente ciclo operativo.
+          {/* Feedback Messages */}
+          {reinvestSuccessMessage && (
+            <div className="p-4 rounded-xl bg-emerald-950/70 border border-emerald-500/50 text-emerald-300 text-xs flex items-center gap-3 animate-in fade-in">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+              <span className="font-semibold">{reinvestSuccessMessage}</span>
+            </div>
+          )}
+
+          {reinvestError && (
+            <div className="p-4 rounded-xl bg-red-950/60 border border-red-500/40 text-red-300 text-xs flex items-center gap-3 animate-in fade-in">
+              <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
+              <span>{reinvestError}</span>
+            </div>
+          )}
+
+          {/* ========================================================================= */}
+          {/* THE 2 MODALITIES CARDS */}
+          {/* ========================================================================= */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* ------------------------------------------------------------- */}
+            {/* MODALITY 1: REINVERSIÓN DE GANANCIAS */}
+            {/* ------------------------------------------------------------- */}
+            <div className={`p-5 sm:p-6 rounded-2xl bg-slate-900 border transition-all flex flex-col justify-between space-y-5 shadow-xl ${
+              reinvestableProfitCop >= 1_000_000
+                ? 'border-teal-500/40 hover:border-teal-500/60'
+                : 'border-slate-800 opacity-90'
+            }`}>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-teal-950/80 border border-teal-500/40 flex items-center justify-center text-teal-300 shrink-0">
+                      <Coins className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-teal-400 block">
+                        Modalidad 1
+                      </span>
+                      <h4 className="text-base font-bold text-slate-100">
+                        Reinvertir mis ganancias
+                      </h4>
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-teal-950 text-teal-300 border border-teal-500/30">
+                    Utilidades
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Usa tus ganancias de este ciclo para aumentar tu capital del próximo ciclo. Las reinversiones se realizan en millones completos. El saldo restante será consignado a tu cuenta bancaria.
+                </p>
+
+                {/* Condition: If profit < 1M or negative */}
+                {reinvestableProfitCop < 1_000_000 ? (
+                  <div className="p-4 rounded-xl bg-slate-950/80 border border-amber-500/30 text-amber-300 text-xs space-y-2">
+                    <div className="flex items-center gap-2 font-semibold">
+                      <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span>Opción no disponible en este ciclo</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Tus ganancias todavía no alcanzan el mínimo de $1.000.000 COP necesario para reinvertir. Si deseas aumentar tu capital, puedes utilizar la opción de <strong>Inyección de Capital</strong>.
                     </p>
                   </div>
-                </div>
-              ) : (
-                <form onSubmit={handleRequestReinvestment} className="space-y-4">
-                  <div className="p-3.5 rounded-xl bg-emerald-950/30 border border-emerald-500/30 text-xs text-emerald-200 leading-relaxed">
-                    Con tus ganancias del mes puedes reinvertir o sumar capital adicional a tu fondo operativo. Toda reinversión se efectúa mediante solicitud formal al administrador para su aplicación en el siguiente ciclo.
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-xs font-semibold text-slate-300">
-                        Monto a Reinvertir (COP)
-                      </label>
-                      {numReinvest > 0 && (
-                        <span className="text-[11px] text-slate-400 font-mono">
-                          {formatCOP(numReinvest)}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="relative">
-                      <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-mono font-bold">$</span>
-                      <input
-                        type="number"
-                        step="50000"
-                        min="50000"
-                        value={reinvestAmount}
-                        onChange={(e) => setReinvestAmount(e.target.value)}
-                        placeholder={userResult ? userResult.userProfitCop.toString() : '500000'}
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-8 pr-4 py-2.5 text-slate-100 font-mono text-sm focus:outline-none focus:border-emerald-500"
-                        required
-                      />
-                    </div>
-
-                    {userResult && userResult.userProfitCop > 0 && (
+                ) : (
+                  <div className="space-y-4">
+                    {/* Fast 100% button */}
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-300 font-semibold">Monto a reinvertir:</span>
                       <button
                         type="button"
-                        onClick={() => setReinvestAmount(userResult.userProfitCop.toString())}
-                        className="text-[11px] text-emerald-400 hover:text-emerald-300 hover:underline mt-2 font-mono cursor-pointer flex items-center gap-1"
+                        onClick={() => setProfitReinvestSelectedCop(reinvestableProfitCop)}
+                        className="text-[11px] text-teal-400 hover:text-teal-300 hover:underline font-mono cursor-pointer flex items-center gap-1"
                       >
-                        <span>⚡ Reinvertir el 100% de mis ganancias de este mes ({formatCOP(userResult.userProfitCop)})</span>
+                        ⚡ Reinvertir máximo disponible ({formatCOP(reinvestableProfitCop)})
                       </button>
-                    )}
-                  </div>
-
-                  {/* Capital projection preview */}
-                  {numReinvest > 0 && (
-                    <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-2">
-                      <div className="flex justify-between text-slate-400">
-                        <span>Capital Actual:</span>
-                        <span className="font-mono text-slate-200">{formatCOP(currentUser.currentCapital)}</span>
-                      </div>
-                      <div className="flex justify-between text-slate-400">
-                        <span>Monto a Sumar:</span>
-                        <span className="font-mono text-emerald-400 font-bold">+{formatCOP(numReinvest)}</span>
-                      </div>
-                      <div className="flex justify-between text-slate-100 font-bold pt-2 border-t border-slate-800">
-                        <span>Nuevo Capital Proyectado:</span>
-                        <span className="font-mono text-emerald-300">
-                          {formatCOP(simulatedNewCapital)} (${simulatedNewCapitalUsd.toLocaleString('es-CO')} USD)
-                        </span>
-                      </div>
                     </div>
-                  )}
 
-                  {reinvestError && (
-                    <div className="p-3 rounded-lg bg-red-950/60 border border-red-500/30 text-red-300 text-xs flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 shrink-0" />
-                      <span>{reinvestError}</span>
-                    </div>
-                  )}
-
-                  <button
-                    type="submit"
-                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-xs shadow-lg shadow-emerald-600/30 transition cursor-pointer flex items-center justify-center gap-2"
-                  >
-                    <RotateCcw className="w-4 h-4" />
-                    <span>Radicar Solicitud de Reinversión</span>
-                  </button>
-                </form>
-              )}
-            </div>
-
-            {/* Historial de Solicitudes de Reinversión */}
-            <div className="p-4 sm:p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                <div className="flex items-center gap-2">
-                  <FileCheck2 className="w-5 h-5 text-emerald-400" />
-                  <div>
-                    <h3 className="text-base font-bold text-slate-100">Mis Solicitudes de Reinversión</h3>
-                    <p className="text-xs text-slate-400">Estado de radicaciones ante el administrador</p>
-                  </div>
-                </div>
-                <span className="text-xs text-slate-400 font-mono">{userReinvestments.length} solicitudes</span>
-              </div>
-
-              {userReinvestments.length === 0 ? (
-                <div className="p-8 text-center text-slate-500 text-xs">
-                  Aún no tienes solicitudes de reinversión radicadas.
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {userReinvestments.map((req) => (
-                    <div
-                      key={req.id}
-                      className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-slate-200">
-                          {formatCOP(req.reinvestAmountCop)}
-                        </span>
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            req.status === 'APPROVED'
-                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30'
-                              : req.status === 'PENDING'
-                              ? 'bg-amber-950 text-amber-300 border border-amber-500/30'
-                              : 'bg-red-950 text-red-300 border border-red-500/30'
-                          }`}
-                        >
-                          {req.status === 'APPROVED'
-                            ? 'APROBADA'
-                            : req.status === 'PENDING'
-                            ? 'PENDIENTE'
-                            : 'RECHAZADA'}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
-                        <span>Ciclo: {req.sourceCycleId}</span>
-                        <span>Nuevo Capital: {formatCOP(req.newCapitalTargetCop)}</span>
-                      </div>
-                      {req.notes && (
-                        <p className="text-[10px] text-slate-500 pt-1 border-t border-slate-900">
-                          {req.notes}
-                        </p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* VIEW 4: WITHDRAWALS (Historial de Retiros) */}
-      {/* ========================================================================= */}
-      {currentTab === 'withdrawals' && (
-        <div className="space-y-6">
-          {/* Institutional Policy Notice */}
-          <div className="p-4 sm:p-5 rounded-2xl bg-amber-950/20 border border-amber-500/40 text-xs text-amber-200/90 leading-relaxed shadow-lg flex items-start gap-3.5">
-            <ShieldCheck className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <h4 className="font-bold text-slate-100 text-sm">Política Institucional de Desembolsos</h4>
-              <p className="text-slate-300">
-                Los retiros y desembolsos son liquidados y aprobados directamente por el administrador en cada Cierre Mensual. De acuerdo a la normativa institucional y bancaria:
-              </p>
-              <ul className="list-disc list-inside space-y-0.5 text-slate-300 mt-1">
-                <li>
-                  Montos hasta <strong>$10.000.000 COP</strong> se tramitan vía transferencia bancaria oficial (Bancolombia, Davivienda, Nequi).
-                </li>
-                <li>
-                  Montos superiores a <strong>$10.000.000 COP</strong> se entregan obligatoriamente en <strong>efectivo o cheque de gerencia</strong> en la sede principal de tesorería para garantizar la seguridad de los fondos.
-                </li>
-              </ul>
-            </div>
-          </div>
-
-          {/* User Disbursements List */}
-          <div className="p-4 sm:p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
-              <div className="flex items-center gap-2">
-                <Wallet className="w-5 h-5 text-amber-400" />
-                <div>
-                  <h3 className="text-base font-bold text-slate-100">Historial de Retiros y Desembolsos</h3>
-                  <p className="text-xs text-slate-400">Todos los pagos tramitados y entregados por la administración</p>
-                </div>
-              </div>
-              <span className="text-xs text-slate-400 font-mono">{userDisbursements.length} registros</span>
-            </div>
-
-            {userDisbursements.length === 0 ? (
-              <div className="p-10 text-center space-y-3">
-                <Building2 className="w-10 h-10 mx-auto text-slate-600" />
-                <h4 className="text-sm font-semibold text-slate-300">No tienes retiros registrados en este momento</h4>
-                <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  Tus utilidades permanecen integradas a tu cuenta. Los desembolsos son gestionados y acordados directamente con el administrador durante la fase de liquidación mensual.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {userDisbursements.map((d) => (
-                  <div
-                    key={d.id}
-                    className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5 text-xs shadow-md"
-                  >
-                    <div className="flex items-center justify-between flex-wrap gap-2">
+                    {/* Step selector for multiples of 1,000,000 */}
+                    <div className="space-y-2">
                       <div className="flex items-center gap-2">
-                        <span className="font-black text-slate-100 font-mono text-base">
-                          {formatCOP(d.amountCop)}
-                        </span>
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            d.method === 'EFECTIVO'
-                              ? 'bg-amber-950 text-amber-300 border border-amber-500/30'
-                              : 'bg-blue-950 text-blue-300 border border-blue-500/30'
-                          }`}
+                        <button
+                          type="button"
+                          onClick={() => setProfitReinvestSelectedCop((prev) => Math.max(1_000_000, prev - 1_000_000))}
+                          disabled={card1SelectedReinvest <= 1_000_000}
+                          className="px-3 py-2 bg-slate-950 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-700 rounded-xl text-slate-200 font-mono font-bold text-sm cursor-pointer"
                         >
-                          {d.method === 'EFECTIVO' ? 'Efectivo en Taquilla' : 'Transferencia Bancaria'}
-                        </span>
+                          -$1M
+                        </button>
+                        <div className="flex-1 text-center py-2 bg-slate-950 border border-slate-700 rounded-xl font-mono font-bold text-teal-300 text-base">
+                          {formatCOP(card1SelectedReinvest)}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setProfitReinvestSelectedCop((prev) => Math.min(reinvestableProfitCop, prev + 1_000_000))}
+                          disabled={card1SelectedReinvest >= reinvestableProfitCop}
+                          className="px-3 py-2 bg-slate-950 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-700 rounded-xl text-slate-200 font-mono font-bold text-sm cursor-pointer"
+                        >
+                          +$1M
+                        </button>
                       </div>
 
-                      <span
-                        className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
-                          d.status === 'PAID'
-                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
-                            : d.status === 'APPROVED'
-                            ? 'bg-blue-950 text-blue-300 border border-blue-500/40'
-                            : d.status === 'PENDING'
-                            ? 'bg-amber-950 text-amber-300 border border-amber-500/40'
-                            : 'bg-red-950 text-red-300 border border-red-500/40'
-                        }`}
-                      >
-                        {d.status === 'PAID'
-                          ? '✓ PAGADO / ENTREGADO'
-                          : d.status === 'APPROVED'
-                          ? 'APROBADO POR TESORERÍA'
-                          : d.status === 'PENDING'
-                          ? 'EN PROCESO DE PAGO'
-                          : 'RECHAZADO'}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-400 font-mono pt-1">
-                      <div>
-                        <span className="text-slate-500">Ciclo de Origen: </span>
-                        <span className="text-slate-300 font-bold">{d.sourceCycleId}</span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500">Fecha: </span>
-                        <span className="text-slate-300">{d.createdAt.slice(0, 10)}</span>
-                      </div>
-                      {d.method === 'TRANSFERENCIA' && (
-                        <>
-                          <div>
-                            <span className="text-slate-500">Banco: </span>
-                            <span className="text-slate-300">{d.bankName || 'Bancolombia'}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-500">Cuenta: </span>
-                            <span className="text-slate-300">{d.accountNumber || 'Cuenta Registrada'}</span>
-                          </div>
-                        </>
-                      )}
-                      {d.method === 'EFECTIVO' && (
-                        <div className="sm:col-span-2">
-                          <span className="text-slate-500">Lugar de Entrega: </span>
-                          <span className="text-amber-300">{d.cashOffice || 'Sede Principal de Tesorería'}</span>
+                      {/* Quick chips if multiple millions available */}
+                      {reinvestableProfitCop > 1_000_000 && (
+                        <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                          {Array.from({ length: Math.min(6, reinvestableProfitCop / 1_000_000) }, (_, i) => (i + 1) * 1_000_000).map((amt) => (
+                            <button
+                              key={amt}
+                              type="button"
+                              onClick={() => setProfitReinvestSelectedCop(amt)}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono transition cursor-pointer ${
+                                card1SelectedReinvest === amt
+                                  ? 'bg-teal-600 text-white font-bold shadow-md shadow-teal-600/30'
+                                  : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                              }`}
+                            >
+                              {formatCOP(amt)}
+                            </button>
+                          ))}
                         </div>
                       )}
                     </div>
 
-                    {d.notes && (
-                      <div className="pt-2 border-t border-slate-900 text-[11px] text-slate-400">
-                        <span className="text-slate-500">Observación: </span>
-                        <span>{d.notes}</span>
+                    {/* Breakdown Box */}
+                    <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs font-mono">
+                      <div className="flex justify-between text-slate-400">
+                        <span>Capital actual:</span>
+                        <span className="text-slate-200">{formatCOP(currentUser.currentCapital)}</span>
                       </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Ganancia total del ciclo:</span>
+                        <span className="text-emerald-400">{formatCOP(cycleProfitCop)}</span>
+                      </div>
+                      <div className="flex justify-between text-teal-400 font-semibold pt-1 border-t border-slate-800/80">
+                        <span>Ganancia que reinvertirás:</span>
+                        <span>+{formatCOP(card1SelectedReinvest)}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Saldo restante a consignar:</span>
+                        <span className="text-slate-200">{formatCOP(card1ProfitRemainder)}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-100 font-bold pt-2 border-t border-slate-800">
+                        <span>Capital proyectado:</span>
+                        <span className="text-emerald-300">{formatCOP(card1ProjectedCapital)}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] text-slate-400">
+                        <span>Bitácora proyectada:</span>
+                        <span className="text-blue-300 font-sans font-bold">{card1ProjectedCategory}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Action Button */}
+              <button
+                type="button"
+                onClick={handleOpenCard1Modal}
+                disabled={reinvestableProfitCop < 1_000_000 || !!pendingRequestForCycle || isCycleClosing || selectedCycleId !== activeCycle?.cycleId}
+                className="w-full py-3 bg-teal-600 hover:bg-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-bold text-xs shadow-lg shadow-teal-600/20 transition cursor-pointer flex items-center justify-center gap-2 mt-4"
+              >
+                <Coins className="w-4 h-4" />
+                <span>
+                  {selectedCycleId !== activeCycle?.cycleId
+                    ? 'Solo Disponible en Ciclo Activo'
+                    : isCycleClosing
+                    ? 'Cierre en Proceso (Bloqueado)'
+                    : 'Solicitar Reinversión de Ganancias'}
+                </span>
+              </button>
+            </div>
+
+            {/* ------------------------------------------------------------- */}
+            {/* MODALITY 2: INYECCIÓN DE CAPITAL */}
+            {/* ------------------------------------------------------------- */}
+            <div className="p-5 sm:p-6 rounded-2xl bg-slate-900 border border-blue-500/40 hover:border-blue-500/60 transition-all flex flex-col justify-between space-y-5 shadow-xl">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-blue-950/80 border border-blue-500/40 flex items-center justify-center text-blue-300 shrink-0">
+                      <Wallet className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-blue-400 block">
+                        Modalidad 2
+                      </span>
+                      <h4 className="text-base font-bold text-slate-100">
+                        Inyección de capital
+                      </h4>
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-blue-950 text-blue-300 border border-blue-500/30">
+                    Ganancia + Transferencia
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Elige cuánto quieres aumentar tu capital para el próximo ciclo. Primero utilizaremos tus ganancias disponibles y te indicaremos cuánto dinero adicional debes aportar.
+                </p>
+
+                {/* Amount selector in multiples of 1,000,000 */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-xs">
+                    <label className="text-slate-300 font-semibold">
+                      ¿Cuánto quieres aumentar tu capital?
+                    </label>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      Múltiplos de $1.000.000 COP
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDesiredCapitalIncreaseCop((prev) => Math.max(1_000_000, prev - 1_000_000))}
+                      disabled={card2DesiredIncrease <= 1_000_000}
+                      className="px-3 py-2 bg-slate-950 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-700 rounded-xl text-slate-200 font-mono font-bold text-sm cursor-pointer"
+                    >
+                      -$1M
+                    </button>
+                    <div className="flex-1 text-center py-2 bg-slate-950 border border-slate-700 rounded-xl font-mono font-bold text-blue-300 text-base">
+                      +{formatCOP(card2DesiredIncrease)}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setDesiredCapitalIncreaseCop((prev) => prev + 1_000_000)}
+                      className="px-3 py-2 bg-slate-950 hover:bg-slate-800 border border-slate-700 rounded-xl text-slate-200 font-mono font-bold text-sm cursor-pointer"
+                    >
+                      +$1M
+                    </button>
+                  </div>
+
+                  {/* Quick Chips for Capital Injection */}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {[1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000].map((amt) => (
+                      <button
+                        key={amt}
+                        type="button"
+                        onClick={() => setDesiredCapitalIncreaseCop(amt)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-mono transition cursor-pointer ${
+                          card2DesiredIncrease === amt
+                            ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-600/30'
+                            : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                        }`}
+                      >
+                        +{formatCOP(amt)}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Real-time Dynamic Breakdown */}
+                  <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs font-mono">
+                    <div className="flex justify-between text-slate-400">
+                      <span>Ganancia disponible del ciclo:</span>
+                      <span className="text-slate-200">{formatCOP(reinvestableProfitCop)}</span>
+                    </div>
+                    <div className="flex justify-between text-teal-400">
+                      <span>Tus ganancias aportan:</span>
+                      <span className="font-semibold">{formatCOP(card2ProfitApplied)}</span>
+                    </div>
+                    <div className="flex justify-between text-blue-300 pt-1 border-t border-slate-800/80">
+                      <span className="font-sans font-semibold">Debes transferir (dinero nuevo):</span>
+                      <span className="font-bold">{formatCOP(card2CashInjection)}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-400">
+                      <span>Recibirás de tus ganancias (a consignar):</span>
+                      <span className="text-slate-200">{formatCOP(card2ProfitToDisburse)}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-100 font-bold pt-2 border-t border-slate-800">
+                      <span>Capital proyectado próximo ciclo:</span>
+                      <span className="text-emerald-300">{formatCOP(card2ProjectedCapital)}</span>
+                    </div>
+                    <div className="flex justify-between text-[11px] text-slate-400">
+                      <span>Bitácora proyectada:</span>
+                      <span className="text-blue-300 font-sans font-bold">{card2ProjectedCategory}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Button */}
+              <button
+                type="button"
+                onClick={handleOpenCard2Modal}
+                disabled={!!pendingRequestForCycle || isCycleClosing || selectedCycleId !== activeCycle?.cycleId}
+                className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-bold text-xs shadow-lg shadow-blue-600/20 transition cursor-pointer flex items-center justify-center gap-2 mt-4"
+              >
+                <Wallet className="w-4 h-4" />
+                <span>
+                  {selectedCycleId !== activeCycle?.cycleId
+                    ? 'Solo Disponible en Ciclo Activo'
+                    : isCycleClosing
+                    ? 'Cierre en Proceso (Bloqueado)'
+                    : 'Solicitar Inyección de Capital'}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {/* ========================================================================= */}
+          {/* USER REINVESTMENT REQUESTS HISTORY */}
+          {/* ========================================================================= */}
+          <div className="p-4 sm:p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <FileCheck2 className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <h3 className="text-base font-bold text-slate-100">Mis Solicitudes de Reinversión e Inyección</h3>
+                  <p className="text-xs text-slate-400">Historial y estado de validación ante la administración</p>
+                </div>
+              </div>
+              <span className="text-xs text-slate-400 font-mono">{userReinvestments.length} solicitudes</span>
+            </div>
+
+            {userReinvestments.length === 0 ? (
+              <div className="p-8 text-center text-slate-500 text-xs">
+                Aún no tienes solicitudes de reinversión radicadas.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {userReinvestments.map((req) => (
+                  <div
+                    key={req.id}
+                    className="p-4 rounded-xl bg-slate-950 border border-slate-800/90 space-y-3 text-xs"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-900 pb-2.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            req.modality === 'CAPITAL_INJECTION'
+                              ? 'bg-blue-950 text-blue-300 border border-blue-500/30'
+                              : 'bg-teal-950 text-teal-300 border border-teal-500/30'
+                          }`}
+                        >
+                          {req.modality === 'CAPITAL_INJECTION' ? 'Inyección de Capital' : 'Reinversión de Ganancias'}
+                        </span>
+                        <span className="font-bold text-slate-200 font-mono text-sm">
+                          +{formatCOP(req.totalIncreaseCop || req.reinvestAmountCop)}
+                        </span>
+                        <span className="text-[11px] text-slate-500 font-mono">
+                          • Ciclo: {req.sourceCycleId}
+                        </span>
+                      </div>
+
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono self-start sm:self-auto ${
+                          req.status === 'APPROVED'
+                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30'
+                            : req.status === 'PENDING'
+                            ? 'bg-amber-950 text-amber-300 border border-amber-500/30'
+                            : 'bg-red-950 text-red-300 border border-red-500/30'
+                        }`}
+                      >
+                        {req.status === 'APPROVED'
+                          ? req.appliedAtCycleClosure ? 'APLICADA EN CIERRE ✓' : 'APROBADA (SE APLICARÁ AL CIERRE)'
+                          : req.status === 'PENDING'
+                          ? 'PENDIENTE DE APROBACIÓN'
+                          : 'RECHAZADA'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono text-[11px] text-slate-400">
+                      <div>
+                        <span className="text-[10px] block font-sans text-slate-500">Ganancia Aplicada</span>
+                        <span className="text-emerald-400 font-semibold">
+                          {formatCOP(req.profitAppliedCop !== undefined ? req.profitAppliedCop : req.reinvestAmountCop)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] block font-sans text-slate-500">Aporte en Efectivo</span>
+                        <span className="text-blue-300 font-semibold">
+                          {formatCOP(req.cashInjectionCop || 0)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] block font-sans text-slate-500">Saldo a Consignar</span>
+                        <span className="text-slate-300">
+                          {formatCOP(req.profitToDisburseCop || req.withdrawAmountCop || 0)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] block font-sans text-slate-500">Capital Proyectado</span>
+                        <span className="text-slate-100 font-bold">
+                          {formatCOP(req.projectedCapitalCop || req.newCapitalTargetCop)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {req.notes && (
+                      <p className="text-[10px] text-slate-500 pt-2 border-t border-slate-900">
+                        {req.notes}
+                      </p>
                     )}
                   </div>
                 ))}
               </div>
             )}
           </div>
+
+          {/* ========================================================================= */}
+          {/* CONFIRMATION MODAL */}
+          {/* ========================================================================= */}
+          {reinvestModalConfig && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in">
+              <div className="w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-5 sm:p-6 space-y-5">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                    <h3 className="text-base font-bold text-slate-100">
+                      {reinvestModalConfig.modality === 'PROFIT_REINVESTMENT'
+                        ? 'Confirmar Reinversión de Ganancias'
+                        : 'Confirmar Inyección de Capital'}
+                    </h3>
+                  </div>
+                  <button
+                    onClick={() => setReinvestModalConfig(null)}
+                    disabled={isSubmittingReinvest}
+                    className="p-1 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1 font-mono">
+                    <div className="flex justify-between text-slate-400">
+                      <span className="font-sans">Inversionista:</span>
+                      <span className="text-slate-200 font-bold">{currentUser.fullName} ({currentUser.userCode})</span>
+                    </div>
+                    <div className="flex justify-between text-slate-400">
+                      <span className="font-sans">Ciclo de origen:</span>
+                      <span className="text-slate-200">{selectedCycleId}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-400">
+                      <span className="font-sans">Modalidad:</span>
+                      <span className="text-teal-300 font-sans font-bold">
+                        {reinvestModalConfig.modality === 'PROFIT_REINVESTMENT' ? 'Reinversión de Ganancias' : 'Inyección de Capital'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 font-mono">
+                    <div className="flex justify-between text-slate-400">
+                      <span className="font-sans">Capital actual:</span>
+                      <span className="text-slate-200">{formatCOP(reinvestModalConfig.currentCapitalSnapshotCop)}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-400">
+                      <span className="font-sans">Ganancia total del ciclo:</span>
+                      <span className="text-emerald-400">{formatCOP(reinvestModalConfig.cycleProfitSnapshotCop)}</span>
+                    </div>
+                    <div className="flex justify-between text-teal-400 pt-1 border-t border-slate-800">
+                      <span className="font-sans">Ganancia aplicada:</span>
+                      <span className="font-semibold">{formatCOP(reinvestModalConfig.profitAppliedCop)}</span>
+                    </div>
+                    {reinvestModalConfig.cashInjectionCop > 0 && (
+                      <div className="flex justify-between text-blue-300">
+                        <span className="font-sans font-semibold">Dinero nuevo a transferir:</span>
+                        <span className="font-bold">{formatCOP(reinvestModalConfig.cashInjectionCop)}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between text-slate-400">
+                      <span className="font-sans">Saldo restante a consignar:</span>
+                      <span className="text-slate-200">{formatCOP(reinvestModalConfig.profitToDisburseCop)}</span>
+                    </div>
+                    <div className="flex justify-between text-emerald-300 font-bold pt-2 border-t border-slate-800 text-sm">
+                      <span className="font-sans">Aumento total de capital:</span>
+                      <span>+{formatCOP(reinvestModalConfig.totalIncreaseCop)}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-100 font-bold">
+                      <span className="font-sans">Capital proyectado próximo ciclo:</span>
+                      <span>{formatCOP(reinvestModalConfig.projectedCapitalCop)}</span>
+                    </div>
+                    <div className="flex justify-between text-blue-300 text-[11px]">
+                      <span className="font-sans">Bitácora proyectada:</span>
+                      <span className="font-sans font-bold">{reinvestModalConfig.projectedCategory}</span>
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-blue-950/40 border border-blue-500/30 text-blue-200/90 text-[11px] leading-relaxed">
+                    <strong>Importante:</strong> Esta solicitud será procesada formalmente por el administrador. El capital del inversionista no mutará de inmediato; se aplicará oficialmente durante el cierre del ciclo operativo (APPROVED ≠ APPLIED).
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setReinvestModalConfig(null)}
+                    disabled={isSubmittingReinvest}
+                    className="px-4 py-2.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold transition cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmSubmit}
+                    disabled={isSubmittingReinvest}
+                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold shadow-lg shadow-emerald-600/30 transition cursor-pointer flex items-center gap-2"
+                  >
+                    {isSubmittingReinvest ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Radicando Solicitud...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Confirmar y Radicar Solicitud</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {currentTab === 'statistics' && (
+        <div className="mt-4">
+          <StatisticsView />
         </div>
       )}
     </div>

@@ -2,125 +2,321 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Función de verificación de SuperAdmin por UID exacto y token
-    function isSuperAdmin() {
-      return request.auth != null && (
-        request.auth.uid == 'lpx4NLEEMkeh9EJFcG68oPMVdXF2' ||
-        request.auth.token.email == 'juanes9802@gmail.com' ||
-        request.auth.token.role == 'admin'
-      );
-    }
-    
+
+    // =========================================================================
+    // HELPERS DE AUTORIZACIÓN Y PRIVILEGIOS
+    // =========================================================================
+
     function isAuthenticated() {
       return request.auth != null;
     }
-    
-    function isOwner(userId) {
+
+    function isSuperAdmin() {
       return isAuthenticated() && (
-        request.auth.uid == userId ||
-        (resource != null && resource.data.uid == request.auth.uid)
+        request.auth.uid == 'lpx4NLEEMkeh9EJFcG68oPMVdXF2' ||
+        (request.auth.token != null && (
+          request.auth.token.superadmin == true ||
+          request.auth.token.email == 'juanes9802@gmail.com' ||
+          request.auth.token.email == 'elcocalombiano1828@gmail.com'
+        ))
       );
     }
 
-    // 1. Acceso maestro del SuperAdmin: Control total sobre cualquier colección y documento
-    match /{document=**} {
-      allow read, write: if isSuperAdmin();
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
 
-    // 2. Colección de Usuarios / Inversionistas
-    // SuperAdmin: control total. Inversionista: solo ve y consulta su propio perfil
+    function isDbAdmin() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        getUserData().role == 'ADMIN';
+    }
+
+    function isAdmin() {
+      return isSuperAdmin() ||
+        (isAuthenticated() && request.auth.token != null && request.auth.token.role == 'admin') ||
+        isDbAdmin();
+    }
+
+    function isUserActive() {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        getUserData().status == 'ACTIVE';
+    }
+
+    function isValidUserDataOnCreate() {
+      let userData = getUserData();
+      return request.resource.data.userUid == request.auth.uid &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.userCode == userData.userCode &&
+        request.resource.data.userName == userData.fullName;
+    }
+
+    // =========================================================================
+    // 1. PERFILES DE USUARIO (/users/{userId})
+    // =========================================================================
     match /users/{userId} {
-      allow read: if isSuperAdmin() || isOwner(userId);
-      // Inversionista solo puede actualizar campos de contacto personales no sensibles
-      allow update: if isAuthenticated() && (request.auth.uid == userId || (resource != null && resource.data.uid == request.auth.uid))
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'currentCapital', 'baseCapital', 'userPercentage', 'adminPercentage', 'status', 'category']);
-      allow create, delete: if isSuperAdmin();
+      allow get: if isAdmin() || (isAuthenticated() && request.auth.uid == userId);
+      allow list: if isAdmin();
+      allow create: if false; // Creación exclusiva por Cloud Functions Callables
+      allow update: if isAdmin(); // Edición administrativa directa de perfil
+      allow delete: if false; // Requiere migración a Callable que elimine Firebase Auth + Firestore
+
+      // Subcolección de Tokens FCM por Dispositivo
+      match /pushTokens/{tokenId} {
+        allow read: if isAdmin() || (isAuthenticated() && request.auth.uid == userId);
+        allow create, update, delete: if isAdmin() || (isAuthenticated() && request.auth.uid == userId);
+      }
     }
 
-    // 3. Postulaciones / Aspirantes a Inversionistas (Cola FIFO)
-    // Cualquier persona puede postularse desde la web pública (create)
-    // El postulante autenticado puede consultar su estado; SuperAdmin gestiona todo
-    match /applications/{appId} {
-      allow create: if true;
-      allow read: if isSuperAdmin() || (isAuthenticated() && resource.data.email == request.auth.token.email);
-      allow update, delete: if isSuperAdmin();
-    }
-    match /investorApplications/{appId} {
-      allow create: if true;
-      allow read: if isSuperAdmin() || (isAuthenticated() && resource.data.email == request.auth.token.email);
-      allow update, delete: if isSuperAdmin();
-    }
-
-    // 4. Resultados y Liquidaciones de Ciclo Individuales
-    // Cada inversionista consulta exclusivamente su liquidación individual
+    // =========================================================================
+    // 2. RESULTADOS Y LIQUIDACIONES INDIVIDUALES (/cycleUserResults/{resultId})
+    // =========================================================================
     match /cycleUserResults/{resultId} {
-      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
-      allow write: if isSuperAdmin();
+      allow read: if isAdmin() || (
+        isAuthenticated() && resource.data.userUid == request.auth.uid
+      );
+      allow write: if isAdmin();
     }
 
-    // 5. Ciclos Mensuales (Lectura de ciclos para ver TRM y estado activo)
+    // =========================================================================
+    // 3. OPERACIONES DIARIAS Y BITÁCORAS DE TRADING (/dailyOperations)
+    // =========================================================================
+    match /dailyOperations/{docId} {
+      allow read: if isAdmin() || (
+        isAuthenticated() && (
+          (resource.data.authorizedUids != null && request.auth.uid in resource.data.authorizedUids) ||
+          (resource.data.isPublicToActiveUsers == true && isUserActive())
+        )
+      );
+      allow create, update, delete: if false;
+    }
+
+    match /bitacoras/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================================
+    // 4. CICLOS MENSUALES (/monthlyCycles/{cycleId})
+    // =========================================================================
     match /monthlyCycles/{cycleId} {
       allow read: if isAuthenticated();
-      allow write: if isSuperAdmin();
+      // Creación permitida para administradores siempre que no inicien con lock de cierre ni estado CLOSED
+      allow create: if isAdmin() &&
+        !('isClosing' in request.resource.data && request.resource.data.isClosing == true) &&
+        (!('status' in request.resource.data) || request.resource.data.status in ['OPEN', 'REOPENED']);
+      
+      // Actualización protegida: Prohíbe a clientes Admin modificar los campos de ciclo de vida / lock / cierre
+      // (status, isClosing, closingStartedAt, closingByUid, closingByName, closureAttemptId, closedAt, closedBy, closedByUid, appliedReinvestmentsCount)
+      // Dichos campos son mutados EXCLUSIVAMENTE por Cloud Functions autoritativas (adminCloseCycleCallable, adminUnlockCycleCallable).
+      allow update: if isAdmin() && (
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'status',
+          'isClosing',
+          'closingStartedAt',
+          'closingByUid',
+          'closingByName',
+          'closureAttemptId',
+          'closedAt',
+          'closedBy',
+          'closedByUid',
+          'appliedReinvestmentsCount'
+        ])
+      );
+
+      // Prohibir eliminación directa desde clientes
+      allow delete: if false;
     }
 
-    // 6. Solicitudes de Reinversión de Ganancias
-    // El inversionista puede crear su solicitud y ver su historial
+    // =========================================================================
+    // 5. CÁLCULOS DE GRUPO Y RESÚMENES FINANCIEROS (EXCLUSIVO ADMIN)
+    // =========================================================================
+    match /cycleGroupCalculations/{groupId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /cycleFinancialSummaries/{cycleId} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================================
+    // 6. AUDITORÍA Y TRAZABILIDAD (EXCLUSIVO SUPERADMIN)
+    // =========================================================================
+    match /auditLogs/{logId} {
+      allow read: if isSuperAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // =========================================================================
+    // 7. SOLICITUDES DE REINVERSIÓN (/reinvestments/{reqId})
+    // =========================================================================
     match /reinvestments/{reqId} {
-      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
-      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || request.resource.data.userUid == request.auth.uid);
-      allow update, delete: if isSuperAdmin();
-    }
-    match /reinvestmentRequests/{reqId} {
-      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
-      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || request.resource.data.userUid == request.auth.uid);
-      allow update, delete: if isSuperAdmin();
+      allow read: if isAdmin() || (
+        isAuthenticated() && resource.data.userUid == request.auth.uid
+      );
+      // Las solicitudes de reinversión se crean, resuelven y aplican exclusivamente mediante
+      // Cloud Functions autoritativas con el Admin SDK (submitReinvestmentRequestCallable,
+      // adminResolveReinvestmentCallable, adminCloseCycleCallable).
+      // Se prohíbe toda mutación directa (create, update, delete) desde clientes web o móviles.
+      allow create, update, delete: if false;
     }
 
-    // 7. Solicitudes de Desembolso / Retiro de Fondos
+    // =========================================================================
+    // 8. SOLICITUDES DE DESEMBOLSO / RETIRO (/disbursements/{reqId})
+    // =========================================================================
     match /disbursements/{reqId} {
-      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
-      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || request.resource.data.userUid == request.auth.uid);
-      allow update, delete: if isSuperAdmin();
+      allow read: if isAdmin() || (
+        isAuthenticated() && resource.data.userUid == request.auth.uid
+      );
+      allow create: if isAdmin() || (
+        isAuthenticated() &&
+        isValidUserDataOnCreate() &&
+        request.resource.data.keys().hasOnly([
+          'id', 'userId', 'userUid', 'userCode', 'userName', 'sourceCycleId',
+          'amountCop', 'disbursementSource', 'method', 'bankName', 'accountType',
+          'accountNumber', 'accountHolderName', 'idDocument', 'cashOffice',
+          'receiverId', 'receiverFullName', 'status', 'createdAt', 'resolvedAt',
+          'resolvedBy', 'notes'
+        ]) &&
+        request.resource.data.keys().hasAll([
+          'id', 'userId', 'userUid', 'userCode', 'userName', 'sourceCycleId',
+          'amountCop', 'method', 'status', 'createdAt'
+        ]) &&
+        request.resource.data.status == 'PENDING' &&
+        request.resource.data.amountCop is number &&
+        request.resource.data.amountCop > 0 &&
+        (!('resolvedAt' in request.resource.data) || request.resource.data.resolvedAt == null) &&
+        (!('resolvedBy' in request.resource.data) || request.resource.data.resolvedBy == null)
+      );
+      allow update, delete: if isAdmin();
     }
 
-    // 8. Solicitudes de Aportes / Nuevas Inversiones
+    // =========================================================================
+    // 9. SOLICITUDES DE INVERSIÓN / APORTES (/investments/{invId})
+    // =========================================================================
     match /investments/{invId} {
-      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
-      allow create: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || request.resource.data.userUid == request.auth.uid);
-      allow update, delete: if isSuperAdmin();
+      allow read: if isAdmin() || (
+        isAuthenticated() && resource.data.userUid == request.auth.uid
+      );
+      allow create: if isAdmin() || (
+        isAuthenticated() &&
+        isValidUserDataOnCreate() &&
+        request.resource.data.keys().hasOnly([
+          'id', 'userId', 'userUid', 'userCode', 'userName', 'requestedAmountCop',
+          'paymentMethod', 'status', 'createdAt', 'notes'
+        ]) &&
+        request.resource.data.keys().hasAll([
+          'id', 'userId', 'userUid', 'userCode', 'userName', 'requestedAmountCop',
+          'status', 'createdAt'
+        ]) &&
+        request.resource.data.status == 'PENDING' &&
+        request.resource.data.requestedAmountCop is number &&
+        request.resource.data.requestedAmountCop > 0
+      );
+      allow update, delete: if isAdmin();
     }
 
-    // 9. Notificaciones Personales
+    // =========================================================================
+    // 10. NOTIFICACIONES PERSONALES Y TARGETED (/notifications/{notifId})
+    // =========================================================================
     match /notifications/{notifId} {
-      allow read: if isSuperAdmin() || (isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid));
-      allow update: if isAuthenticated() && (resource.data.userId == request.auth.uid || resource.data.userUid == request.auth.uid)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt']);
-      allow write: if isSuperAdmin();
+      function ownsNotification() {
+        return isAuthenticated() && (
+          (resource.data.userUid != null && resource.data.userUid == request.auth.uid) ||
+          (resource.data.userId != null && resource.data.userId == request.auth.uid)
+        );
+      }
+
+      allow read: if isAdmin() || (
+        isAuthenticated() && (
+          ownsNotification() ||
+          (
+            resource.data.targetUids != null &&
+            request.auth.uid in resource.data.targetUids
+          )
+        )
+      );
+
+      allow update: if isAdmin() || (
+        ownsNotification() &&
+        request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'isRead',
+            'readAt',
+            'hiddenByUser',
+            'hiddenAt'
+          ])
+      );
+
+      allow create: if isAdmin();
+      allow delete: if isAdmin();
     }
 
-    // 10. Configuración General del Sistema (TRM oficial, categorías)
+    // =========================================================================
+    // 11. POSTULACIONES DE ASPIRANTES (/investorApplications/{appId})
+    // =========================================================================
+    match /investorApplications/{appId} {
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================================
+    // 12. COLECCIONES LEGACY (ACCESO EXCLUSIVO SUPERADMIN / NO WRITE CLIENTE)
+    // =========================================================================
+    match /applications/{appId} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
+    }
+
+    match /reinvestmentRequests/{reqId} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
+    }
+
+    // =========================================================================
+    // 13. CONFIGURACIÓN GENERAL DEL SISTEMA (/settings/{docId})
+    // =========================================================================
     match /settings/{docId} {
       allow read: if isAuthenticated();
-      allow write: if isSuperAdmin();
+      allow write: if isAdmin();
     }
 
-    // 11. Bitácoras y Operaciones Diarias de Trading (Exclusivo SuperAdmin)
-    match /dailyOperations/{docId} {
-      allow read, write: if isSuperAdmin();
-    }
-    match /bitacoras/{docId} {
-      allow read, write: if isSuperAdmin();
-    }
-    match /cycleGroupCalculations/{groupId} {
-      allow read, write: if isSuperAdmin();
+    // =========================================================================
+    // 14. INFORMES OFICIALES DE CIERRE POR CICLO (/cycleReports/{cycleId}/...)
+    // Acceso EXCLUSIVO para SuperAdmin (Read-Only cliente; escrituras solo backend)
+    // =========================================================================
+    match /cycleReports/{cycleId} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
+
+      match /versions/{versionId} {
+        allow read: if isSuperAdmin();
+        allow write: if false;
+
+        match /users/{userUid} {
+          allow read: if isSuperAdmin();
+          allow write: if false;
+        }
+      }
     }
 
-    // 12. Auditoría y Trazabilidad (Exclusivo SuperAdmin)
-    match /auditLogs/{logId} {
-      allow read, write: if isSuperAdmin();
+    // =========================================================================
+    // 15. COLECCIONES INTERNAS Y CONTADORES BACKEND-ONLY (SDK CLIENTE BLOQUEADO)
+    // =========================================================================
+    match /counters/{counterId} {
+      allow read, write: if false;
+    }
+
+    match /claimOperations/{opId} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // 16. DEFAULT DENY PARA CUALQUIER OTRA COLECCIÓN O RUTA NO ESPECIFICADA
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
-

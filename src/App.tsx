@@ -4,16 +4,18 @@ import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { AdminDashboard } from './components/AdminDashboard';
 import { MonthlyClosureView } from './components/MonthlyClosureView';
+import { AdminBitacoraView } from './components/AdminBitacoraView';
 import { UserManagementView } from './components/UserManagementView';
 import { ReinvestmentsView } from './components/ReinvestmentsView';
 import { AuditLogsView } from './components/AuditLogsView';
 import { AdminFinanceView } from './components/AdminFinanceView';
 import { InvestorApplicationsView } from './components/InvestorApplicationsView';
 import { UserPortalView } from './components/UserPortalView';
+import { AdminStatisticsPanel } from './components/AdminStatisticsPanel';
 import { EditTRMModal } from './components/EditTRMModal';
 import { NotificationsModal } from './components/NotificationsModal';
+import { LiveNotificationToast } from './components/LiveNotificationToast';
 import { OfflineIndicator } from './components/OfflineIndicator';
-import { MobileBottomNav } from './components/MobileBottomNav';
 import { LoginView } from './components/LoginView';
 import { fetchLiveTRM } from './lib/trmService';
 import { dataStore } from './lib/dataStore';
@@ -23,15 +25,30 @@ const MainLayout: React.FC = () => {
   const { currentUser, isSuperAdmin, isAuthLoading } = useAuth();
   const [activeTab, setActiveTab] = useState<string>('monthly_closure');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [showTrmModal, setShowTrmModal] = useState(false);
   const [showNotifModal, setShowNotifModal] = useState(false);
+  const [selectedCycleId, setSelectedCycleId] = useState<string>(() => {
+    const active = dataStore.getActiveCycle();
+    return active ? active.cycleId : (dataStore.getCycles()[0]?.cycleId || '2026-09');
+  });
 
-  // Pedir permiso de notificaciones de inmediato al cargar la app
+  const handleToggleSidebar = () => {
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+      setIsMobileSidebarOpen((prev) => !prev);
+    } else {
+      setIsSidebarCollapsed((prev) => !prev);
+    }
+  };
+
+  // Pedir permiso de notificaciones SOLO a usuarios que ya tengan cuenta activa en la app (no a visitantes ni al admin)
   React.useEffect(() => {
-    ensureAutoNotificationPermission().catch((err) => {
-      console.warn('Auto notification permission check:', err);
-    });
-  }, []);
+    if (currentUser && currentUser.role === 'USER') {
+      ensureAutoNotificationPermission().catch((err) => {
+        console.warn('Auto notification permission check:', err);
+      });
+    }
+  }, [currentUser]);
 
   // Auto-sync TRM en vivo al iniciar
   React.useEffect(() => {
@@ -80,44 +97,55 @@ const MainLayout: React.FC = () => {
         setActiveTab={setActiveTab}
         onOpenNotifications={() => setShowNotifModal(true)}
         onOpenSettings={() => setShowTrmModal(true)}
-        onOpenReports={() => setActiveTab('monthly_closure')}
         isOpenMobile={isMobileSidebarOpen}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
+        isCollapsed={isSidebarCollapsed}
+        onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
       />
 
       {/* Main Content Area (offset by sidebar width on lg screens) */}
-      <div className="flex-1 flex flex-col min-w-0 w-full max-w-full lg:pl-64">
+      <div
+        className={`flex-1 flex flex-col min-w-0 w-full max-w-full transition-[padding] duration-300 ease-in-out ${
+          isSidebarCollapsed ? 'lg:pl-20' : 'lg:pl-64'
+        }`}
+      >
         {/* Top Navbar */}
         <Navbar
           activeTab={activeTab}
           setActiveTab={setActiveTab}
-          onToggleSidebar={() => setIsMobileSidebarOpen(true)}
+          onToggleSidebar={handleToggleSidebar}
+          isSidebarCollapsed={isSidebarCollapsed}
         />
 
         {/* Dynamic View Component */}
-        <main className="flex-1 max-w-7xl w-full mx-auto px-2.5 sm:px-6 lg:px-8 py-3.5 sm:py-6 pb-24 sm:pb-8">
+        <main className="flex-1 max-w-7xl w-full mx-auto px-2.5 sm:px-6 lg:px-8 py-3.5 sm:py-6 pb-8">
           {isSuperAdmin && !activeTab.startsWith('portal') ? (
             <>
               {activeTab === 'dashboard' && <AdminDashboard onNavigate={setActiveTab} />}
               {activeTab === 'finance' && <AdminFinanceView onNavigate={setActiveTab} />}
-              {activeTab === 'monthly_closure' && <MonthlyClosureView />}
+              {activeTab === 'bitacoras' && <AdminBitacoraView onNavigate={setActiveTab} />}
+              {activeTab === 'monthly_closure' && <MonthlyClosureView onNavigate={setActiveTab} />}
               {activeTab === 'users' && <UserManagementView />}
               {activeTab === 'applications' && (
                 <InvestorApplicationsView onNavigateToUser={() => setActiveTab('users')} />
               )}
               {activeTab === 'reinvestments' && <ReinvestmentsView />}
+              {activeTab === 'admin_statistics' && <AdminStatisticsPanel />}
               {activeTab === 'audit' && <AuditLogsView />}
             </>
           ) : (
-            <UserPortalView activeSection={activeTab} onNavigate={(tab) => setActiveTab(tab)} />
+            <UserPortalView
+              activeSection={activeTab}
+              onNavigate={(tab) => setActiveTab(tab)}
+              selectedCycleId={selectedCycleId}
+              onSelectCycle={setSelectedCycleId}
+            />
           )}
         </main>
 
         <footer className="hidden sm:flex border-t border-slate-900/90 bg-[#070b13]/80 py-4 px-6 text-center text-xs text-slate-500 flex-col sm:flex-row items-center justify-between gap-2 max-w-7xl mx-auto w-full">
           <div>
-            <span className="font-semibold text-slate-400">EASYTRADERS</span>
-            <span className="mx-2 text-slate-600">•</span>
-            <span>Gestor de Capital y Liquidaciones v2.1</span>
+            <span className="font-semibold text-slate-400">EasyTraders24</span>
           </div>
           <div className="flex items-center gap-4 text-[11px] font-mono">
             <span>🔵 Azul • 🟢 Verde • ⚫ Negra</span>
@@ -127,12 +155,17 @@ const MainLayout: React.FC = () => {
         </footer>
       </div>
 
-      {/* Mobile Bottom Navigation Bar */}
-      <MobileBottomNav activeTab={activeTab} setActiveTab={setActiveTab} />
-
       {/* Shared Modals accessible from sidebar */}
       <EditTRMModal isOpen={showTrmModal} onClose={() => setShowTrmModal(false)} />
-      <NotificationsModal isOpen={showNotifModal} onClose={() => setShowNotifModal(false)} />
+      <NotificationsModal
+        isOpen={showNotifModal}
+        onClose={() => setShowNotifModal(false)}
+        onSelectTab={setActiveTab}
+        onSelectCycle={setSelectedCycleId}
+      />
+
+      {/* Real-time in-app notification banner toast */}
+      <LiveNotificationToast onNavigateToTab={setActiveTab} />
 
       {/* PWA Offline indicator */}
       <OfflineIndicator />

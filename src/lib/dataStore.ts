@@ -16,50 +16,83 @@ import {
   CategoryGroupInfo,
   DailyGroupOperation,
   ImportedBitacoraRow,
+  OperationTargetType,
+  CycleFinancialSummary,
 } from '../types';
 import {
   notifyCycleClosureToUser,
   notifyNewApplicationToAdmin,
   notifyApplicationStatusToUser,
+  notifyNewReinvestmentToAdmin,
+  notifyDailyTradeToUser,
+  resolveTradeNotificationName,
+  playNotificationAudio,
+  sendBrowserPushNotification,
 } from './pushNotifications';
-import {
-  INITIAL_GLOBAL_CONFIG,
-  INITIAL_CYCLES,
-  INITIAL_USERS,
-  INITIAL_REINVESTMENTS,
-  INITIAL_DISBURSEMENTS,
-  INITIAL_INVESTMENTS,
-  INITIAL_APPLICATIONS,
-  INITIAL_AUDIT_LOGS,
-  INITIAL_DAILY_OPERATIONS,
-} from './mockSeedData';
 import {
   calculateUserMonthlyResult,
   getCategoryForCapital,
   generateUserCode,
 } from './financialEngine';
 import { normalizeName } from './excelMigrationService';
+import { firestoreService } from './firestoreService';
+import { historicalMigrationService, ReconciliationReport } from './historicalMigrationService';
+import { auth } from './firebase';
+import { onAuthStateChanged } from 'firebase/auth';
+import { getAppBaseUrl } from './constants';
 
-const STORAGE_KEYS = {
-  USERS: 'gestor_capital_users_v5_clean_zero',
-  CYCLES: 'gestor_capital_cycles_v5_clean_zero',
-  CONFIG: 'gestor_capital_config_v5_clean_zero',
-  GROUP_CALCS: 'gestor_capital_group_calcs_v5_clean_zero',
-  USER_RESULTS: 'gestor_capital_user_results_v5_clean_zero',
-  NOTIFICATIONS: 'gestor_capital_notifications_v5_clean_zero',
-  REINVESTMENTS: 'gestor_capital_reinvestments_v5_clean_zero',
-  DISBURSEMENTS: 'gestor_capital_disbursements_v5_clean_zero',
-  INVESTMENTS: 'gestor_capital_investments_v5_clean_zero',
-  APPLICATIONS: 'gestor_capital_applications_v5_clean_zero',
-  AUDIT_LOGS: 'gestor_capital_audit_logs_v5_clean_zero',
-  DAILY_OPERATIONS: 'gestor_capital_daily_ops_v5_clean_zero',
+export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
+  trmReference: 4028.50,
+  trmConfigured: 4028.50,
+  trmMode: 'AUTOMATIC',
+  trmAutoSync: true,
+  trmMarketRate: 4028.50,
+  trmSource: 'Mercado Oficial Bancario (USD/COP)',
+  trmLastSyncedAt: new Date().toISOString(),
+  activeCycleId: '2026-09',
+  roundingRule: 'none',
+  categories: [
+    {
+      id: 'AZUL',
+      name: '🔵 Azul',
+      minCapital: 4_000_000,
+      maxCapital: 9_999_999,
+      color: '#2563eb',
+      badgeBg: 'bg-blue-900/40 border-blue-500/30 text-blue-300',
+      badgeText: 'Azul ($4M - $9M COP)',
+    },
+    {
+      id: 'VERDE',
+      name: '🟢 Verde',
+      minCapital: 10_000_000,
+      maxCapital: 59_999_999,
+      color: '#059669',
+      badgeBg: 'bg-emerald-900/40 border-emerald-500/30 text-emerald-300',
+      badgeText: 'Verde ($10M - $50M COP)',
+    },
+    {
+      id: 'NEGRA',
+      name: '⚫ Bitácora Negra',
+      minCapital: 60_000_000,
+      maxCapital: 1_000_000_000,
+      color: '#09090b',
+      badgeBg: 'bg-zinc-950 border-zinc-700 text-zinc-200',
+      badgeText: 'Bitácora Negra (> $60M COP)',
+    },
+  ],
+  updatedAt: new Date().toISOString(),
+  updatedBy: 'admin-system',
 };
 
-// Limpieza proactiva de datos demo antiguos en el navegador
+// Limpieza total de almacenamiento local heredado para asegurar que Firestore sea la única fuente de verdad
 try {
   if (typeof window !== 'undefined' && window.localStorage) {
     Object.keys(localStorage).forEach((key) => {
-      if (key.startsWith('gestor_capital_') && !key.endsWith('_v5_clean_zero')) {
+      if (
+        key.startsWith('gestor_capital_') &&
+        !key.includes('current_user') &&
+        !key.includes('session')
+      ) {
         localStorage.removeItem(key);
       }
     });
@@ -73,7 +106,7 @@ type Listener = () => void;
 class DataStore {
   private users: UserProfile[] = [];
   private cycles: MonthlyCycle[] = [];
-  private config: GlobalConfig = INITIAL_GLOBAL_CONFIG;
+  private config: GlobalConfig = DEFAULT_GLOBAL_CONFIG;
   private groupCalculations: CycleGroupCalculation[] = [];
   private userResults: CycleUserResult[] = [];
   private notifications: NotificationItem[] = [];
@@ -83,11 +116,589 @@ class DataStore {
   private applications: InvestorApplication[] = [];
   private auditLogs: AuditLog[] = [];
   private dailyOperations: DailyGroupOperation[] = [];
+  private financialSummaries: CycleFinancialSummary[] = [];
+
+  private knownApplicationIds: Set<string> = new Set();
+  private knownReinvestmentIds: Set<string> = new Set();
+  private knownNotificationIds: Set<string> = new Set();
+  private readSharedIds: Set<string> = new Set();
+  private isInitialAppsSynced: boolean = false;
+  private isInitialReinvSynced: boolean = false;
+  private isInitialNotifsSynced: boolean = false;
 
   private listeners: Set<Listener> = new Set();
 
+  // Lifecycle & Listener Unsubscribers (FASE 1A)
+  private activeUnsubscribers: (() => void)[] = [];
+  private currentActiveUid: string | null = null;
+  private currentActiveRole: 'ADMIN' | 'INVESTOR' | null = null;
+  private authListenerUnsubscribe: (() => void) | null = null;
+
   constructor() {
     this.loadState();
+    try {
+      if (typeof window !== 'undefined') {
+        const saved = localStorage.getItem('gestor_read_shared_notifications');
+        if (saved) {
+          this.readSharedIds = new Set(JSON.parse(saved));
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    // FASE 1A: this.syncWithFirestore() y this.initRealtimeFirestoreSync() han sido removidos
+    // del constructor para evitar listeners globales y sincronización bulk insegura durante el bootstrap.
+    // Los listeners se activan exclusivamente tras resolver una identidad canónica en Firebase Auth.
+    this.initAuthLifecycle();
+  }
+
+  /**
+   * Inicializa el observador del ciclo de vida de autenticación canónica de Firebase Auth.
+   * Regla 12: NUNCA inicia listeners privados si auth.currentUser == null o currentUser.uid está vacío.
+   */
+  private initAuthLifecycle() {
+    if (typeof window === 'undefined') return;
+
+    if (this.authListenerUnsubscribe) {
+      this.authListenerUnsubscribe();
+      this.authListenerUnsubscribe = null;
+    }
+
+    this.authListenerUnsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      // Si no hay usuario autenticado en Firebase Auth, destruir listeners y limpiar datos privados
+      if (!fbUser || !fbUser.uid) {
+        this.stopActiveSubscriptions();
+        this.clearPrivateData();
+        return;
+      }
+
+      const uid = fbUser.uid.trim();
+      if (!uid) {
+        this.stopActiveSubscriptions();
+        this.clearPrivateData();
+        return;
+      }
+
+      // Determinar rol del usuario
+      const email = (fbUser.email || '').toLowerCase().trim();
+      const isKnownAdmin =
+        email === 'elcocalombiano1828@gmail.com' ||
+        email === 'juanes9802@gmail.com' ||
+        uid === 'lpx4NLEEMkeh9EJFcG68oPMVdXF2' ||
+        uid === 'admin_root_uid';
+
+      let isAdmin = isKnownAdmin;
+
+      if (!isAdmin) {
+        try {
+          const tokenResult = await fbUser.getIdTokenResult();
+          if (
+            tokenResult.claims.role === 'admin' ||
+            tokenResult.claims.role === 'ADMIN' ||
+            tokenResult.claims.admin === true ||
+            tokenResult.claims.superadmin === true
+          ) {
+            isAdmin = true;
+          }
+        } catch (err) {
+          console.warn('[DataStore] Error verificando claims de token:', err);
+        }
+      }
+
+      if (!isAdmin) {
+        try {
+          const profileDoc = await firestoreService.getUser(uid);
+          if (profileDoc && (profileDoc.role === 'ADMIN' || profileDoc.userCode?.startsWith('ADM'))) {
+            isAdmin = true;
+          }
+        } catch (err) {
+          console.warn('[DataStore] Consulta de verificación de rol administrador omitida:', err);
+        }
+      }
+
+      const targetRole: 'ADMIN' | 'INVESTOR' = isAdmin ? 'ADMIN' : 'INVESTOR';
+
+      // Evitar reconexiones duplicadas si la sesión actual no ha cambiado
+      if (this.currentActiveUid === uid && this.currentActiveRole === targetRole && this.activeUnsubscribers.length > 0) {
+        return;
+      }
+
+      // Destruir listeners anteriores y limpiar datos privados del usuario previo
+      this.stopActiveSubscriptions();
+      this.clearPrivateData();
+
+      this.currentActiveUid = uid;
+      this.currentActiveRole = targetRole;
+
+      if (isAdmin) {
+        this.startAdminSubscriptions();
+      } else {
+        this.startInvestorSubscriptions(uid);
+      }
+    });
+  }
+
+  /**
+   * Destruye todos los listeners activos en Firestore y reinicia los punteros de sesión.
+   */
+  public stopActiveSubscriptions() {
+    this.activeUnsubscribers.forEach((unsub) => {
+      try {
+        if (typeof unsub === 'function') {
+          unsub();
+        }
+      } catch (err) {
+        console.warn('[DataStore] Error ejecutando unsubscribe:', err);
+      }
+    });
+    this.activeUnsubscribers = [];
+    this.currentActiveUid = null;
+    this.currentActiveRole = null;
+  }
+
+  /**
+   * Limpia el estado privado en memoria para prevenir que queden datos del usuario previo.
+   */
+  public clearPrivateData() {
+    this.users = [];
+    this.dailyOperations = [];
+    this.groupCalculations = [];
+    this.userResults = [];
+    this.reinvestments = [];
+    this.disbursements = [];
+    this.investments = [];
+    this.applications = [];
+    this.notifications = [];
+    this.auditLogs = [];
+    this.knownApplicationIds.clear();
+    this.knownReinvestmentIds.clear();
+    this.knownNotificationIds.clear();
+    this.isInitialAppsSynced = false;
+    this.isInitialReinvSynced = false;
+    this.isInitialNotifsSynced = false;
+    this.notify();
+  }
+
+  /**
+   * Inicia listeners globales exclusivos para el rol ADMINISTRADOR.
+   */
+  public startAdminSubscriptions() {
+    this.stopActiveSubscriptions();
+    this.currentActiveRole = 'ADMIN';
+
+    // 1. Users global
+    const uUsers = firestoreService.listenUsers((remoteUsers) => {
+      if (remoteUsers && remoteUsers.length > 0) {
+        this.users = remoteUsers;
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uUsers);
+
+    // 2. Daily Operations global
+    const uDailyOps = firestoreService.listenDailyOperations((remoteOps) => {
+      if (remoteOps) {
+        this.dailyOperations = remoteOps.sort(
+          (a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime()
+        );
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uDailyOps);
+
+    // 3. Monthly Cycles global
+    const uCycles = firestoreService.listenCycles((remoteCycles) => {
+      if (remoteCycles && remoteCycles.length > 0) {
+        this.cycles = remoteCycles;
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uCycles);
+
+    // 4. Group Calculations global
+    const uGroupCalcs = firestoreService.listenGroupCalculations((remoteCalcs) => {
+      if (remoteCalcs) {
+        this.groupCalculations = remoteCalcs;
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uGroupCalcs);
+
+    // 5. User Results global
+    const uResults = firestoreService.listenUserResults((remoteResults) => {
+      if (remoteResults) {
+        this.userResults = remoteResults;
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uResults);
+
+    // 6. Investor Applications global
+    const uApps = firestoreService.listenApplications((remoteApps) => {
+      if (!remoteApps) return;
+      const isFirst = !this.isInitialAppsSynced;
+      remoteApps.forEach((app) => {
+        if (!this.knownApplicationIds.has(app.id)) {
+          this.knownApplicationIds.add(app.id);
+          if (!isFirst && app.status === 'PENDING') {
+            notifyNewApplicationToAdmin({
+              applicantName: app.fullName,
+              requestedCapitalCop: app.requestedCapitalCop,
+              queuePosition: app.queuePosition || 1,
+              phone: app.phone,
+              city: app.city,
+              bank: app.originBank,
+            });
+          }
+        }
+      });
+      this.isInitialAppsSynced = true;
+      this.applications = remoteApps.sort((a, b) => (a.queuePosition || 0) - (b.queuePosition || 0));
+      this.saveState();
+      this.notify();
+    });
+    this.activeUnsubscribers.push(uApps);
+
+    // 7. Reinvestments global
+    const uReinvs = firestoreService.listenReinvestments((remoteReinvs) => {
+      if (!remoteReinvs) return;
+      const isFirst = !this.isInitialReinvSynced;
+      remoteReinvs.forEach((reinv) => {
+        if (!this.knownReinvestmentIds.has(reinv.id)) {
+          this.knownReinvestmentIds.add(reinv.id);
+          if (!isFirst && reinv.status === 'PENDING') {
+            notifyNewReinvestmentToAdmin({
+              userName: reinv.userName,
+              userCode: reinv.userCode,
+              newCapitalTargetCop: reinv.newCapitalTargetCop,
+            });
+          }
+        }
+      });
+      this.isInitialReinvSynced = true;
+      this.reinvestments = remoteReinvs.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      this.saveState();
+      this.notify();
+    });
+    this.activeUnsubscribers.push(uReinvs);
+
+    // 8. Disbursements global
+    const uDisbs = firestoreService.listenDisbursements((remoteDisbs) => {
+      if (remoteDisbs) {
+        this.disbursements = remoteDisbs;
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uDisbs);
+
+    // 9. Investments global
+    const uInvs = firestoreService.listenInvestments((remoteInvs) => {
+      if (remoteInvs) {
+        this.investments = remoteInvs;
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uInvs);
+
+    // 10. Global Config Settings
+    const uSettings = firestoreService.listenSettings((remoteConfig) => {
+      if (remoteConfig) {
+        this.config = { ...this.config, ...remoteConfig };
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uSettings);
+
+    // 11. Notifications global
+    const uNotifs = firestoreService.listenNotifications((remoteNotifs) => {
+      if (!remoteNotifs) return;
+      this.notifications = remoteNotifs.sort(
+        (a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime()
+      );
+      this.saveState();
+      this.notify();
+    });
+    this.activeUnsubscribers.push(uNotifs);
+
+    // 12. Audit Logs global
+    const uAudit = firestoreService.listenAuditLogs((remoteLogs) => {
+      if (remoteLogs) {
+        this.auditLogs = remoteLogs.sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        );
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uAudit);
+
+    // 13. Financial Summaries global
+    const uSummaries = firestoreService.listenFinancialSummaries((remoteSummaries) => {
+      if (remoteSummaries) {
+        this.financialSummaries = remoteSummaries;
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uSummaries);
+  }
+
+  /**
+   * Inicia listeners aislados y seguros exclusivos para el rol INVERSIONISTA.
+   * Regla 2: NO consulta collection('users'). Carga exclusivamente su perfil canónico.
+   * Regla 3: cycleUserResults where('userUid', '==', currentUser.uid).
+   * Regla 4: reinvestments where('userUid', '==', currentUser.uid).
+   * Regla 5: disbursements where('userUid', '==', currentUser.uid).
+   * Regla 6: investments where('userUid', '==', currentUser.uid).
+   * Regla 7: notifications (dos listeners: userUid y targetUids, unificados y deduplicados por document ID).
+   * Regla 8: dailyOperations (dos listeners: authorizedUids y isPublicToActiveUsers, unificados y deduplicados).
+   * Regla 9: cycleGroupCalculations NO se escucha para inversionistas.
+   * Regla 10: bitacoras no tiene listeners.
+   */
+  public startInvestorSubscriptions(userUid: string) {
+    if (!userUid) return;
+    this.stopActiveSubscriptions();
+    this.currentActiveUid = userUid;
+    this.currentActiveRole = 'INVESTOR';
+
+    // 1. Perfil propio exclusivo (doc(db, 'users', userUid))
+    const uProfile = firestoreService.listenUserProfile(userUid, (remoteProfile) => {
+      if (remoteProfile) {
+        const existingIdx = this.users.findIndex(
+          (u) => u.uid === userUid || u.id === userUid || (remoteProfile.id && u.id === remoteProfile.id)
+        );
+        if (existingIdx >= 0) {
+          this.users[existingIdx] = remoteProfile;
+        } else {
+          this.users = [remoteProfile];
+        }
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uProfile);
+
+    // 2. Operaciones Diarias: dos listeners (authorizedUids y isPublicToActiveUsers) deduplicados
+    const uDailyOps = firestoreService.listenDailyOperationsForUser(userUid, (ops) => {
+      this.dailyOperations = ops;
+      this.saveState();
+      this.notify();
+    });
+    this.activeUnsubscribers.push(uDailyOps);
+
+    // 3. Ciclos mensuales (información general de ciclo y TRM)
+    const uCycles = firestoreService.listenCycles((remoteCycles) => {
+      if (remoteCycles && remoteCycles.length > 0) {
+        this.cycles = remoteCycles;
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uCycles);
+
+    // 4. Resultados de liquidación individual: where('userUid', '==', currentUser.uid)
+    // PROHIBIDO: iniciar listener de cycleGroupCalculations para inversionista
+    const uResults = firestoreService.listenUserResultsForUser(userUid, (results) => {
+      this.userResults = results;
+      this.saveState();
+      this.notify();
+    });
+    this.activeUnsubscribers.push(uResults);
+
+    // 5. Reinversiones propias: where('userUid', '==', currentUser.uid)
+    const uReinvs = firestoreService.listenReinvestmentsForUser(userUid, (reinvs) => {
+      this.reinvestments = reinvs.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      this.saveState();
+      this.notify();
+    });
+    this.activeUnsubscribers.push(uReinvs);
+
+    // 6. Desembolsos propios: where('userUid', '==', currentUser.uid)
+    const uDisbs = firestoreService.listenDisbursementsForUser(userUid, (disbs) => {
+      this.disbursements = disbs.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      this.saveState();
+      this.notify();
+    });
+    this.activeUnsubscribers.push(uDisbs);
+
+    // 7. Inversiones propias: where('userUid', '==', currentUser.uid)
+    const uInvs = firestoreService.listenInvestmentsForUser(userUid, (invs) => {
+      this.investments = invs.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      this.saveState();
+      this.notify();
+    });
+    this.activeUnsubscribers.push(uInvs);
+
+    // 8. Configuración global (TRM, rangos)
+    const uSettings = firestoreService.listenSettings((remoteConfig) => {
+      if (remoteConfig) {
+        this.config = { ...this.config, ...remoteConfig };
+        this.saveState();
+        this.notify();
+      }
+    });
+    this.activeUnsubscribers.push(uSettings);
+
+    // 9. Notificaciones: dos listeners (userUid y targetUids), deduplicados por document ID
+    const uNotifs = firestoreService.listenNotificationsForUser(userUid, (notifs) => {
+      this.notifications = notifs;
+      this.saveState();
+      this.notify();
+    });
+    this.activeUnsubscribers.push(uNotifs);
+  }
+
+  /**
+   * Alias retrocompatible para herramientas administrativas.
+   */
+  public initRealtimeFirestoreSync() {
+    this.startAdminSubscriptions();
+  }
+
+  public async syncWithFirestore() {
+    try {
+      // 1. Cargar usuarios reales desde Firestore
+      const remoteUsers = await firestoreService.getAllUsers();
+      if (remoteUsers && remoteUsers.length > 0) {
+        this.users = remoteUsers;
+      }
+
+      // 2. Cargar ciclos reales desde Firestore
+      const remoteCycles = await firestoreService.getAllCycles();
+      if (remoteCycles && remoteCycles.length > 0) {
+        this.cycles = remoteCycles;
+      }
+
+      // 3. Cargar operaciones diarias desde Firestore
+      const remoteOps = await firestoreService.getAllDailyOperations();
+      if (remoteOps) {
+        this.dailyOperations = remoteOps;
+      }
+
+      // 4. Cargar cálculos grupales y liquidaciones individuales
+      const remoteCalcs = await firestoreService.getAllGroupCalculations();
+      if (remoteCalcs) {
+        this.groupCalculations = remoteCalcs;
+      }
+
+      const remoteResults = await firestoreService.getAllUserResults();
+      if (remoteResults) {
+        this.userResults = remoteResults;
+      }
+
+      // 5. Cargar postulaciones
+      const remoteApps = await firestoreService.getAllApplications();
+      if (remoteApps) {
+        remoteApps.forEach((a) => this.knownApplicationIds.add(a.id));
+        this.applications = remoteApps.sort((a, b) => (a.queuePosition || 0) - (b.queuePosition || 0));
+        this.isInitialAppsSynced = true;
+      }
+
+      // 6. Cargar solicitudes de reinversión y desembolsos
+      const remoteReinvs = await firestoreService.getAllReinvestments();
+      if (remoteReinvs) {
+        remoteReinvs.forEach((r) => this.knownReinvestmentIds.add(r.id));
+        this.reinvestments = remoteReinvs.sort(
+          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        );
+        this.isInitialReinvSynced = true;
+      }
+
+      const remoteDisbs = await firestoreService.getAllDisbursements();
+      if (remoteDisbs) {
+        this.disbursements = remoteDisbs;
+      }
+
+      const remoteInvs = await firestoreService.getAllInvestments();
+      if (remoteInvs) {
+        this.investments = remoteInvs;
+      }
+
+      // 7. Cargar notificaciones
+      const remoteNotifs = await firestoreService.getAllNotifications();
+      if (remoteNotifs) {
+        remoteNotifs.forEach((n) => this.knownNotificationIds.add(n.id));
+        this.notifications = remoteNotifs.sort(
+          (a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime()
+        );
+        this.isInitialNotifsSynced = true;
+      }
+
+      // 8. Cargar configuración global
+      const remoteConfig = await firestoreService.getSettings();
+      if (remoteConfig) {
+        this.config = { ...this.config, ...remoteConfig };
+      }
+
+      // 9. Cargar logs de auditoría
+      const remoteLogs = await firestoreService.getAllAuditLogs();
+      if (remoteLogs) {
+        this.auditLogs = remoteLogs.sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        );
+      }
+
+      this.notify();
+    } catch (err) {
+      console.warn('[DataStore] Error en sincronización inicial Firestore:', err);
+    }
+  }
+
+  /**
+   * Fuerza el envío y sincronización completa del estado en memoria a Cloud Firestore
+   */
+  public async forceFullCloudSync(): Promise<{ success: boolean; message: string }> {
+    try {
+      for (const u of this.users) {
+        await firestoreService.saveUser(u);
+      }
+      for (const c of this.cycles) {
+        await firestoreService.saveCycle(c);
+      }
+      for (const op of this.dailyOperations) {
+        await firestoreService.saveDailyOperation(op);
+      }
+      for (const gc of this.groupCalculations) {
+        await firestoreService.saveGroupCalculation(gc);
+      }
+      for (const ur of this.userResults) {
+        await firestoreService.saveUserResult(ur);
+      }
+      if (this.applications.length > 0) {
+        await firestoreService.saveApplicationsBatch(this.applications);
+      }
+      for (const r of this.reinvestments) {
+        await firestoreService.saveReinvestment(r);
+      }
+      for (const d of this.disbursements) {
+        await firestoreService.saveDisbursement(d);
+      }
+      await firestoreService.saveSettings(this.config);
+      if (this.notifications.length > 0) {
+        await firestoreService.saveNotificationsBatch(this.notifications);
+      }
+
+      this.notify();
+      return { success: true, message: '¡Sincronización en tiempo real con Cloud Firestore completada al 100%!' };
+    } catch (err: any) {
+      console.error('Error al forzar la sincronización en la nube:', err);
+      return { success: false, message: err?.message || 'Error al guardar en la nube.' };
+    }
   }
 
   public subscribe(listener: Listener): () => void {
@@ -96,7 +707,6 @@ class DataStore {
   }
 
   private notify() {
-    this.saveState();
     this.listeners.forEach((l) => {
       try {
         l();
@@ -107,97 +717,43 @@ class DataStore {
   }
 
   private loadState() {
-    try {
-      const storedUsers = localStorage.getItem(STORAGE_KEYS.USERS);
-      this.users = storedUsers ? JSON.parse(storedUsers) : [...INITIAL_USERS];
-
-      const storedCycles = localStorage.getItem(STORAGE_KEYS.CYCLES);
-      this.cycles = storedCycles ? JSON.parse(storedCycles) : [...INITIAL_CYCLES];
-
-      const storedConfig = localStorage.getItem(STORAGE_KEYS.CONFIG);
-      this.config = storedConfig ? JSON.parse(storedConfig) : { ...INITIAL_GLOBAL_CONFIG };
-      // Asegurar campos de TRM automática/manual
-      if (!this.config.trmMode) {
-        this.config.trmMode = 'AUTOMATIC';
-        this.config.trmAutoSync = true;
-        this.config.trmMarketRate = this.config.trmConfigured || 4028.50;
-        this.config.trmSource = 'Mercado Oficial Bancario (USD/COP)';
-        this.config.trmLastSyncedAt = new Date().toISOString();
-      }
-
-      const storedGroupCalcs = localStorage.getItem(STORAGE_KEYS.GROUP_CALCS);
-      this.groupCalculations = storedGroupCalcs ? JSON.parse(storedGroupCalcs) : [];
-
-      const storedUserResults = localStorage.getItem(STORAGE_KEYS.USER_RESULTS);
-      this.userResults = storedUserResults ? JSON.parse(storedUserResults) : [];
-
-      const storedNotifications = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
-      this.notifications = storedNotifications ? JSON.parse(storedNotifications) : [];
-
-      const storedReinv = localStorage.getItem(STORAGE_KEYS.REINVESTMENTS);
-      this.reinvestments = storedReinv ? JSON.parse(storedReinv) : [...INITIAL_REINVESTMENTS];
-
-      const storedDisb = localStorage.getItem(STORAGE_KEYS.DISBURSEMENTS);
-      this.disbursements = storedDisb ? JSON.parse(storedDisb) : [...INITIAL_DISBURSEMENTS];
-
-      const storedInv = localStorage.getItem(STORAGE_KEYS.INVESTMENTS);
-      this.investments = storedInv ? JSON.parse(storedInv) : [...INITIAL_INVESTMENTS];
-
-      const storedApps = localStorage.getItem(STORAGE_KEYS.APPLICATIONS);
-      this.applications = storedApps ? JSON.parse(storedApps) : [...INITIAL_APPLICATIONS];
-
-      const storedLogs = localStorage.getItem(STORAGE_KEYS.AUDIT_LOGS);
-      this.auditLogs = storedLogs ? JSON.parse(storedLogs) : [...INITIAL_AUDIT_LOGS];
-
-      const storedDailyOps = localStorage.getItem(STORAGE_KEYS.DAILY_OPERATIONS);
-      this.dailyOperations = storedDailyOps ? JSON.parse(storedDailyOps) : [...INITIAL_DAILY_OPERATIONS];
-
-      // No inyectar cálculos demo; el sistema inicia en cero limpio
-      this.recalculateCycleMetrics();
-    } catch (e) {
-      console.warn('Error loading state from localStorage, using initial mock data', e);
-      this.resetToDefaults();
-    }
-  }
-
-  public resetToDefaults() {
-    this.users = [...INITIAL_USERS];
-    this.cycles = [...INITIAL_CYCLES];
-    this.config = { ...INITIAL_GLOBAL_CONFIG };
+    // Inicialización limpia 100% en memoria; los datos provienen de Firestore
+    this.users = [];
+    this.cycles = [];
+    this.config = { ...DEFAULT_GLOBAL_CONFIG };
     this.groupCalculations = [];
     this.userResults = [];
     this.notifications = [];
-    this.reinvestments = [...INITIAL_REINVESTMENTS];
-    this.disbursements = [...INITIAL_DISBURSEMENTS];
-    this.investments = [...INITIAL_INVESTMENTS];
-    this.applications = [...INITIAL_APPLICATIONS];
-    this.auditLogs = [...INITIAL_AUDIT_LOGS];
-    this.dailyOperations = [...INITIAL_DAILY_OPERATIONS];
-    this.recalculateCycleMetrics();
+    this.reinvestments = [];
+    this.disbursements = [];
+    this.investments = [];
+    this.applications = [];
+    this.auditLogs = [];
+    this.dailyOperations = [];
+  }
+
+  public resetToDefaults() {
+    this.users = [];
+    this.cycles = [];
+    this.config = { ...DEFAULT_GLOBAL_CONFIG };
+    this.groupCalculations = [];
+    this.userResults = [];
+    this.notifications = [];
+    this.reinvestments = [];
+    this.disbursements = [];
+    this.investments = [];
+    this.applications = [];
+    this.auditLogs = [];
+    this.dailyOperations = [];
     this.notify();
   }
 
   private seedMockCalculations() {
-    // Modo producción / datos reales en cero: no inyecta cálculos ni resultados ficticios
+    // No-op: Modo producción / datos reales en cero
   }
 
   private saveState() {
-    try {
-      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(this.users));
-      localStorage.setItem(STORAGE_KEYS.CYCLES, JSON.stringify(this.cycles));
-      localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(this.config));
-      localStorage.setItem(STORAGE_KEYS.GROUP_CALCS, JSON.stringify(this.groupCalculations));
-      localStorage.setItem(STORAGE_KEYS.USER_RESULTS, JSON.stringify(this.userResults));
-      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(this.notifications));
-      localStorage.setItem(STORAGE_KEYS.REINVESTMENTS, JSON.stringify(this.reinvestments));
-      localStorage.setItem(STORAGE_KEYS.DISBURSEMENTS, JSON.stringify(this.disbursements));
-      localStorage.setItem(STORAGE_KEYS.INVESTMENTS, JSON.stringify(this.investments));
-      localStorage.setItem(STORAGE_KEYS.APPLICATIONS, JSON.stringify(this.applications));
-      localStorage.setItem(STORAGE_KEYS.AUDIT_LOGS, JSON.stringify(this.auditLogs));
-      localStorage.setItem(STORAGE_KEYS.DAILY_OPERATIONS, JSON.stringify(this.dailyOperations));
-    } catch (e) {
-      console.error('Error saving state to localStorage', e);
-    }
+    // No-op: No persistir datos financieros en localStorage. Firestore es la única fuente de verdad.
   }
 
   // Getters
@@ -221,12 +777,42 @@ class DataStore {
     return this.cycles;
   }
 
+  public getFinancialSummaries(): CycleFinancialSummary[] {
+    return this.financialSummaries;
+  }
+
+  public getAllUserResults(): CycleUserResult[] {
+    return this.userResults;
+  }
+
   public getActiveCycle(): MonthlyCycle {
     const cycle = this.cycles.find((c) => c.cycleId === this.config.activeCycleId);
-    if (!cycle) {
-      return this.cycles[0];
-    }
-    return cycle;
+    if (cycle) return cycle;
+    if (this.cycles && this.cycles.length > 0) return this.cycles[0];
+
+    // Fallback seguro cuando la base de datos está vacía o cargando
+    const activeId = this.config?.activeCycleId || '2026-09';
+    return {
+      id: activeId,
+      cycleId: activeId,
+      name: 'Ciclo Activo',
+      status: 'OPEN',
+      trmApplied: this.config?.trmConfigured || 4028.50,
+      totalManagedCapital: 0,
+      totalUsersActive: 0,
+      calculatedUsersCount: 0,
+      totalGroupsCount: 0,
+      calculatedGroupsCount: 0,
+      totalGrossUsd: 0,
+      totalGrossCop: 0,
+      totalUsersProfitCop: 0,
+      totalAdminCommissionCop: 0,
+      notificationsSent: false,
+      notificationsSentAt: null,
+      closedAt: null,
+      closedBy: null,
+      openedAt: new Date().toISOString(),
+    };
   }
 
   public getCycleById(cycleId: string): MonthlyCycle | undefined {
@@ -249,15 +835,131 @@ class DataStore {
 
   public getUserResultForUser(userId: string, cycleId?: string): CycleUserResult | undefined {
     const targetCycleId = cycleId || this.config.activeCycleId;
-    return this.userResults.find((r) => (r.userId === userId || r.userCode === userId) && r.cycleId === targetCycleId);
+    return this.userResults.find(
+      (r) =>
+        (r.userId === userId ||
+          r.userCode === userId ||
+          (r.userUid && r.userUid === userId) ||
+          (r.email && r.email.toLowerCase() === userId.toLowerCase())) &&
+        r.cycleId === targetCycleId
+    );
+  }
+
+  private mapSharedReadStates(notifs: NotificationItem[]): NotificationItem[] {
+    return notifs.map(n => {
+      if (!n.isRead && !this.isNotificationOwned(n) && this.readSharedIds.has(n.id)) {
+        return { ...n, isRead: true };
+      }
+      return n;
+    });
+  }
+
+  /**
+   * Obtiene exclusivamente las notificaciones pertinentes al Administrador:
+   * - Nuevas solicitudes de ingreso/admisión (INVESTMENT_REQUEST)
+   * - Solicitudes de reinversión a capital (REINVESTMENT)
+   * - Solicitudes de desembolso o retiros (DISBURSEMENT)
+   * - Avisos directos para la administración (ALL_ADMINS / admin_root_uid)
+   * EXCLUYE estrictamente todas las notificaciones individuales de operaciones diarias
+   * y cierres mensuales enviadas a cada inversionista individual.
+   */
+  public getAdminNotifications(): NotificationItem[] {
+    const list = this.notifications
+      .filter((n) => {
+        if (n.hiddenByUser === true) return false;
+
+        // Excluir estrictamente reportes, operaciones diarias individuales y cierres mensuales de inversionistas
+        if (
+          n.type === 'MONTHLY_CLOSURE' ||
+          n.title?.includes('Operación Diaria') ||
+          n.message?.includes('Tu ganancia') ||
+          n.message?.includes('Tu operación del mes')
+        ) {
+          // Solamente conservar si fue dirigida explícitamente a la administración general
+          if (n.userId !== 'ALL_ADMINS' && n.userId !== 'admin_root_uid' && n.userId !== 'usr_admin') {
+            return false;
+          }
+        }
+
+        // Si la notificación pertenece a un usuario regular individual (ej: no ALL_ADMINS) y no es para admin, descartar
+        if (
+          n.userId &&
+          n.userId !== 'ALL_ADMINS' &&
+          n.userId !== 'admin_root_uid' &&
+          n.userId !== 'usr_admin' &&
+          !n.userId.toUpperCase().includes('ADMIN')
+        ) {
+          return false;
+        }
+
+        return (
+          n.type === 'INVESTMENT_REQUEST' ||
+          n.type === 'REINVESTMENT' ||
+          n.type === 'DISBURSEMENT' ||
+          n.userId === 'ALL_ADMINS' ||
+          n.userId === 'admin_root_uid' ||
+          n.userId === 'usr_admin' ||
+          n.userCode === 'ADMIN'
+        );
+      })
+      .sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+    return this.mapSharedReadStates(list);
   }
 
   public getNotificationsForUser(userId: string): NotificationItem[] {
-    return this.notifications.filter((n) => n.userId === userId || n.userCode === userId).sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+    const user = this.getUserById(userId) || this.getUserByCode(userId);
+    const isAdmin =
+      user?.role === 'ADMIN' ||
+      user?.email === 'elcocalombiano1828@gmail.com' ||
+      user?.userCode?.startsWith('ADM') ||
+      userId === 'admin_root_uid' ||
+      userId === 'usr_admin' ||
+      userId === 'ALL_ADMINS' ||
+      userId.toUpperCase().includes('ADMIN');
+
+    if (isAdmin) {
+      return this.getAdminNotifications();
+    }
+
+    const list = this.notifications
+      .filter((n) => {
+        if (n.hiddenByUser === true) return false;
+
+        // Un inversionista regular solo ve sus notificaciones personales
+        // (no debe ver solicitudes de admisiones generales dirigidas a administradores)
+        if (n.userId === 'ALL_ADMINS' && n.type === 'INVESTMENT_REQUEST') {
+          return false;
+        }
+
+        const notifEmail = (n.userEmail || n.payload?.userEmail || '').toString().toLowerCase().trim();
+        const notifUid = n.userUid || (n as any).uid || n.payload?.userUid || '';
+        const notifUserId = n.userId || '';
+        const notifCode = (n.userCode || '').toString().toUpperCase().trim();
+
+        const userEmail = (user?.email || '').toString().toLowerCase().trim();
+        const userUid = user?.uid || '';
+        const userInternalId = user?.id || '';
+        const userCode = (user?.userCode || '').toString().toUpperCase().trim();
+
+        return (
+          notifUserId === userId ||
+          notifCode === userId.toUpperCase() ||
+          (user && (
+            (userInternalId && (notifUserId === userInternalId || notifUserId === userCode)) ||
+            (userUid && (notifUid === userUid || notifUserId === userUid)) ||
+            (userCode && notifCode && userCode === notifCode) ||
+            (userEmail && notifEmail && userEmail === notifEmail) ||
+            (user.fullName && n.userName && user.fullName.toLowerCase().trim() === n.userName.toLowerCase().trim())
+          ))
+        );
+      })
+      .sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+    return this.mapSharedReadStates(list);
   }
 
   public getAllNotifications(): NotificationItem[] {
-    return [...this.notifications].sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+    const list = [...this.notifications].sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
+    return this.mapSharedReadStates(list);
   }
 
   public getReinvestments(): ReinvestmentRequest[] {
@@ -283,12 +985,22 @@ class DataStore {
   }
 
   /**
-   * Obtiene la estructura de grupos de capital exacto agrupados por bitácora
+   * Obtiene la estructura de grupos de capital exacto agrupados por bitácora.
+   * Reglas de negocio críticas (V2.2):
+   * 1. CICLO ACTIVO: La vista representa exclusivamente grupos operativos ACTUALES.
+   *    Regla: active USER con capital X -> grupo X existe.
+   *    0 USER ACTIVE -> 0 grupos activos.
+   *    dailyOperations huérfanas/históricas -> NO crean tarjetas activas.
+   * 2. CICLO CERRADO: Snapshot histórico inmutable.
+   *    Derivado de las grabaciones históricas de cycleGroupCalculations y cycleUserResults,
+   *    preservando los datos sin afectarse por usuarios eliminados o desactivados en el presente.
    */
   public getCategoryGroups(cycleId?: string): Record<BitacoraCategory, CategoryGroupInfo[]> {
     const targetCycleId = cycleId || this.config.activeCycleId;
-    const activeUsers = this.getActiveUsers();
+    const targetCycle = this.cycles.find((c) => c.cycleId === targetCycleId);
+    const isClosedCycle = targetCycle?.status === 'CLOSED';
     const groupCalculations = this.getGroupCalculations(targetCycleId);
+    const cycleUserResults = this.getUserResults(targetCycleId);
 
     const result: Record<BitacoraCategory, CategoryGroupInfo[]> = {
       AZUL: [],
@@ -299,18 +1011,93 @@ class DataStore {
     // Agrupar usuarios por categoría y capital exacto
     const map = new Map<string, { category: BitacoraCategory; groupCapitalCop: number; users: UserProfile[] }>();
 
-    activeUsers.forEach((user) => {
-      const category = getCategoryForCapital(user.currentCapital);
-      const key = `${category}_${user.currentCapital}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          category,
-          groupCapitalCop: user.currentCapital,
-          users: [],
-        });
-      }
-      map.get(key)!.users.push(user);
-    });
+    if (isClosedCycle) {
+      // CICLO CERRADO: Snapshot histórico inmutable.
+      // Reconstruir grupos desde los cálculos guardados de dicho ciclo cerrado
+      groupCalculations.forEach((calc) => {
+        const key = `${calc.category}_${calc.groupCapitalCop}`;
+        if (!map.has(key)) {
+          const matchingResults = cycleUserResults.filter(
+            (r) => r.cycleCategory === calc.category && Number(r.groupCapitalCop || r.cycleCapitalCop) === Number(calc.groupCapitalCop)
+          );
+          const reconstructedUsers: UserProfile[] = matchingResults.map((r) => ({
+            id: r.userId,
+            uid: r.userUid || r.userId,
+            userCode: r.userCode,
+            fullName: r.userName,
+            email: r.email,
+            phone: '',
+            role: 'USER',
+            status: 'ACTIVE',
+            currentCapital: r.cycleCapitalCop || r.groupCapitalCop,
+            currency: 'COP',
+            category: r.cycleCategory,
+            userPercentage: r.userPercentage,
+            adminPercentage: r.adminPercentage,
+            paymentMethod: '',
+            paymentDetails: '',
+            createdAt: r.calculatedAt || '',
+            entryDate: '',
+          }));
+
+          map.set(key, {
+            category: calc.category,
+            groupCapitalCop: Number(calc.groupCapitalCop),
+            users: reconstructedUsers,
+          });
+        }
+      });
+
+      // Asegurar que si hay resultados individuales guardados en el ciclo cerrado, se muestren
+      cycleUserResults.forEach((r) => {
+        const capital = r.cycleCapitalCop || r.groupCapitalCop;
+        const key = `${r.cycleCategory}_${capital}`;
+        if (!map.has(key)) {
+          const user: UserProfile = {
+            id: r.userId,
+            uid: r.userUid || r.userId,
+            userCode: r.userCode,
+            fullName: r.userName,
+            email: r.email,
+            phone: '',
+            role: 'USER',
+            status: 'ACTIVE',
+            currentCapital: capital,
+            currency: 'COP',
+            category: r.cycleCategory,
+            userPercentage: r.userPercentage,
+            adminPercentage: r.adminPercentage,
+            paymentMethod: '',
+            paymentDetails: '',
+            createdAt: r.calculatedAt || '',
+            entryDate: '',
+          };
+          map.set(key, {
+            category: r.cycleCategory,
+            groupCapitalCop: Number(capital),
+            users: [user],
+          });
+        }
+      });
+    } else {
+      // CICLO ACTIVO: Vista operativa actual.
+      // Regla estricta: active USER con capital X -> grupo X existe.
+      // 0 USER ACTIVE -> 0 grupos activos.
+      // dailyOperations huérfanas/históricas -> NO crean tarjetas activas.
+      const activeUsers = this.getActiveUsers();
+      activeUsers.forEach((user) => {
+        const category = user.category || getCategoryForCapital(user.currentCapital);
+        const key = `${category}_${user.currentCapital}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            category,
+            groupCapitalCop: user.currentCapital,
+            users: [],
+          });
+        }
+        map.get(key)!.users.push(user);
+      });
+    }
 
     // Ordenar y vincular cálculos y operaciones diarias
     map.forEach((item) => {
@@ -325,7 +1112,7 @@ class DataStore {
         users: item.users,
         calculation,
         isCalculated: !!calculation && calculation.status === 'CALCULATED',
-        totalUsdApplied: calculation?.totalUsdApplied || (dailyOps.length > 0 ? dailySumUsd : 0),
+        totalUsdApplied: dailyOps.length > 0 ? dailySumUsd : (calculation?.totalUsdApplied || 0),
         totalCopPerUser: calculation?.totalCopPerUser || 0,
         totalUsersProfitCop: calculation?.totalUsersProfitCop || 0,
         totalAdminCommissionCop: calculation?.totalAdminCommissionCop || 0,
@@ -344,6 +1131,47 @@ class DataStore {
     return result;
   }
 
+  /**
+   * Limpieza local en memoria tras ejecución de purga autoritativa del ciclo activo
+   */
+  public purgeTradingTestDataLocal(cycleId: string): void {
+    const targetCycle = this.cycles.find((c) => c.cycleId === cycleId);
+    if (!targetCycle || targetCycle.status === 'CLOSED') {
+      return;
+    }
+
+    const opsToRemove = this.dailyOperations.filter((op) => op.cycleId === cycleId);
+    const opIdsSet = new Set(opsToRemove.map((o) => o.id));
+
+    this.dailyOperations = this.dailyOperations.filter((op) => op.cycleId !== cycleId);
+    this.groupCalculations = this.groupCalculations.filter(
+      (g) => g.cycleId !== cycleId && !g.id.startsWith(`${cycleId}_`)
+    );
+    this.userResults = this.userResults.filter((r) => r.cycleId !== cycleId);
+    this.notifications = this.notifications.filter((n) => {
+      const isDirectOp = n.payload && n.payload.operationId && opIdsSet.has(n.payload.operationId);
+      const isDirectOpField = (n as any).operationId && opIdsSet.has((n as any).operationId);
+      const isPrefix = Array.from(opIdsSet).some((opId) => n.id.startsWith(`notif_op_${opId}_`));
+      const isCycleDailyNotif =
+        n.cycleId === cycleId &&
+        (n.type === 'DAILY_OPERATION' || (n.type === 'SYSTEM' && n.title?.includes('Operación Diaria')));
+      return !(isDirectOp || isDirectOpField || isPrefix || isCycleDailyNotif);
+    });
+
+    targetCycle.totalGroupsCount = 0;
+    targetCycle.calculatedGroupsCount = 0;
+    targetCycle.calculatedUsersCount = 0;
+    targetCycle.totalGrossUsd = 0;
+    targetCycle.totalGrossCop = 0;
+    targetCycle.totalUsersProfitCop = 0;
+    targetCycle.totalAdminCommissionCop = 0;
+    targetCycle.notificationsSent = false;
+    targetCycle.notificationsSentAt = undefined;
+
+    this.recalculateCycleMetrics();
+    this.notify();
+  }
+
   public getDailyOperations(cycleId?: string, category?: BitacoraCategory, groupCapitalCop?: number): DailyGroupOperation[] {
     let list = [...this.dailyOperations];
     if (cycleId) {
@@ -353,9 +1181,250 @@ class DataStore {
       list = list.filter((op) => op.category === category);
     }
     if (groupCapitalCop !== undefined) {
-      list = list.filter((op) => op.groupCapitalCop === groupCapitalCop);
+      list = list.filter((op) => Number(op.groupCapitalCop) === Number(groupCapitalCop));
     }
     return list.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  }
+
+  /**
+   * Obtiene de forma estricta y transparente ÚNICAMENTE las operaciones que corresponden a un inversionista específico.
+   * Incluye:
+   * 1. Operaciones individuales asignadas directamente a su id, uid, email o userCode.
+   * 2. Operaciones que incluyan su uid, id o userCode en el array `authorizedUids`.
+   * 3. Operaciones públicas globales (`targetType === 'GLOBAL'` o `isPublicToActiveUsers === true`).
+   * 4. Operaciones de categoría (`targetType === 'CATEGORY'` y `category === userCategory`).
+   * 5. Operaciones grupales generales cuyo capital coincida exactamente con el capital actual del usuario.
+   * Excluye estrictamente operaciones asignadas a otros usuarios individuales.
+   */
+  /**
+   * Helper canónico para resolver los destinatarios de una operación diaria.
+   * Orden de autoridad obligatorio:
+   * 1. INDIVIDUAL: targetType === 'INDIVIDUAL' o op.userUid/userId -> SOLO el usuario con ese UID exacto.
+   * 2. AUTHORIZED UIDS: Si op.authorizedUids tiene elementos, SOLO los usuarios cuyos UIDs estén en la lista.
+   * 3. GLOBAL: Solo si op.isPublicToActiveUsers === true.
+   * 4. CATEGORY legacy: op.targetType === 'CATEGORY' && op.category
+   * 5. GROUP legacy: (op.targetType === 'GROUP' || op.targetType === 'CUSTOM_GROUP') && op.groupCapitalCop != null
+   * Fallback final obligatorio: [] (NUNCA todos los usuarios).
+   */
+  public resolveOperationRecipients(
+    op: DailyGroupOperation,
+    activeUsers: UserProfile[]
+  ): UserProfile[] {
+    const eligibleUsers = activeUsers.filter(
+      (u) => u.status === 'ACTIVE' && u.role === 'USER'
+    );
+
+    // A. INDIVIDUAL EXPLÍCITO
+    if (op.targetType === 'INDIVIDUAL' || op.userUid || op.userId) {
+      const targetUid = (op.userUid || op.userId || '').trim();
+      if (!targetUid) return [];
+      return eligibleUsers.filter(
+        (u) =>
+          (u.uid && u.uid.trim() === targetUid) ||
+          (u.id && u.id.trim() === targetUid) ||
+          (u.userCode && op.userCode && u.userCode.trim().toUpperCase() === op.userCode.trim().toUpperCase())
+      );
+    }
+
+    // B. AUTHORIZED UIDS ES AUTORITATIVO
+    if (Array.isArray(op.authorizedUids) && op.authorizedUids.length > 0) {
+      const allowed = new Set(op.authorizedUids.map((id) => (id || '').trim()));
+      return eligibleUsers.filter((u) => u.uid && allowed.has(u.uid.trim()));
+    }
+
+    // C. OPERACIÓN GLOBAL REAL
+    if (op.isPublicToActiveUsers === true) {
+      return eligibleUsers;
+    }
+
+    // D. CATEGORY LEGACY
+    if (op.targetType === 'CATEGORY' && op.category) {
+      return eligibleUsers.filter((u) => u.category === op.category);
+    }
+
+    // E. GROUP / CUSTOM_GROUP LEGACY
+    if (
+      ((op.targetType as string) === 'GROUP' || op.targetType === 'CUSTOM_GROUP') &&
+      op.groupCapitalCop != null
+    ) {
+      return eligibleUsers.filter(
+        (u) => Number(u.currentCapital) === Number(op.groupCapitalCop)
+      );
+    }
+
+    // Fallback obligatorio: NUNCA todos los usuarios
+    return [];
+  }
+
+  public getDailyOperationsForUser(
+    user: UserProfile | { id?: string; uid?: string; email?: string; userCode?: string; fullName?: string; currentCapital?: number; category?: BitacoraCategory } | null | undefined,
+    cycleId?: string
+  ): DailyGroupOperation[] {
+    if (!user) return [];
+
+    const targetCycleId = (cycleId || this.getActiveCycle()?.cycleId || this.config.activeCycleId || '').trim();
+    const userCapital = Number(user.currentCapital || 0);
+    const userCategory = user.category || (userCapital > 0 ? getCategoryForCapital(userCapital) : undefined);
+    const userEmail = user.email ? user.email.toLowerCase().trim() : '';
+    const userUid = user.uid ? user.uid.trim() : '';
+    const userId = user.id ? user.id.trim() : '';
+    const userCode = user.userCode ? user.userCode.toUpperCase().trim() : '';
+
+    const dbUser = this.users.find(
+      (u) =>
+        (userId && u.id === userId) ||
+        (userUid && u.uid === userUid) ||
+        (userEmail && u.email?.toLowerCase().trim() === userEmail) ||
+        (userCode && u.userCode?.toUpperCase().trim() === userCode)
+    );
+
+    const allUserKeys = new Set<string>();
+    if (userId) allUserKeys.add(userId);
+    if (userUid) allUserKeys.add(userUid);
+    if (userCode) allUserKeys.add(userCode);
+    if (userEmail) allUserKeys.add(userEmail);
+
+    if (dbUser) {
+      if (dbUser.id) allUserKeys.add(dbUser.id);
+      if (dbUser.uid) allUserKeys.add(dbUser.uid);
+      if (dbUser.userCode) allUserKeys.add(dbUser.userCode.toUpperCase().trim());
+      if (dbUser.email) allUserKeys.add(dbUser.email.toLowerCase().trim());
+    }
+
+    const keyList = Array.from(allUserKeys).map((k) => k.toLowerCase().trim());
+
+    return this.dailyOperations
+      .filter((op) => {
+        // 1. Filtrar por ciclo si se especificó y no es 'ALL'
+        if (
+          targetCycleId &&
+          targetCycleId !== 'ALL' &&
+          op.cycleId &&
+          op.cycleId.trim().toLowerCase() !== targetCycleId.toLowerCase()
+        ) {
+          return false;
+        }
+
+        // 1. INDIVIDUAL: Si la operación es explícitamente individual o asignada a un usuario
+        if (op.targetType === 'INDIVIDUAL' || op.userId || op.userUid || op.userCode) {
+          const opUserId = op.userId ? op.userId.trim().toLowerCase() : '';
+          const opUserUid = op.userUid ? op.userUid.trim().toLowerCase() : '';
+          const opUserCode = op.userCode ? op.userCode.trim().toUpperCase() : '';
+
+          const matchesDirectUser = keyList.some((k) => {
+            return (
+              (opUserId && opUserId === k) ||
+              (opUserUid && opUserUid === k) ||
+              (opUserCode && opUserCode === k.toUpperCase())
+            );
+          });
+          return matchesDirectUser;
+        }
+
+        // 2. AUTHORIZED UIDS ES AUTORITATIVO
+        // Si existe y tiene elementos, SOLO se permite si incluye alguno de los UIDs del usuario.
+        // Si NO incluye el UID del usuario, retorna false INMEDIATAMENTE (NO continuar a category/capital).
+        if (Array.isArray(op.authorizedUids) && op.authorizedUids.length > 0) {
+          const inAuthList = op.authorizedUids.some((authId) => {
+            if (!authId) return false;
+            const clean = authId.trim().toLowerCase();
+            return keyList.includes(clean);
+          });
+          return inAuthList; // true si está autorizado, false INMEDIATAMENTE si no lo está.
+        }
+
+        // 3. OPERACIÓN GLOBAL REAL
+        if (op.isPublicToActiveUsers === true) {
+          return true;
+        }
+
+        // 4. CATEGORY LEGACY
+        const targetCategory = dbUser?.category || userCategory;
+        if (op.targetType === 'CATEGORY' && targetCategory && op.category === targetCategory) {
+          return true;
+        }
+
+        // 5. GROUP / CUSTOM_GROUP LEGACY
+        if ((op.targetType as string) === 'GROUP' || op.targetType === 'CUSTOM_GROUP') {
+          const targetCapital = Number(dbUser?.currentCapital || userCapital);
+          if (targetCapital > 0 && Number(op.groupCapitalCop) === targetCapital) {
+            if (!targetCategory || !op.category || op.category === targetCategory) {
+              return true;
+            }
+          }
+        }
+
+        // 6. Fallback final: false
+        return false;
+      })
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  }
+
+  public async addDailyOperationAsync(
+    cycleId: string,
+    category: BitacoraCategory,
+    groupCapitalCop: number,
+    date: string,
+    amountUsd: number,
+    notes?: string,
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal',
+    targetUser?: UserProfile | null,
+    targetTypeParam?: OperationTargetType,
+    customAuthorizedUids?: string[]
+  ): Promise<{ success: boolean; totalUsd: number; operation: DailyGroupOperation; message: string }> {
+    const cycle = this.getCycleById(cycleId);
+    if (!cycle || cycle.status === 'CLOSED') {
+      throw new Error('No se pueden registrar operaciones en un ciclo cerrado.');
+    }
+    if (isNaN(amountUsd) || amountUsd <= 0) {
+      throw new Error('El monto operado en USD debe ser mayor a 0.');
+    }
+
+    const targetType: OperationTargetType = targetTypeParam || (targetUser ? 'INDIVIDUAL' : 'CUSTOM_GROUP');
+    const targetUserId = targetUser?.uid || targetUser?.id;
+
+    const operationIntentId = crypto.randomUUID();
+
+    const cleanNotes = (notes || '').trim();
+    const rawFingerprintString = `${cycleId}_${category}_${groupCapitalCop}_${amountUsd}_${date || ''}_${targetType}_${targetUserId || ''}_${cleanNotes}`;
+
+    let payloadFingerprint = '';
+    try {
+      const encoder = new TextEncoder();
+      const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(rawFingerprintString));
+      payloadFingerprint = Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('');
+    } catch {
+      payloadFingerprint = `fp_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+    }
+
+    // Ejecución en Servidor (Cloud Function / Transacción Atómica Firestore)
+    // CRÍTICO: NO se modifica `this.dailyOperations` manualmente en RAM antes de confirmar la nube.
+    const serverRes = await firestoreService.executeAdminDailyOperation({
+      action: 'CREATE',
+      operationIntentId,
+      payloadFingerprint,
+      cycleId,
+      category,
+      groupCapitalCop,
+      date,
+      amountUsd,
+      notes: cleanNotes,
+      targetType,
+      targetUserId,
+      customAuthorizedUids,
+    });
+
+    const createdOp = serverRes.operation;
+    const groupOps = this.getDailyOperations(cycleId, category, groupCapitalCop);
+    const totalUsd = groupOps.reduce((sum, op) => sum + op.amountUsd, 0) + (groupOps.some(o => o.id === createdOp.id) ? 0 : createdOp.amountUsd);
+
+    return {
+      success: true,
+      totalUsd,
+      operation: createdOp,
+      message: serverRes.message || 'Operación creada y guardada exitosamente en Firestore.',
+    };
   }
 
   public addDailyOperation(
@@ -366,62 +1435,12 @@ class DataStore {
     amountUsd: number,
     notes?: string,
     adminUid: string = 'admin_root_uid',
-    adminName: string = 'Administrador Principal'
+    adminName: string = 'Administrador Principal',
+    targetUser?: UserProfile | null,
+    targetTypeParam?: OperationTargetType,
+    customAuthorizedUids?: string[]
   ): { success: boolean; totalUsd: number; operation: DailyGroupOperation; message: string } {
-    const cycle = this.getCycleById(cycleId);
-    if (!cycle || cycle.status === 'CLOSED') {
-      throw new Error('No se pueden registrar operaciones en un ciclo cerrado.');
-    }
-    if (isNaN(amountUsd) || amountUsd <= 0) {
-      throw new Error('El monto operado en USD debe ser mayor a 0.');
-    }
-
-    const opId = `dop_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const newOp: DailyGroupOperation = {
-      id: opId,
-      cycleId,
-      category,
-      groupCapitalCop,
-      date: date || new Date().toISOString().split('T')[0],
-      amountUsd,
-      notes: notes || '',
-      createdAt: new Date().toISOString(),
-      createdBy: adminName,
-    };
-
-    this.dailyOperations.push(newOp);
-
-    // Sumar todas las operaciones del grupo en este ciclo
-    const groupOps = this.getDailyOperations(cycleId, category, groupCapitalCop);
-    const totalUsdAccumulated = groupOps.reduce((sum, op) => sum + op.amountUsd, 0);
-
-    // Auto-calcular / sincronizar el grupo con la suma acumulada
-    this.calculateGroup(cycleId, category, groupCapitalCop, totalUsdAccumulated, adminUid, adminName, true);
-
-    this.addAuditLog({
-      action: 'DAILY_OPERATION_ADDED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      cycleId,
-      targetEntity: opId,
-      details: {
-        category,
-        groupCapitalCop,
-        date: newOp.date,
-        amountUsd,
-        totalUsdAccumulated,
-        notes,
-      },
-    });
-
-    this.notify();
-
-    return {
-      success: true,
-      totalUsd: totalUsdAccumulated,
-      operation: newOp,
-      message: `Operación de $${amountUsd} USD registrada con éxito. Total acumulado del ciclo: $${totalUsdAccumulated} USD.`,
-    };
+    throw new Error('Usa addDailyOperationAsync para asegurar la persistencia atómica en el servidor.');
   }
 
   public deleteDailyOperation(
@@ -441,6 +1460,7 @@ class DataStore {
     }
 
     this.dailyOperations.splice(opIndex, 1);
+    firestoreService.deleteDailyOperation(operationId).catch((e) => console.warn('Error deleting op from Firestore:', e));
 
     // Recalcular total acumulado
     const remainingOps = this.getDailyOperations(op.cycleId, op.category, op.groupCapitalCop);
@@ -510,6 +1530,8 @@ class DataStore {
       op.notes = notes;
     }
 
+    firestoreService.saveDailyOperation(op).catch((e) => console.warn('Error updating op in Firestore:', e));
+
     const groupOps = this.getDailyOperations(op.cycleId, op.category, op.groupCapitalCop);
     const totalUsdAccumulated = groupOps.reduce((sum, o) => sum + o.amountUsd, 0);
 
@@ -550,9 +1572,17 @@ class DataStore {
       throw new Error('No se pueden reiniciar operaciones de un ciclo cerrado.');
     }
 
+    // Find ops to delete from Firestore
+    const opsToDelete = this.dailyOperations.filter(
+      (op) => op.cycleId === cycleId && op.category === category && Number(op.groupCapitalCop) === Number(groupCapitalCop)
+    );
+    opsToDelete.forEach((op) => {
+      firestoreService.deleteDailyOperation(op.id).catch(() => {});
+    });
+
     // Remove all operations for this group in this cycle
     this.dailyOperations = this.dailyOperations.filter(
-      (op) => !(op.cycleId === cycleId && op.category === category && op.groupCapitalCop === groupCapitalCop)
+      (op) => !(op.cycleId === cycleId && op.category === category && Number(op.groupCapitalCop) === Number(groupCapitalCop))
     );
 
     // Remove group calculations and user results
@@ -562,7 +1592,7 @@ class DataStore {
       this.groupCalculations.splice(groupCalcIndex, 1);
     }
     this.userResults = this.userResults.filter(
-      (r) => !(r.cycleId === cycleId && r.cycleCategory === category && r.groupCapitalCop === groupCapitalCop)
+      (r) => !(r.cycleId === cycleId && r.cycleCategory === category && Number(r.groupCapitalCop) === Number(groupCapitalCop))
     );
 
     this.recalculateCycleMetrics();
@@ -586,6 +1616,271 @@ class DataStore {
     return {
       success: true,
       message: `El saldo y las operaciones del grupo fueron reiniciadas a $0 exitosamente.`,
+    };
+  }
+
+  public consolidateDailyOperations(
+    cycleId: string,
+    category: BitacoraCategory,
+    groupCapitalCop: number,
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal'
+  ): { success: boolean; consolidatedUsd: number; totalUsdAccumulated: number; message: string } {
+    const cycle = this.getCycleById(cycleId);
+    if (!cycle || cycle.status === 'CLOSED') {
+      throw new Error('No se pueden consolidar operaciones de un ciclo cerrado.');
+    }
+
+    const activeOps = this.dailyOperations.filter(
+      (op) => op.cycleId === cycleId && op.category === category && Number(op.groupCapitalCop) === Number(groupCapitalCop) && op.status !== 'CONSOLIDATED'
+    );
+
+    if (activeOps.length === 0) {
+      throw new Error('No hay operaciones diarias activas pendientes por consolidar en este grupo.');
+    }
+
+    const now = new Date().toISOString();
+    let sessionUsdSum = 0;
+
+    activeOps.forEach((op) => {
+      op.status = 'CONSOLIDATED';
+      op.consolidatedAt = now;
+      sessionUsdSum += op.amountUsd;
+      firestoreService.saveDailyOperation(op).catch((e) => console.warn('Error updating op in Firestore:', e));
+    });
+
+    // Mantener la suma acumulada completa de todas las operaciones (consolidadas + activas)
+    const allOps = this.getDailyOperations(cycleId, category, groupCapitalCop);
+    const totalUsdAccumulated = allOps.reduce((sum, o) => sum + o.amountUsd, 0);
+
+    // Asegurar que el cálculo del grupo mantenga el total acumulado para el Cierre Mensual
+    this.calculateGroup(cycleId, category, groupCapitalCop, totalUsdAccumulated, adminUid, adminName, true);
+
+    this.addAuditLog({
+      action: 'DAILY_OPERATIONS_CONSOLIDATED',
+      performedBy: adminUid,
+      performedByName: adminName,
+      cycleId,
+      targetEntity: `${cycleId}_${category}_${groupCapitalCop}`,
+      details: {
+        category,
+        groupCapitalCop,
+        consolidatedOpsCount: activeOps.length,
+        sessionUsdSum,
+        totalUsdAccumulated,
+      },
+    });
+
+    this.notify();
+
+    return {
+      success: true,
+      consolidatedUsd: sessionUsdSum,
+      totalUsdAccumulated,
+      message: `Operación de $${sessionUsdSum} USD consolidada. El mostrador diario se reinició a $0 USD para nuevas operaciones, manteniendo $${totalUsdAccumulated} USD acumulados en el Cierre Mensual.`,
+    };
+  }
+
+  public notifyAllActiveDailyOperations(
+    cycleId: string,
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal'
+  ): { success: boolean; sentCount: number; totalUsdNotified: number; message: string } {
+    const cycle = this.getCycleById(cycleId) || this.getActiveCycle();
+    const trm = cycle.trmApplied || 4028.5;
+
+    const activeOps = this.dailyOperations.filter(
+      (op) => op.cycleId === cycleId && op.status !== 'CONSOLIDATED'
+    );
+
+    if (activeOps.length === 0) {
+      throw new Error('No hay operaciones diarias activas pendientes por notificar.');
+    }
+
+    let totalSentCount = 0;
+    let totalUsdNotified = 0;
+    const now = new Date().toISOString();
+    const notificationsToSave: NotificationItem[] = [];
+
+    const activeUsers = this.getActiveUsers();
+
+    // Procesar CADA operación activa y resolver los destinatarios autorizados para esa operación
+    activeOps.forEach((op) => {
+      const recipients = this.resolveOperationRecipients(op, activeUsers);
+
+      if (recipients.length === 0) {
+        console.warn('[DEV] notifyAllActiveDailyOperations: Operación sin destinatarios autorizados:', op.id);
+        return;
+      }
+
+      const opUsd = Number(op.amountUsd || 0);
+
+      recipients.forEach((user) => {
+        const isAdmin = user.role === 'ADMIN' || user.userCode?.startsWith('ADM');
+        if (isAdmin) return;
+
+        totalUsdNotified += opUsd;
+
+        const rawUserPct = user.userPercentage !== undefined ? user.userPercentage : 75;
+        const rawAdminPct = user.adminPercentage !== undefined ? user.adminPercentage : 25;
+        const userPct = rawUserPct <= 1 ? rawUserPct * 100 : rawUserPct;
+        const adminPct = rawAdminPct <= 1 ? rawAdminPct * 100 : rawAdminPct;
+        const userCategory = user.category || getCategoryForCapital(user.currentCapital) || 'AZUL';
+
+        const calc = calculateUserMonthlyResult(opUsd, trm, userPct, adminPct);
+        const isPositive = opUsd >= 0;
+        const signStr = isPositive ? '+' : '-';
+        const formattedUsd = `${signStr}$${Math.abs(opUsd).toFixed(2)} USD`;
+        const formattedProfitCop = `${isPositive ? '+' : '-'}$${Math.abs(calc.userProfitCop).toLocaleString('es-CO')} COP`;
+
+        // ID Determinístico para idempotencia: notif_op_${op.id}_${recipient.uid}
+        const recipientUid = user.uid || user.id;
+        const notifId = `notif_op_${op.id}_${recipientUid}`;
+
+        const tradeName = resolveTradeNotificationName(user);
+
+        const notif: NotificationItem = {
+          id: notifId,
+          userId: user.id,
+          userUid: user.uid,
+          userCode: user.userCode,
+          userEmail: user.email,
+          userName: user.fullName,
+          cycleId,
+          type: 'SYSTEM',
+          title: `${isPositive ? '📈' : '📉'} Operación Registrada: ${formattedUsd}`,
+          message: `Hola ${tradeName}, se ejecutó una operación de trading por ${formattedUsd} el ${op.date || 'día de hoy'} en tu Bitácora ${userCategory}. Tu resultado para esta operación es de ${formattedProfitCop}.`,
+          payload: {
+            cycleId,
+            operationId: op.id,
+            usdAmount: opUsd,
+            copAmount: calc.grossCop,
+            userProfitCop: calc.userProfitCop,
+            userProfitUsd: calc.userProfitUsd,
+            trmUsed: trm,
+            category: userCategory,
+            groupCapitalCop: user.currentCapital,
+            userEmail: user.email,
+            userUid: user.uid,
+          },
+          isRead: false,
+          sentAt: now,
+          readAt: null,
+        };
+
+        const existingIndex = this.notifications.findIndex((n) => n.id === notifId);
+        if (existingIndex >= 0) {
+          this.notifications[existingIndex] = notif;
+        } else {
+          this.notifications.push(notif);
+        }
+        notificationsToSave.push(notif);
+        totalSentCount++;
+      });
+    });
+
+    if (notificationsToSave.length > 0) {
+      firestoreService.saveNotificationsBatch(notificationsToSave).catch((e) => console.warn('Error saving global daily notifs:', e));
+    }
+
+    this.addAuditLog({
+      action: 'DAILY_OPERATION_NOTIFIED',
+      performedBy: adminUid,
+      performedByName: adminName,
+      cycleId,
+      targetEntity: `GLOBAL_DAILY_NOTIF_${cycleId}`,
+      details: {
+        totalSentCount,
+        totalUsdNotified,
+      },
+    });
+
+    this.notify();
+
+    return {
+      success: true,
+      sentCount: totalSentCount,
+      totalUsdNotified,
+      message: `✓ Se enviaron ${totalSentCount} notificaciones individuales a los destinatarios autorizados por sus operaciones activas ($${totalUsdNotified.toFixed(2)} USD en total).`,
+    };
+  }
+
+  public consolidateAllDailyOperations(
+    cycleId: string,
+    shouldNotify: boolean = false,
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal'
+  ): { success: boolean; consolidatedOpsCount: number; totalUsdConsolidated: number; notificationsSent: number; message: string } {
+    const cycle = this.getCycleById(cycleId);
+    if (!cycle || cycle.status === 'CLOSED') {
+      throw new Error('No se pueden consolidar operaciones de un ciclo cerrado.');
+    }
+
+    const activeOps = this.dailyOperations.filter(
+      (op) => op.cycleId === cycleId && op.status !== 'CONSOLIDATED'
+    );
+
+    if (activeOps.length === 0) {
+      throw new Error('No hay operaciones diarias activas pendientes por consolidar en ninguna bitácora.');
+    }
+
+    let notificationsSent = 0;
+    if (shouldNotify) {
+      try {
+        const notifRes = this.notifyAllActiveDailyOperations(cycleId, adminUid, adminName);
+        notificationsSent = notifRes.sentCount;
+      } catch (e) {
+        console.warn('Notification issue during consolidation:', e);
+      }
+    }
+
+    const now = new Date().toISOString();
+    let totalUsdConsolidated = 0;
+
+    activeOps.forEach((op) => {
+      op.status = 'CONSOLIDATED';
+      op.consolidatedAt = now;
+      totalUsdConsolidated += op.amountUsd;
+      firestoreService.saveDailyOperation(op).catch((e) => console.warn('Error updating op in Firestore:', e));
+    });
+
+    // Recalcular todos los grupos para reflejar los acumulados completos en Cierre Mensual
+    const groupsByCategory = this.getCategoryGroups(cycleId);
+    const allGroups: CategoryGroupInfo[] = [
+      ...(groupsByCategory.AZUL || []),
+      ...(groupsByCategory.VERDE || []),
+      ...(groupsByCategory.NEGRA || []),
+    ];
+
+    allGroups.forEach((group) => {
+      const ops = this.getDailyOperations(cycleId, group.category, group.groupCapitalCop);
+      const totalUsdAccumulated = ops.reduce((sum, o) => sum + o.amountUsd, 0);
+      if (totalUsdAccumulated > 0) {
+        this.calculateGroup(cycleId, group.category, group.groupCapitalCop, totalUsdAccumulated, adminUid, adminName, true);
+      }
+    });
+
+    this.addAuditLog({
+      action: 'DAILY_OPERATIONS_CONSOLIDATED',
+      performedBy: adminUid,
+      performedByName: adminName,
+      cycleId,
+      targetEntity: `ALL_GROUPS_${cycleId}`,
+      details: {
+        consolidatedOpsCount: activeOps.length,
+        totalUsdConsolidated,
+        notificationsSent,
+      },
+    });
+
+    this.notify();
+
+    return {
+      success: true,
+      consolidatedOpsCount: activeOps.length,
+      totalUsdConsolidated,
+      notificationsSent,
+      message: `Se cerraron y consolidaron ${activeOps.length} operaciones ($${totalUsdConsolidated.toFixed(2)} USD) en todas las bitácoras. ${notificationsSent > 0 ? `Se enviaron ${notificationsSent} notificaciones a los inversionistas. ` : ''}Los mostradores diarios se reiniciaron a $0 USD y todos los saldos se guardaron en el Cierre Mensual.`,
     };
   }
 
@@ -636,7 +1931,8 @@ class DataStore {
     totalUsdApplied: number,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal',
-    allowOverwrite: boolean = false
+    allowOverwrite: boolean = false,
+    targetUserId?: string
   ): { success: boolean; affectedUsersCount: number; message: string } {
     const cycle = this.getCycleById(cycleId);
     if (!cycle) {
@@ -653,10 +1949,14 @@ class DataStore {
     const trmUsed = cycle.trmApplied || this.config.trmConfigured;
     const calcId = `${cycleId}_${category}_${groupCapitalCop}`;
 
-    // Obtener usuarios del grupo
-    const usersInGroup = this.getActiveUsers().filter(
-      (u) => getCategoryForCapital(u.currentCapital) === category && u.currentCapital === groupCapitalCop
-    );
+    // Obtener usuarios del grupo (estrictamente por capital exacto o por ID de usuario específico)
+    const usersInGroup = targetUserId
+      ? this.getActiveUsers().filter(
+          (u) => u.id === targetUserId || u.uid === targetUserId || u.userCode === targetUserId
+        )
+      : this.getActiveUsers().filter(
+          (u) => Number(u.currentCapital) === Number(groupCapitalCop)
+        );
 
     if (usersInGroup.length === 0) {
       throw new Error(`No hay usuarios activos en el grupo ${category} de $${groupCapitalCop.toLocaleString('es-CO')} COP.`);
@@ -692,8 +1992,10 @@ class DataStore {
         id: userResultId,
         cycleId,
         userId: user.id,
+        userUid: user.uid,
         userCode: user.userCode,
         userName: user.fullName,
+        email: user.email,
         cycleCapitalCop: user.currentCapital,
         cycleCategory: category,
         groupCapitalCop,
@@ -747,6 +2049,12 @@ class DataStore {
     } else {
       this.groupCalculations.push(groupCalculation);
     }
+
+    // Persistir a Firestore para sincronización en tiempo real entre todos los dispositivos
+    firestoreService.saveGroupCalculation(groupCalculation).catch((e) => console.warn('Error saving groupCalc to Firestore:', e));
+    newResults.forEach((res) => {
+      firestoreService.saveUserResult(res).catch((e) => console.warn('Error saving userResult to Firestore:', e));
+    });
 
     // Auditoría
     this.addAuditLog({
@@ -809,7 +2117,7 @@ class DataStore {
     const trmUsed = prevCalc.trmUsed;
 
     const usersInGroup = this.getActiveUsers().filter(
-      (u) => getCategoryForCapital(u.currentCapital) === category && u.currentCapital === groupCapitalCop
+      (u) => Number(u.currentCapital) === Number(groupCapitalCop)
     );
 
     let totalGroupCop = 0;
@@ -952,7 +2260,19 @@ class DataStore {
     let sentCount = 0;
     const now = new Date().toISOString();
 
-    userResults.forEach((res) => {
+    // Notificar exclusivamente a usuarios que son inversionistas (NO administradores)
+    const nonAdminResults = userResults.filter((res) => {
+      const user = this.getUserById(res.userId) || this.getUserByCode(res.userCode);
+      if (!user) return true;
+      const isAdmin =
+        user.role === 'ADMIN' ||
+        user.userCode?.startsWith('ADM') ||
+        user.id === 'admin_root_uid' ||
+        user.id === 'usr_admin';
+      return !isAdmin;
+    });
+
+    nonAdminResults.forEach((res) => {
       // Formato personalizado según el split individual
       const formattedUsd = `$${res.totalUsdOperated.toFixed(2)}`;
       const formattedCop = `$${res.totalGrossCop.toLocaleString('es-CO')} COP`;
@@ -966,7 +2286,7 @@ class DataStore {
         cycleId,
         type: 'MONTHLY_CLOSURE',
         title: 'Tu operación mensual ya está disponible',
-        message: `Tu operación del mes de ${cycle.name} fue de USD ${formattedUsd}. Tu resultado convertido es de ${formattedCop} y tu ganancia correspondiente (${res.userPercentage}%) es de ${formattedProfit}.`,
+        message: `Tu operación del mes de ${cycle.name} fue de USD ${formattedUsd}. Tu resultado convertido es de ${formattedCop} y tu ganancia correspondiente es de ${formattedProfit}.`,
         payload: {
           cycleId,
           usdAmount: res.totalUsdOperated,
@@ -982,14 +2302,6 @@ class DataStore {
 
       this.notifications.push(notification);
 
-      // Disparar Notificación Push al dispositivo del usuario
-      notifyCycleClosureToUser({
-        userName: res.userName,
-        userProfitCop: res.userProfitCop,
-        totalUsdOperated: res.totalUsdOperated,
-        cycleName: cycle.name,
-      });
-
       // Actualizar estado en userResult
       res.notificationStatus = 'SENT';
       res.notificationSentAt = now;
@@ -1001,6 +2313,10 @@ class DataStore {
     if (cycleIndex >= 0) {
       this.cycles[cycleIndex].notificationsSent = true;
       this.cycles[cycleIndex].notificationsSentAt = now;
+    }
+
+    if (nonAdminResults.length > 0) {
+      firestoreService.saveNotificationsBatch(this.notifications.slice(-sentCount)).catch((e) => console.warn('Error batch saving cycle notifs:', e));
     }
 
     this.addAuditLog({
@@ -1022,14 +2338,150 @@ class DataStore {
   }
 
   /**
+   * Enviar notificación de operación diaria a los destinatarios autorizados para esa operación.
+   */
+  public sendDailyGroupNotification(
+    cycleId: string,
+    category: BitacoraCategory,
+    groupCapitalCop: number,
+    operationUsd: number,
+    date: string,
+    notes?: string,
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal',
+    operationId?: string,
+    operation?: DailyGroupOperation
+  ): { success: boolean; sentCount: number; message: string } {
+    const cycle = this.getCycleById(cycleId) || this.getActiveCycle();
+    const trm = cycle.trmApplied || 4028.5;
+
+    const targetOp: DailyGroupOperation =
+      operation ||
+      (operationId ? this.dailyOperations.find((op) => op.id === operationId) : undefined) ||
+      ({
+        id: operationId || `op_${Date.now()}`,
+        cycleId,
+        category,
+        groupCapitalCop,
+        date,
+        amountUsd: operationUsd,
+        notes,
+        createdAt: new Date().toISOString(),
+        createdBy: adminName,
+        targetType: 'CUSTOM_GROUP',
+      } as DailyGroupOperation);
+
+    const activeUsers = this.getActiveUsers();
+    const recipients = this.resolveOperationRecipients(targetOp, activeUsers);
+
+    if (recipients.length === 0) {
+      console.warn('[DEV] sendDailyGroupNotification: No se encontraron destinatarios autorizados para la operación', targetOp.id);
+      return {
+        success: true,
+        sentCount: 0,
+        message: 'No hay destinatarios autorizados para esta operación.',
+      };
+    }
+
+    let sentCount = 0;
+    const now = new Date().toISOString();
+    const notificationsToSave: NotificationItem[] = [];
+
+    recipients.forEach((user) => {
+      const isAdmin = user.role === 'ADMIN' || user.userCode?.startsWith('ADM');
+      if (isAdmin) return;
+
+      const userPct = user.userPercentage !== undefined ? user.userPercentage : 75;
+      const adminPct = user.adminPercentage !== undefined ? user.adminPercentage : 25;
+      const calc = calculateUserMonthlyResult(operationUsd, trm, userPct, adminPct);
+
+      const isPositive = operationUsd >= 0;
+      const signStr = isPositive ? '+' : '-';
+      const formattedUsd = `${signStr}$${Math.abs(operationUsd).toFixed(2)} USD`;
+      const formattedProfitCop = `${isPositive ? '+' : '-'}$${Math.abs(calc.userProfitCop).toLocaleString('es-CO')} COP`;
+
+      const notifId = targetOp.id ? `notif_op_${targetOp.id}_${user.uid || user.id}` : `notif_daily_${Date.now()}_${user.id}_${Math.random().toString(36).substring(2, 6)}`;
+
+      const tradeName = resolveTradeNotificationName(user);
+
+      const notif: NotificationItem = {
+        id: notifId,
+        userId: user.id,
+        userUid: user.uid,
+        userCode: user.userCode,
+        userEmail: user.email,
+        userName: user.fullName,
+        cycleId,
+        type: 'SYSTEM',
+        title: `${isPositive ? '📈' : '📉'} Operación Diaria: ${formattedUsd}`,
+        message: `Hola ${tradeName}, se ejecutó una operación de trading por ${formattedUsd} el ${date}. Tu resultado para esta operación es de ${formattedProfitCop}.`,
+        payload: {
+          cycleId,
+          operationId: targetOp.id,
+          usdAmount: operationUsd,
+          copAmount: calc.grossCop,
+          userProfitCop: calc.userProfitCop,
+          userProfitUsd: calc.userProfitUsd,
+          trmUsed: trm,
+          notes,
+          category,
+          groupCapitalCop,
+          userEmail: user.email,
+          userUid: user.uid,
+        },
+        isRead: false,
+        sentAt: now,
+        readAt: null,
+      };
+
+      const existingIndex = this.notifications.findIndex((n) => n.id === notifId);
+      if (existingIndex >= 0) {
+        this.notifications[existingIndex] = notif;
+      } else {
+        this.notifications.push(notif);
+      }
+      notificationsToSave.push(notif);
+
+      sentCount++;
+    });
+
+    if (notificationsToSave.length > 0) {
+      firestoreService.saveNotificationsBatch(notificationsToSave).catch((e) => console.warn('Error saving daily notifs:', e));
+    }
+
+    this.addAuditLog({
+      action: 'DAILY_OPERATION_NOTIFIED',
+      performedBy: adminUid,
+      performedByName: adminName,
+      cycleId,
+      targetEntity: `${category}_${groupCapitalCop}`,
+      details: {
+        category,
+        groupCapitalCop,
+        operationUsd,
+        date,
+        sentCount,
+      },
+    });
+
+    this.notify();
+
+    return {
+      success: true,
+      sentCount,
+      message: `Notificación de operación ($${operationUsd} USD) enviada exitosamente a los ${sentCount} inversionistas del grupo.`,
+    };
+  }
+
+  /**
    * CERRAR CICLO (Regla V2.1)
    * Bloquea el ciclo contra modificaciones financieras y prepara histórico.
    */
-  public closeCycle(
+  public async closeCycle(
     cycleId: string,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
-  ): { success: boolean; message: string } {
+  ): Promise<{ success: boolean; message: string }> {
     const cycleIndex = this.cycles.findIndex((c) => c.cycleId === cycleId);
     if (cycleIndex < 0) {
       throw new Error('Ciclo no encontrado.');
@@ -1048,10 +2500,83 @@ class DataStore {
 
     const now = new Date().toISOString();
 
-    // Bloquear cycleUserResults
+    // 1. INVOCAR CLOUD FUNCTION AUTORITATIVA DE SERVIDOR
+    // Realiza el cierre en Firestore y aplica cada reinversión aprobada mediante Transacciones Atómicas en el backend
+    const callResult = await firestoreService.adminCloseCycleCallable({
+      cycleId,
+      adminNotes: `Cierre formal ejecutado por ${adminName}`,
+    });
+
+    if (!callResult.success || !callResult.cycleClosed) {
+      if (callResult.code === 'CLOSURE_BLOCKED_PENDING_REQUESTS') {
+        throw new Error(
+          `No puedes cerrar este ciclo todavía.\nExisten solicitudes que requieren decisión o revisión administrativa antes del cierre:\n\n• Solicitudes pendientes: ${callResult.pendingCount || 0}\n• Solicitudes en revisión: ${callResult.needsReviewCount || 0}\n• Solicitudes aprobadas: ${callResult.approvedCount || 0}\n• Solicitudes rechazadas: ${callResult.rejectedCount || 0}\n\nPor favor aprueba, rechaza o resuelve todas las solicitudes antes de proceder con el cierre.`
+        );
+      }
+
+      let conflictMsg = callResult.message;
+      if (callResult.conflicts && callResult.conflicts.length > 0) {
+        const details = callResult.conflicts
+          .map((c: any) => {
+            if (c.code === 'PROFIT_SNAPSHOT_MISMATCH') {
+              return `[PROFIT_SNAPSHOT_MISMATCH] ${c.userCode || c.userUid}: Las ganancias de este inversionista cambiaron después de la solicitud. La solicitud debe revisarse nuevamente antes de cerrar el ciclo. (Ganancia al solicitar: $${Number(c.snapshotProfitCop).toLocaleString('es-CO')}, Ganancia actual: $${Number(c.currentProfitCop).toLocaleString('es-CO')}, Diferencia: $${Number(c.differenceCop).toLocaleString('es-CO')})`;
+            }
+            if (c.code === 'CAPITAL_SNAPSHOT_MISMATCH') {
+              return `[CAPITAL_SNAPSHOT_MISMATCH] ${c.userCode || c.userUid}: Discrepancia de capital base. (Capital al solicitar: $${Number(c.snapshotCapitalCop).toLocaleString('es-CO')}, Capital actual: $${Number(c.actualCurrentCapitalCop).toLocaleString('es-CO')})`;
+            }
+            if (c.code === 'CYCLE_RESULT_NOT_FOUND') {
+              return `[CYCLE_RESULT_NOT_FOUND] ${c.userCode || c.userUid}: ${c.message}`;
+            }
+            return `[${c.code}] ${c.userCode ? `${c.userCode}: ` : ''}${c.message}`;
+          })
+          .join('\n• ');
+        conflictMsg = `${callResult.message}\n\nDetalles de conflictos detectados:\n• ${details}`;
+      }
+      throw new Error(conflictMsg);
+    }
+
+    // 2. Bloquear cycleUserResults localmente
     this.userResults.forEach((r) => {
       if (r.cycleId === cycleId) {
         r.isCycleClosed = true;
+      }
+    });
+
+    // 3. Sincronizar estado en memoria: las reinversiones aprobadas pasan a APPLIED
+    const approvedReinvestments = this.reinvestments.filter(
+      (r) => r.sourceCycleId === cycleId && (r.status === 'APPROVED' || r.status === 'APPLIED') && !r.appliedAtCycleClosure
+    );
+
+    approvedReinvestments.forEach((reinv) => {
+      const user = this.getUserById(reinv.userId || reinv.userUid || '');
+      if (user) {
+        const previousCapital = user.currentCapital;
+        const newCapital = reinv.projectedCapitalCop || reinv.newCapitalTargetCop;
+        const newCategory = getCategoryForCapital(newCapital);
+
+        user.currentCapital = newCapital;
+        user.category = newCategory;
+
+        reinv.status = 'APPLIED';
+        reinv.appliedAtCycleClosure = true;
+        reinv.appliedAt = now;
+
+        this.addAuditLog({
+          action: 'REINVESTMENT_APPLIED_AT_CLOSURE',
+          performedBy: adminUid,
+          performedByName: adminName,
+          cycleId,
+          targetEntity: reinv.id,
+          previousValue: previousCapital,
+          newValue: newCapital,
+          details: {
+            userCode: user.userCode,
+            totalIncreaseCop: reinv.totalIncreaseCop || reinv.reinvestAmountCop,
+            profitAppliedCop: reinv.profitAppliedCop,
+            cashInjectionCop: reinv.cashInjectionCop,
+            newCategory,
+          },
+        });
       }
     });
 
@@ -1060,6 +2585,11 @@ class DataStore {
       status: 'CLOSED',
       closedAt: now,
       closedBy: adminName,
+      isClosing: false,
+      closingStartedAt: null,
+      closingByUid: null,
+      closingByName: null,
+      closureAttemptId: null,
     };
 
     this.addAuditLog({
@@ -1080,6 +2610,58 @@ class DataStore {
     return {
       success: true,
       message: `Ciclo ${cycle.name} cerrado y congelado exitosamente.`,
+    };
+  }
+
+  /**
+   * DESBLOQUEAR LOCK DE CIERRE HUÉRFANO (SuperAdmin / Recovery)
+   */
+  public async unlockCycle(
+    cycleId: string,
+    expectedClosureAttemptId: string,
+    confirmation: string,
+    reason: string = 'Desbloqueo administrativo de lock de cierre',
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal'
+  ): Promise<{ success: boolean; message: string }> {
+    const cycleIndex = this.cycles.findIndex((c) => c.cycleId === cycleId);
+    if (cycleIndex < 0) {
+      throw new Error('Ciclo no encontrado.');
+    }
+
+    const cycle = this.cycles[cycleIndex];
+    const attemptToUnlock = expectedClosureAttemptId || cycle.closureAttemptId || '';
+
+    await firestoreService.adminUnlockCycleCallable({
+      cycleId,
+      expectedClosureAttemptId: attemptToUnlock,
+      confirmation,
+      reason,
+    });
+
+    this.cycles[cycleIndex] = {
+      ...cycle,
+      isClosing: false,
+      closingStartedAt: null,
+      closingByUid: null,
+      closingByName: null,
+      closureAttemptId: null,
+    };
+
+    this.addAuditLog({
+      action: 'CYCLE_UNLOCKED',
+      performedBy: adminUid,
+      performedByName: adminName,
+      cycleId,
+      targetEntity: cycleId,
+      details: { reason, closureAttemptId: attemptToUnlock },
+    });
+
+    this.notify();
+
+    return {
+      success: true,
+      message: `Lock de cierre del ciclo ${cycle.name} liberado exitosamente.`,
     };
   }
 
@@ -1163,34 +2745,45 @@ class DataStore {
   }
 
   /**
-   * REABRIR CICLO (Auditoría estricta)
+   * REABRIR CICLO (Auditoría estricta y delegación autoritativa a Cloud Functions)
    */
-  public reopenCycle(
+  public async reopenCycle(
     cycleId: string,
     reason: string,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
-  ): { success: boolean; message: string } {
+  ): Promise<{ success: boolean; message: string }> {
     const cycleIndex = this.cycles.findIndex((c) => c.cycleId === cycleId);
     if (cycleIndex < 0) {
       throw new Error('Ciclo no encontrado.');
     }
     if (!reason || reason.trim().length < 5) {
-      throw new Error('Se requiere un motivo obligatorio de reapertura.');
+      throw new Error('Se requiere un motivo obligatorio de reapertura (mínimo 5 caracteres).');
     }
 
-    const now = new Date().toISOString();
     const cycle = this.cycles[cycleIndex];
+
+    // Delegación autoritativa al backend SuperAdmin
+    await firestoreService.adminReopenCycleCallable({
+      cycleId,
+      reason: reason.trim(),
+    });
+
+    const now = new Date().toISOString();
 
     this.cycles[cycleIndex] = {
       ...cycle,
       status: 'REOPENED',
+      reopenedAt: now,
+      reopenedBy: adminName,
+      reopenedByUid: adminUid,
+      reopenReason: reason.trim(),
       reopenAudit: [
         ...(cycle.reopenAudit || []),
         {
           reopenedAt: now,
           reopenedBy: adminName,
-          reason,
+          reason: reason.trim(),
         },
       ],
     };
@@ -1207,7 +2800,7 @@ class DataStore {
       performedByName: adminName,
       cycleId,
       targetEntity: cycleId,
-      reason,
+      reason: reason.trim(),
     });
 
     this.notify();
@@ -1239,6 +2832,7 @@ class DataStore {
     };
 
     this.users.push(newUser);
+    firestoreService.saveUser(newUser).catch((err) => console.warn('Error saving user in Firestore:', err));
 
     this.addAuditLog({
       action: 'USER_CREATED',
@@ -1258,6 +2852,17 @@ class DataStore {
     this.notify();
 
     return newUser;
+  }
+
+  public registerRemoteUserLocally(user: UserProfile) {
+    const exists = this.users.some((u) => u.id === user.id || (user.uid && u.uid === user.uid));
+    if (!exists) {
+      this.users.push(user);
+    } else {
+      this.users = this.users.map((u) => (u.id === user.id || (user.uid && u.uid === user.uid)) ? user : u);
+    }
+    this.recalculateCycleMetrics();
+    this.notify();
   }
 
   public updateUser(
@@ -1285,6 +2890,7 @@ class DataStore {
     };
 
     this.users[userIndex] = updatedUser;
+    firestoreService.saveUser(updatedUser).catch((err) => console.warn('Error updating user in Firestore:', err));
 
     this.addAuditLog({
       action: 'USER_UPDATED',
@@ -1317,6 +2923,7 @@ class DataStore {
 
     const removedUser = this.users[userIndex];
     this.users.splice(userIndex, 1);
+    firestoreService.deleteUser(userId).catch((err) => console.warn('Error deleting user from Firestore:', err));
 
     this.addAuditLog({
       action: 'USER_DELETED',
@@ -1437,7 +3044,7 @@ class DataStore {
           uid: `uid_${userCode.toLowerCase()}`,
           userCode,
           fullName: row.clientName,
-          email: `${userCode.toLowerCase()}@easytraders.app`,
+          email: `${userCode.toLowerCase()}@easytraders24.app`,
           phone: '+57 300 000 0000',
           role: 'USER',
           status: 'ACTIVE',
@@ -1815,8 +3422,154 @@ class DataStore {
   }
 
   /**
-   * GESTIÓN DE REINVERSIONES
-   */
+  * GESTIÓN DE REINVERSIONES E INYECCIONES DE CAPITAL (Regla de 2 Modalidades)
+  */
+  public async submitReinvestmentRequest(params: {
+    userId: string;
+    sourceCycleId: string;
+    modality: 'PROFIT_REINVESTMENT' | 'CAPITAL_INJECTION';
+    selectedReinvestmentCop?: number;
+    desiredCapitalIncreaseCop?: number;
+    clientRequestId?: string;
+  }): Promise<ReinvestmentRequest> {
+    const { userId, sourceCycleId, modality, selectedReinvestmentCop, desiredCapitalIncreaseCop, clientRequestId } = params;
+    const user = this.getUserById(userId);
+    if (!user) throw new Error('Usuario no encontrado.');
+
+    // 1. Verificar si ya existe una solicitud PENDING para este usuario y ciclo
+    const existingPending = this.reinvestments.find(
+      (r) => (r.userId === userId || r.userUid === userId) &&
+             r.sourceCycleId === sourceCycleId &&
+             r.status === 'PENDING'
+    );
+    if (existingPending) {
+      throw new Error('Ya tienes una solicitud pendiente para este ciclo.');
+    }
+
+    // 2. Intentar llamada mediante Cloud Function HTTPS Callable de Servidor (Obligatorio)
+    try {
+      const resp = await firestoreService.submitReinvestmentRequestCallable({
+        modality,
+        sourceCycleId,
+        selectedReinvestmentCop,
+        desiredCapitalIncreaseCop,
+        clientRequestId: clientRequestId || `req_${Date.now()}_${userId.slice(0, 6)}`,
+      });
+
+      if (resp && resp.reinvestment) {
+        const created = resp.reinvestment;
+        this.reinvestments.unshift(created);
+        this.knownReinvestmentIds.add(created.id);
+        this.notify();
+        return created;
+      }
+    } catch (callError: any) {
+      console.warn('[DataStore] Error en submitReinvestmentRequestCallable, aplicando validación local segura:', callError);
+      // Si falla por ya existir en backend, propagar error
+      if (callError?.message?.includes('already-exists') || callError?.code === 'already-exists') {
+        throw new Error('Ya tienes una solicitud pendiente para este ciclo.');
+      }
+    }
+
+    // 3. Fallback Local Canónico Seguro (para entorno offline / demo con idénticas reglas)
+    const userResult = this.getUserResultForUser(userId, sourceCycleId);
+    const cycleProfitSnapshotCop = userResult ? userResult.userProfitCop : 0;
+    const currentCapitalSnapshotCop = user.currentCapital;
+    const positiveProfit = Math.max(cycleProfitSnapshotCop, 0);
+    const reinvestableProfitCop = Math.floor(positiveProfit / 1_000_000) * 1_000_000;
+
+    let profitAppliedCop = 0;
+    let cashInjectionCop = 0;
+    let totalIncreaseCop = 0;
+    let profitToDisburseCop = 0;
+    let projectedCapitalCop = currentCapitalSnapshotCop;
+    let desiredIncrease: number | null = null;
+
+    if (modality === 'PROFIT_REINVESTMENT') {
+      if (reinvestableProfitCop < 1_000_000) {
+        throw new Error('Tus ganancias todavía no alcanzan el mínimo de $1.000.000 necesario para reinvertir.');
+      }
+      const selected = Number(selectedReinvestmentCop || 0);
+      if (selected < 1_000_000 || selected > reinvestableProfitCop || selected % 1_000_000 !== 0) {
+        throw new Error(`El monto a reinvertir debe ser múltiplo de $1.000.000 COP hasta $${reinvestableProfitCop.toLocaleString('es-CO')}.`);
+      }
+      profitAppliedCop = selected;
+      cashInjectionCop = 0;
+      totalIncreaseCop = profitAppliedCop;
+      profitToDisburseCop = Math.max(cycleProfitSnapshotCop - profitAppliedCop, 0);
+      projectedCapitalCop = currentCapitalSnapshotCop + profitAppliedCop;
+    } else {
+      const desired = Number(desiredCapitalIncreaseCop || 0);
+      if (desired <= 0 || desired % 1_000_000 !== 0) {
+        throw new Error('El aumento de capital debe ser mayor a cero y múltiplo de $1.000.000 COP.');
+      }
+      desiredIncrease = desired;
+      profitAppliedCop = Math.min(reinvestableProfitCop, desired);
+      cashInjectionCop = Math.max(desired - profitAppliedCop, 0);
+      totalIncreaseCop = desired;
+      projectedCapitalCop = currentCapitalSnapshotCop + desired;
+      profitToDisburseCop = Math.max(cycleProfitSnapshotCop - profitAppliedCop, 0);
+    }
+
+    const projectedCategory = getCategoryForCapital(projectedCapitalCop);
+    const newId = `reinv_${Date.now()}_${userId.slice(0, 6)}`;
+    const nowIso = new Date().toISOString();
+
+    const newRequest: ReinvestmentRequest = {
+      id: newId,
+      userId,
+      userUid: userId,
+      userCode: user.userCode,
+      userName: user.fullName,
+      userEmail: user.email,
+      sourceCycleId,
+      modality,
+      clientRequestId: clientRequestId || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`),
+
+      currentCapitalSnapshotCop,
+      cycleProfitSnapshotCop,
+      reinvestableProfitCop,
+      desiredCapitalIncreaseCop: desiredIncrease,
+      profitAppliedCop,
+      cashInjectionCop,
+      totalIncreaseCop,
+      profitToDisburseCop,
+      projectedCapitalCop,
+      projectedCategory,
+
+      // Retrocompatibilidad con esquemas heredados
+      availableProfitCop: cycleProfitSnapshotCop,
+      reinvestAmountCop: profitAppliedCop, // Ganancia del ciclo efectivamente reinvertida (semántica histórica canónica)
+      withdrawAmountCop: profitToDisburseCop,
+      newCapitalTargetCop: projectedCapitalCop,
+      newCategoryTarget: projectedCategory,
+
+      status: 'PENDING',
+      createdAt: nowIso,
+      resolvedAt: null,
+      resolvedBy: null,
+      resolvedByUid: null,
+      rejectionReason: undefined,
+      appliedAtCycleClosure: false,
+    };
+
+    this.reinvestments.unshift(newRequest);
+    this.knownReinvestmentIds.add(newRequest.id);
+
+    firestoreService.saveReinvestment(newRequest).catch((err) => {
+      console.warn('[DataStore] Error al guardar reinversión en Firestore:', err);
+    });
+
+    notifyNewReinvestmentToAdmin({
+      userName: user.fullName,
+      userCode: user.userCode,
+      newCapitalTargetCop: projectedCapitalCop,
+    });
+
+    this.notify();
+    return newRequest;
+  }
+
   public createReinvestmentRequest(
     userId: string,
     sourceCycleId: string,
@@ -1824,43 +3577,59 @@ class DataStore {
     withdrawAmountCop: number,
     notes?: string
   ): ReinvestmentRequest {
+    // Wrapper de retrocompatibilidad que invoca el modelo unificado
     const user = this.getUserById(userId);
     if (!user) throw new Error('Usuario no encontrado.');
 
     const userResult = this.getUserResultForUser(userId, sourceCycleId);
     const availableProfit = userResult ? userResult.userProfitCop : 0;
+    const positiveProfit = Math.max(availableProfit, 0);
+    const reinvestableProfit = Math.floor(positiveProfit / 1_000_000) * 1_000_000;
 
-    if (reinvestAmountCop <= 0) {
-      throw new Error('El monto a reinvertir debe ser mayor a cero.');
-    }
+    const modality = reinvestAmountCop > reinvestableProfit ? 'CAPITAL_INJECTION' : 'PROFIT_REINVESTMENT';
 
-    const newCapitalTargetCop = user.currentCapital + reinvestAmountCop;
-    const newCategoryTarget = getCategoryForCapital(newCapitalTargetCop);
+    // Disparar sincronización asíncrona
+    this.submitReinvestmentRequest({
+      userId,
+      sourceCycleId,
+      modality,
+      selectedReinvestmentCop: modality === 'PROFIT_REINVESTMENT' ? reinvestAmountCop : undefined,
+      desiredCapitalIncreaseCop: modality === 'CAPITAL_INJECTION' ? reinvestAmountCop : undefined,
+    }).catch((err) => {
+      console.warn('[DataStore] Error en createReinvestmentRequest retrocompatible:', err);
+    });
 
-    const newRequest: ReinvestmentRequest = {
+    // Devolver objeto representativo
+    return {
       id: `reinv_${Date.now()}`,
       userId,
       userCode: user.userCode,
       userName: user.fullName,
       sourceCycleId,
+      modality,
+      currentCapitalSnapshotCop: user.currentCapital,
+      cycleProfitSnapshotCop: availableProfit,
+      reinvestableProfitCop: reinvestableProfit,
+      profitAppliedCop: Math.min(reinvestableProfit, reinvestAmountCop),
+      cashInjectionCop: Math.max(reinvestAmountCop - reinvestableProfit, 0),
+      totalIncreaseCop: reinvestAmountCop,
+      profitToDisburseCop: withdrawAmountCop,
+      projectedCapitalCop: user.currentCapital + reinvestAmountCop,
+      projectedCategory: getCategoryForCapital(user.currentCapital + reinvestAmountCop),
       availableProfitCop: availableProfit,
-      reinvestAmountCop,
+      reinvestAmountCop: Math.min(reinvestableProfit, reinvestAmountCop), // Semántica histórica canónica = profitAppliedCop
       withdrawAmountCop,
-      newCapitalTargetCop,
-      newCategoryTarget,
+      newCapitalTargetCop: user.currentCapital + reinvestAmountCop,
+      newCategoryTarget: getCategoryForCapital(user.currentCapital + reinvestAmountCop),
       status: 'PENDING',
       createdAt: new Date().toISOString(),
       resolvedAt: null,
       resolvedBy: null,
       notes,
     };
-
-    this.reinvestments.unshift(newRequest);
-    this.notify();
-    return newRequest;
   }
 
-  public approveReinvestment(
+  public async preapproveReinvestment(
     requestId: string,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
@@ -1869,74 +3638,106 @@ class DataStore {
     if (reqIndex < 0) throw new Error('Solicitud no encontrada.');
 
     const req = this.reinvestments[reqIndex];
-    if (req.status !== 'PENDING') throw new Error('La solicitud ya fue procesada.');
+    if (req.status !== 'PENDING') throw new Error(`Solo solicitudes PENDING pueden ser preaprobadas (actual: ${req.status}).`);
 
-    const user = this.getUserById(req.userId);
-    if (!user) throw new Error('Usuario no encontrado.');
-
-    const previousCapital = user.currentCapital;
-    const newCapital = req.newCapitalTargetCop;
-    const newCategory = getCategoryForCapital(newCapital);
-
-    // Actualizar usuario
-    this.updateUser(
-      user.id,
-      {
-        currentCapital: newCapital,
-        category: newCategory,
-      },
-      adminUid,
-      adminName
-    );
-
-    // Marcar solicitud
-    this.reinvestments[reqIndex] = {
-      ...req,
-      status: 'APPROVED',
-      resolvedAt: new Date().toISOString(),
-      resolvedBy: adminName,
-    };
-
-    // Notificar al usuario
-    this.notifications.unshift({
-      id: `notif_reinv_appr_${Date.now()}`,
-      userId: user.id,
-      userCode: user.userCode,
-      userName: user.fullName,
-      cycleId: req.sourceCycleId,
-      type: 'REINVESTMENT',
-      title: '¡Reinversión Aprobada!',
-      message: `Tu solicitud de reinversión por $${req.reinvestAmountCop.toLocaleString('es-CO')} COP fue aprobada. Tu nuevo capital para el próximo ciclo es de $${newCapital.toLocaleString('es-CO')} COP (${newCategory}).`,
-      payload: {
-        cycleId: req.sourceCycleId,
-        usdAmount: 0,
-        copAmount: req.reinvestAmountCop,
-        userProfitCop: 0,
-        userPercentage: user.userPercentage,
-      },
-      isRead: false,
-      sentAt: new Date().toISOString(),
-      readAt: null,
+    const res = await firestoreService.adminResolveReinvestmentCallable({
+      reinvestmentId: req.id,
+      action: 'PREAPPROVE',
     });
 
-    this.addAuditLog({
-      action: 'REINVESTMENT_APPROVED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      targetEntity: req.id,
-      previousValue: previousCapital,
-      newValue: newCapital,
-      details: {
-        userCode: user.userCode,
-        reinvestAmount: req.reinvestAmountCop,
-        newCategory,
-      },
-    });
+    if (res && res.reinvestment) {
+      this.reinvestments[reqIndex] = res.reinvestment;
+    } else {
+      this.reinvestments[reqIndex] = {
+        ...req,
+        status: 'PREAPPROVED',
+        resolvedAt: new Date().toISOString(),
+        resolvedBy: adminName,
+        resolvedByUid: adminUid,
+      };
+    }
 
     this.notify();
+    return this.reinvestments[reqIndex];
   }
 
-  public rejectReinvestment(
+  public async confirmCashAndApproveReinvestment(
+    requestId: string,
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal'
+  ) {
+    const reqIndex = this.reinvestments.findIndex((r) => r.id === requestId);
+    if (reqIndex < 0) throw new Error('Solicitud no encontrada.');
+
+    const req = this.reinvestments[reqIndex];
+    if (req.status !== 'PREAPPROVED') throw new Error(`Solo solicitudes PREAPPROVED pueden confirmarse y aprobarse (actual: ${req.status}).`);
+
+    const res = await firestoreService.adminResolveReinvestmentCallable({
+      reinvestmentId: req.id,
+      action: 'CONFIRM_CASH_AND_APPROVE',
+    });
+
+    if (res && res.reinvestment) {
+      this.reinvestments[reqIndex] = res.reinvestment;
+    } else {
+      const nowIso = new Date().toISOString();
+      this.reinvestments[reqIndex] = {
+        ...req,
+        status: 'APPROVED',
+        resolvedAt: nowIso,
+        resolvedBy: adminName,
+        resolvedByUid: adminUid,
+        cashReceivedConfirmed: true,
+        cashReceivedAmountCop: Number(req.cashInjectionCop || 0),
+        cashReceivedAt: nowIso,
+        cashReceivedByUid: adminUid,
+        cashReceivedByName: adminName,
+      };
+    }
+
+    this.notify();
+    return this.reinvestments[reqIndex];
+  }
+
+  public async approveReinvestment(
+    requestId: string,
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal'
+  ) {
+    const reqIndex = this.reinvestments.findIndex((r) => r.id === requestId);
+    if (reqIndex < 0) throw new Error('Solicitud no encontrada.');
+
+    const req = this.reinvestments[reqIndex];
+    if (req.status !== 'PENDING') throw new Error(`Solo solicitudes en estado PENDING pueden aprobarse directamente (actual: ${req.status}).`);
+
+    const cashInjection = Number(req.cashInjectionCop || 0);
+    if (req.modality === 'CAPITAL_INJECTION' && cashInjection > 0) {
+      throw new Error(`Esta solicitud contempla un aporte de $${cashInjection.toLocaleString('es-CO')} COP. Debe ser PREAPROBADA primero y luego APROBADA confirmando el dinero recibido.`);
+    }
+
+    const res = await firestoreService.adminResolveReinvestmentCallable({
+      reinvestmentId: req.id,
+      action: 'APPROVE',
+    });
+
+    if (res && res.reinvestment) {
+      this.reinvestments[reqIndex] = res.reinvestment;
+    } else {
+      const nowIso = new Date().toISOString();
+      this.reinvestments[reqIndex] = {
+        ...req,
+        status: 'APPROVED',
+        resolvedAt: nowIso,
+        resolvedBy: adminName,
+        resolvedByUid: adminUid,
+      };
+    }
+
+    this.notify();
+    return this.reinvestments[reqIndex];
+  }
+
+  public async rejectReinvestment(
     requestId: string,
     reason?: string,
     adminUid: string = 'admin_root_uid',
@@ -1946,15 +3747,73 @@ class DataStore {
     if (reqIndex < 0) throw new Error('Solicitud no encontrada.');
 
     const req = this.reinvestments[reqIndex];
-    this.reinvestments[reqIndex] = {
-      ...req,
-      status: 'REJECTED',
-      resolvedAt: new Date().toISOString(),
-      resolvedBy: adminName,
-      notes: reason ? `${req.notes ? req.notes + ' | ' : ''}Rechazo: ${reason}` : req.notes,
-    };
+    const res = await firestoreService.adminResolveReinvestmentCallable({
+      reinvestmentId: req.id,
+      action: 'REJECT',
+      rejectionReason: reason,
+    });
+
+    if (res && res.reinvestment) {
+      this.reinvestments[reqIndex] = res.reinvestment;
+    } else {
+      const nowIso = new Date().toISOString();
+      this.reinvestments[reqIndex] = {
+        ...req,
+        status: 'REJECTED',
+        resolvedAt: nowIso,
+        resolvedBy: adminName,
+        resolvedByUid: adminUid,
+        rejectionReason: reason,
+      };
+    }
 
     this.notify();
+    return this.reinvestments[reqIndex];
+  }
+
+  public async needsReviewReinvestment(
+    requestId: string,
+    reason?: string,
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal'
+  ) {
+    const reqIndex = this.reinvestments.findIndex((r) => r.id === requestId);
+    if (reqIndex < 0) throw new Error('Solicitud no encontrada.');
+
+    const req = this.reinvestments[reqIndex];
+    const res = await firestoreService.adminResolveReinvestmentCallable({
+      reinvestmentId: req.id,
+      action: 'NEEDS_REVIEW',
+      rejectionReason: reason,
+    });
+
+    if (res && res.reinvestment) {
+      this.reinvestments[reqIndex] = res.reinvestment;
+    } else {
+      const nowIso = new Date().toISOString();
+      this.reinvestments[reqIndex] = {
+        ...req,
+        status: 'NEEDS_REVIEW',
+        resolvedAt: nowIso,
+        resolvedBy: adminName,
+        resolvedByUid: adminUid,
+        rejectionReason: reason,
+      };
+    }
+
+    this.notify();
+    return this.reinvestments[reqIndex];
+  }
+
+  public async previewOrphanReinvestments() {
+    return await firestoreService.adminPreviewOrphanReinvestmentsCallable();
+  }
+
+  public async purgeOrphanReinvestments(documentIds: string[], confirmationPhrase: string) {
+    return await firestoreService.adminPurgeOrphanReinvestmentsCallable({
+      documentIds,
+      confirmationPhrase,
+    });
   }
 
   /**
@@ -2251,12 +4110,76 @@ class DataStore {
     this.notify();
   }
 
-  public markNotificationAsRead(notifId: string) {
+  public isNotificationOwned(n: NotificationItem): boolean {
+    const currentUid = this.currentActiveUid;
+    if (!currentUid) return false;
+    return (
+      (n.userUid != null && n.userUid === currentUid) ||
+      (n.userId != null && n.userId === currentUid)
+    );
+  }
+
+  public isNotificationRead(n: NotificationItem): boolean {
+    if (n.isRead) return true;
+    if (!this.isNotificationOwned(n)) {
+      return this.readSharedIds.has(n.id);
+    }
+    return false;
+  }
+
+  public async markNotificationAsRead(notifId: string) {
     const notif = this.notifications.find((n) => n.id === notifId);
-    if (notif && !notif.isRead) {
-      notif.isRead = true;
-      notif.readAt = new Date().toISOString();
-      this.notify();
+    if (!notif) return;
+
+    if (this.isNotificationOwned(notif)) {
+      if (!notif.isRead) {
+        try {
+          await firestoreService.markNotificationAsRead(notifId);
+        } catch (err) {
+          console.error(`Error al marcar notificación ${notifId} como leída:`, err);
+        }
+      }
+    } else {
+      // Es compartida, marcar localmente
+      if (!this.readSharedIds.has(notifId)) {
+        this.readSharedIds.add(notifId);
+        try {
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('gestor_read_shared_notifications', JSON.stringify(Array.from(this.readSharedIds)));
+          }
+        } catch (e) {
+          console.error(e);
+        }
+        this.notify();
+      }
+    }
+  }
+
+  public async markAllNotificationsAsRead(notifIds: string[]) {
+    if (!notifIds || !notifIds.length) return;
+    try {
+      await firestoreService.markAllNotificationsAsRead(notifIds);
+    } catch (err) {
+      console.error('Error al marcar todas las notificaciones como leídas:', err);
+      throw err;
+    }
+  }
+
+  public async hideNotification(notifId: string) {
+    try {
+      await firestoreService.hideNotification(notifId);
+    } catch (err) {
+      console.error(`Error al ocultar la notificación ${notifId}:`, err);
+    }
+  }
+
+  public async hideNotificationsBatch(notifIds: string[]) {
+    if (!notifIds || !notifIds.length) return;
+    try {
+      await firestoreService.hideNotificationsBatch(notifIds);
+    } catch (err) {
+      console.error('Error al ocultar lote de notificaciones:', err);
+      throw err;
     }
   }
 
@@ -2311,12 +4234,53 @@ class DataStore {
     };
 
     this.applications.push(newApp);
+    this.knownApplicationIds.add(newApp.id);
 
-    // Disparar Notificación Push a los Administradores
+    // Notificación en la app para los Administradores
+    const formattedAmount = `$${newApp.requestedCapitalCop.toLocaleString('es-CO')} COP`;
+    const detailsInfo = [
+      newApp.phone ? `Celular: ${newApp.phone}` : null,
+      newApp.city ? `Ciudad: ${newApp.city}` : null,
+      newApp.originBank ? `Banco: ${newApp.originBank}` : null,
+      newApp.documentId ? `C.C.: ${newApp.documentId}` : null,
+    ]
+      .filter(Boolean)
+      .join(' • ');
+
+    this.notifications.unshift({
+      id: `notif_app_sub_${Date.now()}_${Math.random().toString(36).slice(-4)}`,
+      userId: 'ALL_ADMINS',
+      userCode: 'ADMIN',
+      userName: 'Administradores EasyTraders',
+      cycleId: this.config.activeCycleId || '2026-08',
+      type: 'INVESTMENT_REQUEST',
+      title: `📥 Nueva Solicitud de Admisión: ${newApp.fullName} (Turno #${newApp.queuePosition})`,
+      message: `${newApp.fullName} ha radicado una solicitud de ingreso con un capital de ${formattedAmount}.${detailsInfo ? ` [${detailsInfo}]` : ''} Revisa la sección de Admisiones para gestionar la aprobación.`,
+      payload: {
+        cycleId: this.config.activeCycleId || '2026-08',
+        usdAmount: 0,
+        copAmount: newApp.requestedCapitalCop,
+        userProfitCop: 0,
+        userPercentage: 0,
+      },
+      isRead: false,
+      sentAt: new Date().toISOString(),
+      readAt: null,
+    });
+
+    // Disparar Notificación Push / Alerta Sonora a los Administradores
     notifyNewApplicationToAdmin({
       applicantName: newApp.fullName,
       requestedCapitalCop: newApp.requestedCapitalCop,
       queuePosition: newApp.queuePosition,
+      phone: newApp.phone,
+      city: newApp.city,
+      bank: newApp.originBank,
+    });
+
+    // Persistir en Firestore en segundo plano si está disponible
+    firestoreService.saveApplication(newApp).catch((err) => {
+      console.warn('[DataStore] Error al guardar solicitud en Firestore:', err);
     });
 
     this.notify();
@@ -2337,20 +4301,37 @@ class DataStore {
       excelTurno?: number;
     }>,
     adminUid: string = 'admin_root_uid',
-    adminName: string = 'Administrador Principal'
+    adminName: string = 'Administrador Principal',
+    replaceExistingQueue: boolean = false
   ): { importedCount: number; startingTurn: number } {
     if (!rows || rows.length === 0) {
       return { importedCount: 0, startingTurn: 0 };
     }
 
-    const currentMaxTurn = this.applications.reduce(
-      (max, item) => Math.max(max, item.queuePosition || 0),
-      0
-    );
+    // Si se selecciona reemplazar la lista de espera oficial existente
+    if (replaceExistingQueue) {
+      const oldPending = this.applications.filter((a) => a.status === 'PENDING');
+      this.applications = this.applications.filter((a) => a.status !== 'PENDING');
+      // Eliminar de Firestore las solicitudes pendientes reemplazadas
+      for (const oldApp of oldPending) {
+        firestoreService.deleteApplication(oldApp.id).catch(() => {});
+      }
+    }
+
+    const currentMaxTurn = replaceExistingQueue
+      ? 0
+      : this.applications.reduce(
+          (max, item) => Math.max(max, item.queuePosition || 0),
+          0
+        );
     const startingTurn = currentMaxTurn + 1;
 
     const newItems: InvestorApplication[] = rows.map((r, idx) => {
-      const turn = r.excelTurno && Number(r.excelTurno) > 0 ? Number(r.excelTurno) : startingTurn + idx;
+      // Si se reemplaza la lista, el turno coincide exactamente con el orden del Excel (Fila 1 = Turno 1)
+      const turn = replaceExistingQueue
+        ? (r.excelTurno && Number(r.excelTurno) > 0 ? Number(r.excelTurno) : idx + 1)
+        : (r.excelTurno && Number(r.excelTurno) > 0 ? Number(r.excelTurno) : startingTurn + idx);
+
       return {
         id: `app_xl_${Date.now()}_${idx}_${Math.random().toString(36).slice(-3)}`,
         queuePosition: turn,
@@ -2371,6 +4352,14 @@ class DataStore {
 
     this.applications.push(...newItems);
 
+    // Asegurar que la cola quede ordenada cronológicamente por número de turno
+    this.applications.sort((a, b) => a.queuePosition - b.queuePosition);
+
+    // Guardar el lote en base de datos Firestore
+    firestoreService.saveApplicationsBatch(newItems).catch((err) => {
+      console.warn('[DataStore] Error al guardar lote en Firestore:', err);
+    });
+
     this.addAuditLog({
       action: 'APPLICATIONS_IMPORTED',
       performedBy: adminUid,
@@ -2380,12 +4369,73 @@ class DataStore {
         count: newItems.length,
         startingTurn,
         endingTurn: startingTurn + newItems.length - 1,
+        replacedQueue: replaceExistingQueue,
       },
-      reason: 'Carga masiva de solicitudes históricas en estricto orden de llegada FIFO',
+      reason: replaceExistingQueue
+        ? 'Carga de lista histórica oficial reemplazando la cola de espera previa'
+        : 'Carga masiva de solicitudes históricas en estricto orden de llegada FIFO',
     });
 
     this.notify();
     return { importedCount: newItems.length, startingTurn };
+  }
+
+  /**
+   * Renumera de forma estrictamente correlativa (1, 2, 3...) todas las solicitudes pendientes
+   */
+  public renumberPendingQueue(): void {
+    const pending = this.applications.filter((a) => a.status === 'PENDING');
+    pending.sort((a, b) => a.queuePosition - b.queuePosition);
+    pending.forEach((app, idx) => {
+      app.queuePosition = idx + 1;
+      // Actualizar turno en Firestore
+      firestoreService.saveApplication(app).catch(() => {});
+    });
+    this.notify();
+  }
+
+  /**
+   * Elimina una solicitud de la lista de espera y de la base de datos Firestore
+   */
+  public async deleteApplication(
+    applicationId: string,
+    adminUid: string = 'admin_root_uid',
+    adminName: string = 'Administrador Principal'
+  ): Promise<{ success: boolean; message: string }> {
+    const target = this.applications.find((a) => a.id === applicationId);
+    this.applications = this.applications.filter((a) => a.id !== applicationId);
+    
+    // Reindexar orden correlativo de las pendientes
+    this.renumberPendingQueue();
+
+    // Eliminar de base de datos Firestore
+    try {
+      await firestoreService.deleteApplication(applicationId);
+    } catch (err: any) {
+      console.error('[DataStore] Error al eliminar solicitud en Firestore:', err);
+    }
+
+    if (target) {
+      this.addAuditLog({
+        action: 'APPLICATION_DELETED',
+        performedBy: adminUid,
+        performedByName: adminName,
+        targetEntity: applicationId,
+        details: {
+          fullName: target.fullName,
+          status: target.status,
+          capital: target.requestedCapitalCop,
+          queuePosition: target.queuePosition,
+        },
+        reason: `Eliminación permanente de postulación de admisión (${target.fullName})`,
+      });
+    }
+
+    this.notify();
+    return {
+      success: true,
+      message: `La solicitud de ${target?.fullName || 'admisión'} ha sido eliminada permanentemente.`,
+    };
   }
 
   public approveApplication(
@@ -2458,7 +4508,7 @@ class DataStore {
     };
 
     // Mensaje de WhatsApp listo para copiar y enviar al nuevo inversionista
-    const originUrl = typeof window !== 'undefined' ? window.location.origin : 'https://easytraders.app';
+    const originUrl = getAppBaseUrl();
     const welcomeMessage = `👋 ¡Hola *${app.fullName}*! Te damos la bienvenida oficial a *EasyTraders*.\n\n` +
       `Tu solicitud de ingreso (Turno #${app.queuePosition}) ha sido *APROBADA* exitosamente.\n\n` +
       `📋 *Datos Oficiales de tu Cuenta:*\n` +
@@ -2492,6 +4542,10 @@ class DataStore {
       applicantName: app.fullName,
       status: 'APPROVED',
     });
+
+    // Guardar en Firestore
+    firestoreService.saveUser(newUser).catch(() => {});
+    firestoreService.saveApplication(this.applications[appIndex]).catch(() => {});
 
     this.notify();
     return { user: newUser, application: this.applications[appIndex], welcomeMessage };
@@ -2535,36 +4589,75 @@ class DataStore {
       rejectionReason: reason,
     });
 
+    firestoreService.saveApplication(this.applications[appIndex]).catch(() => {});
+
     this.notify();
   }
 
   public reorderApplicationQueue(applicationId: string, newTurn: number) {
-    const appIndex = this.applications.findIndex((a) => a.id === applicationId);
-    if (appIndex < 0) throw new Error('Solicitud no encontrada.');
-    const app = this.applications[appIndex];
-    app.queuePosition = Math.max(1, newTurn);
+    const pending = this.applications.filter((a) => a.status === 'PENDING');
+    const targetApp = pending.find((a) => a.id === applicationId);
+    if (!targetApp) return;
+
+    const oldTurn = targetApp.queuePosition;
+    const clampedTurn = Math.max(1, Math.min(newTurn, pending.length));
+    if (oldTurn === clampedTurn) return;
+
+    pending.forEach((a) => {
+      if (a.id === applicationId) {
+        a.queuePosition = clampedTurn;
+      } else if (oldTurn < clampedTurn && a.queuePosition > oldTurn && a.queuePosition <= clampedTurn) {
+        a.queuePosition -= 1;
+      } else if (oldTurn > clampedTurn && a.queuePosition >= clampedTurn && a.queuePosition < oldTurn) {
+        a.queuePosition += 1;
+      }
+    });
+
+    pending.sort((a, b) => a.queuePosition - b.queuePosition);
+    pending.forEach((a, i) => {
+      a.queuePosition = i + 1;
+    });
+
     this.notify();
   }
 
   // ==========================================
   // VINCULACIÓN / ACTIVACIÓN DE CUENTA (CLAIM)
   // ==========================================
-  public claimAccount(
+  public async claimAccount(
     identifier: string,
     newEmail: string,
     newPassword?: string
-  ): { success: boolean; user?: UserProfile; message: string } {
+  ): Promise<{ success: boolean; user?: UserProfile; message: string }> {
     const cleanId = identifier.trim().toUpperCase();
-    const user = this.users.find((u) =>
-      u.userCode.toUpperCase() === cleanId ||
+    let user = this.users.find((u) =>
+      (u.userCode && u.userCode.trim().toUpperCase() === cleanId) ||
       (u.documentId && u.documentId.trim() === identifier.trim()) ||
       (u.email && u.email.trim().toLowerCase() === identifier.trim().toLowerCase())
     );
 
+    // Si no está en memoria local aún, buscar directamente en Firestore (soporte multi-dispositivo)
+    if (!user) {
+      try {
+        const remoteUser = await firestoreService.findUserByCodeOrDoc(identifier);
+        if (remoteUser) {
+          user = remoteUser;
+          const idx = this.users.findIndex((u) => u.id === user!.id);
+          if (idx >= 0) {
+            this.users[idx] = user;
+          } else {
+            this.users.push(user);
+          }
+        }
+      } catch (err) {
+        console.warn('Error en fallback Firestore claimAccount:', err);
+      }
+    }
+
     if (!user) {
       return {
         success: false,
-        message: 'No se encontró ninguna cuenta asociada a este código o documento de identidad.',
+        message: 'No se encontró ninguna cuenta asociada a este código o documento de identidad. Verifica que el código coincida exactamente.',
       };
     }
 
@@ -2574,6 +4667,9 @@ class DataStore {
     }
     user.isClaimed = true;
     user.claimedAt = new Date().toISOString();
+
+    // Guardar en Firestore de inmediato para persistencia
+    firestoreService.saveUser(user).catch((err) => console.warn('Error al guardar claim en Firestore:', err));
 
     this.addAuditLog({
       action: 'ACCOUNT_CLAIMED',
@@ -2587,6 +4683,7 @@ class DataStore {
       },
     });
 
+    this.saveState();
     this.notify();
     return {
       success: true,
@@ -2603,7 +4700,7 @@ class DataStore {
     const cleanLower = identifier.trim().toLowerCase();
 
     // Acceso rápido admin
-    if (cleanLower === 'admin' || cleanLower === 'admin@easytraders.com') {
+    if (cleanLower === 'admin' || cleanLower === 'admin@easytraders.com' || cleanLower === 'admin@easytraders24.app') {
       const admin = this.users.find((u) => u.role === 'ADMIN');
       if (admin) return { success: true, user: admin, message: 'Bienvenido Administrador' };
     }
@@ -2633,6 +4730,10 @@ class DataStore {
       user,
       message: `Bienvenido, ${user.fullName}`,
     };
+  }
+
+  public async runHistoricalMigration(): Promise<ReconciliationReport> {
+    return historicalMigrationService.runFullHistoricalReconciliation();
   }
 
   private addAuditLog(log: Omit<AuditLog, 'id' | 'timestamp'>) {

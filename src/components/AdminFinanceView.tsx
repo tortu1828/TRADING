@@ -108,9 +108,9 @@ export const AdminFinanceView: React.FC<AdminFinanceViewProps> = ({ onNavigate }
       : '0.00';
 
   // Handle Close Cycle
-  const handleExecuteCloseCycle = () => {
+  const handleExecuteCloseCycle = async () => {
     try {
-      const res = dataStore.closeCycle(
+      const res = await dataStore.closeCycle(
         selectedCycleId,
         currentUser?.uid || 'admin_root_uid',
         currentUser?.fullName || 'Administrador Principal'
@@ -134,7 +134,7 @@ export const AdminFinanceView: React.FC<AdminFinanceViewProps> = ({ onNavigate }
   };
 
   // Handle Reopen Cycle
-  const handleExecuteReopenCycle = (e: React.FormEvent) => {
+  const handleExecuteReopenCycle = async (e: React.FormEvent) => {
     e.preventDefault();
     setReopenError(null);
     if (!reopenReason || reopenReason.trim().length < 5) {
@@ -143,7 +143,7 @@ export const AdminFinanceView: React.FC<AdminFinanceViewProps> = ({ onNavigate }
     }
 
     try {
-      const res = dataStore.reopenCycle(
+      const res = await dataStore.reopenCycle(
         selectedCycleId,
         reopenReason,
         currentUser?.uid || 'admin_root_uid',
@@ -227,7 +227,7 @@ export const AdminFinanceView: React.FC<AdminFinanceViewProps> = ({ onNavigate }
   // Pie chart distribution data
   const profitSplitPieData = [
     { name: 'Inversionistas', value: totalClientProfitCOP || 75, color: '#10b981' },
-    { name: 'Comisión Mesa Admin', value: totalAdminCommissionCOP || 25, color: '#f59e0b' },
+    { name: 'Comisión Admin', value: totalAdminCommissionCOP || 25, color: '#f59e0b' },
   ];
 
   const bitacoraCapitalPieData = [
@@ -569,7 +569,7 @@ Generado por Gestor de Capital V2.1
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800/80 shadow-xl relative overflow-hidden group hover:border-slate-700 transition">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
-              Comisión Mesa Admin
+              Comisión Admin
             </span>
             <div className="w-8 h-8 rounded-lg bg-amber-950 border border-amber-500/30 flex items-center justify-center text-amber-400">
               <Wallet className="w-4 h-4" />
@@ -727,7 +727,7 @@ Generado por Gestor de Capital V2.1
               <div className="flex items-center gap-2">
                 <div className="w-3 h-3 rounded-full bg-slate-300 shadow-sm" />
                 <div>
-                  <h4 className="font-bold text-slate-100 text-sm">Bitácora Negra / Whale</h4>
+                  <h4 className="font-bold text-slate-100 text-sm">Bitácora Negra</h4>
                   <p className="text-[10px] text-slate-400">$60.000.000 a $4.000.000.000 COP</p>
                 </div>
               </div>
@@ -905,7 +905,7 @@ Generado por Gestor de Capital V2.1
                   <div className="flex items-center gap-2">
                     <div className="w-3 h-3 rounded-full bg-slate-300 shadow-sm" />
                     <div>
-                      <p className="font-bold text-slate-100 text-sm">Bitácora Negra / Whale</p>
+                      <p className="font-bold text-slate-100 text-sm">Bitácora Negra</p>
                       <p className="text-[11px] text-slate-400">$60.000.000 a $4.000.000.000 COP</p>
                     </div>
                   </div>
@@ -1131,7 +1131,7 @@ Generado por Gestor de Capital V2.1
                 <span className="text-emerald-400 font-bold">{formatCOP(totalClientProfitCOP)}</span>
               </div>
               <div className="flex justify-between text-slate-400">
-                <span>Comisión Mesa Admin:</span>
+                <span>Comisión Admin:</span>
                 <span className="text-amber-400 font-bold">{formatCOP(totalAdminCommissionCOP)}</span>
               </div>
               <div className="flex justify-between text-slate-400 pt-2 border-t border-slate-800">
