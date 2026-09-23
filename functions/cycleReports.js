@@ -3,12 +3,12 @@
  * INFORMES OFICIALES DE CIERRE POR CICLO (SNAPSHOTS INMUTABLES) - BACKEND
  * ============================================================================
  * Módulo para generación, versionado, reconciliación y renderizado en PDF
- * de los informes oficiales de cierre mensual en EasyTraders24.
+ * de los informes oficiales de cierre en EasyTraders24.
  *
  * Principios:
  * 1. Los snapshots son 100% inmutables y congelan los valores financieros del cierre.
  * 2. Ningún informe histórico se recalcula con datos mutables de usuarios actuales.
- * 3. El PDF se genera estrictamente bajo demanda y no se persiste permanentemente.
+ * 3. El PDF se genera estrictamente bajo demanda leyendo del snapshot del informe.
  * 4. Toda operación está protegida para acceso exclusivo de SuperAdmin.
  */
 
@@ -53,6 +53,77 @@ function formatDateEs(isoDate) {
 }
 
 /**
+ * Helper explícito para determinar si un ciclo utiliza el modelo moderno.
+ * No infiere la modernidad únicamente por la cadena de `cycleId`.
+ */
+function isModernCycle(cycleData) {
+  return Boolean(
+    cycleData.operationalStatus ||
+    (cycleData.closureVersion !== undefined && cycleData.closureVersion !== null) ||
+    cycleData.previousCycleId ||
+    cycleData.nextCycleId
+  );
+}
+
+/**
+ * Resuelve y valida autoritativamente el rango de fechas operativas del ciclo.
+ */
+function resolveCycleDates(cycleData) {
+  const modern = isModernCycle(cycleData);
+
+  let startedAt = null;
+  let closedAt = null;
+
+  if (modern) {
+    if (!cycleData.startedAt) {
+      throw new Error("REPORT_MISSING_AUTHORITATIVE_STARTED_AT: El ciclo moderno carece de fecha de inicio autoritativa 'startedAt'.");
+    }
+    startedAt = cycleData.startedAt;
+
+    if (cycleData.status === "CLOSED" || cycleData.status === "REOPENED") {
+      if (!cycleData.closedAt) {
+        throw new Error("REPORT_MISSING_AUTHORITATIVE_CLOSED_AT: El ciclo moderno cerrado carece de fecha de cierre autoritativa 'closedAt'.");
+      }
+      closedAt = cycleData.closedAt;
+    } else {
+      closedAt = cycleData.closedAt || null;
+    }
+  } else {
+    // Ciclo histórico legacy
+    startedAt = cycleData.startedAt || cycleData.openedAt || cycleData.startDate || cycleData.createdAt || null;
+    closedAt = cycleData.closedAt || cycleData.endDate || null;
+  }
+
+  if (!startedAt) {
+    throw new Error("REPORT_MISSING_AUTHORITATIVE_STARTED_AT: No se pudo determinar la fecha de inicio autoritativa del ciclo.");
+  }
+
+  if (!closedAt && cycleData.status === "CLOSED") {
+    throw new Error("REPORT_MISSING_AUTHORITATIVE_CLOSED_AT: No se pudo determinar la fecha de cierre autoritativa del ciclo.");
+  }
+
+  // Parsear y validar que closedAt >= startedAt
+  const startMs = new Date(startedAt).getTime();
+  const endMs = closedAt ? new Date(closedAt).getTime() : startMs;
+
+  if (isNaN(startMs) || isNaN(endMs) || endMs < startMs) {
+    throw new Error("INVALID_CYCLE_REPORT_DATE_RANGE: Rango de fechas del ciclo inválido o closedAt es anterior a startedAt.");
+  }
+
+  const durationMs = endMs - startMs;
+  const durationHours = durationMs / (1000 * 60 * 60);
+
+  return {
+    isModern: modern,
+    startedAt,
+    closedAt,
+    openedAt: cycleData.openedAt || null,
+    durationMs,
+    durationHours,
+  };
+}
+
+/**
  * Crea o recupera el snapshot oficial e inmutable del cierre de ciclo.
  *
  * @param {admin.firestore.Firestore} db Instancia de Firestore Admin
@@ -72,7 +143,7 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
 
   const nowIso = new Date().toISOString();
 
-  // 1. Obtener ciclo mensual
+  // 1. Obtener ciclo
   const cycleDocSnap = await db.collection("monthlyCycles").doc(targetCycleId).get();
   if (!cycleDocSnap.exists) {
     throw new Error(`El ciclo '${targetCycleId}' no existe en monthlyCycles.`);
@@ -80,82 +151,122 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
   const cycleData = cycleDocSnap.data() || {};
   const cycleName = cycleData.name || cycleData.title || targetCycleId;
   const trmApplied = Number(cycleData.trmApplied || cycleData.trmFinal || cycleData.trmSnapshot || 0);
-  const openedAt = cycleData.openedAt || cycleData.startDate || cycleData.createdAt || null;
-  const closedAt = cycleData.closedAt || cycleData.endDate || nowIso;
 
-  // 2. Comprobar si ya existe un snapshot READY para este closureAttemptId (Idempotencia)
+  // 2. Resolver fechas autoritativas con guardrails estrictos
+  const isModern = isModernCycle(cycleData);
+  const dates = resolveCycleDates(cycleData);
+
+  // 3. Determinar versionamiento autoritativo
   const versionsCollRef = db.collection("cycleReports").doc(targetCycleId).collection("versions");
-  if (closureAttemptId) {
-    const existingSnap = await versionsCollRef
-      .where("closureAttemptId", "==", closureAttemptId)
-      .where("status", "==", "READY")
+
+  let versionId;
+  let closureVersion = null;
+  let versionNumber = 1;
+
+  if (isModern) {
+    if (!Number.isInteger(cycleData.closureVersion) || cycleData.closureVersion < 1) {
+      throw new Error("REPORT_INVALID_CLOSURE_VERSION: El ciclo moderno debe poseer un closureVersion entero válido mayor o igual a 1.");
+    }
+    closureVersion = cycleData.closureVersion;
+    versionNumber = closureVersion;
+    versionId = `v${closureVersion}`;
+  } else {
+    // Legacy cycle versioning basado en el máximo número existente
+    const lastVersionsSnap = await versionsCollRef
+      .orderBy("versionNumber", "desc")
       .limit(1)
       .get();
 
-    if (!existingSnap.empty) {
-      const existingDoc = existingSnap.docs[0];
-      return {
-        isIdempotent: true,
-        versionId: existingDoc.id,
-        metadata: existingDoc.data(),
-      };
+    if (!lastVersionsSnap.empty) {
+      const lastVer = lastVersionsSnap.docs[0].data();
+      versionNumber = (Number(lastVer.versionNumber) || 0) + 1;
     }
+    versionId = `v${versionNumber}`;
   }
 
-  // 3. Determinar número de versión siguiente
-  const lastVersionsSnap = await versionsCollRef
-    .orderBy("versionNumber", "desc")
-    .limit(1)
-    .get();
+  const effectiveClosureAttemptId = closureAttemptId || cycleData.lastClosureAttemptId || cycleData.closureAttemptId || `closure_${targetCycleId}_v${versionNumber}`;
 
-  let nextVersionNumber = 1;
-  if (!lastVersionsSnap.empty) {
-    const lastVer = lastVersionsSnap.docs[0].data();
-    nextVersionNumber = (Number(lastVer.versionNumber) || 0) + 1;
+  // 4. Guard de versión existente / Idempotencia y recuperación de fallos parciales
+  const versionRef = versionsCollRef.doc(versionId);
+  const versionSnap = await versionRef.get();
+
+  if (versionSnap.exists) {
+    const vData = versionSnap.data() || {};
+    if (vData.status === "READY") {
+      const sameAttempt = !vData.closureAttemptId || !effectiveClosureAttemptId || vData.closureAttemptId === effectiveClosureAttemptId;
+      const sameClosureVersion = !isModern || vData.closureVersion === closureVersion;
+
+      if (sameAttempt && sameClosureVersion) {
+        return {
+          isIdempotent: true,
+          versionId,
+          metadata: vData,
+        };
+      } else {
+        throw new Error(`REPORT_VERSION_CONFLICT: La versión '${versionId}' ya existe en estado READY con metadata de cierre o intento diferente (${vData.closureAttemptId}).`);
+      }
+    }
+    // Si la versión existe en estado GENERATING o FAILED, se reanuda la escritura sobre esta misma versión vN
   }
 
-  const versionId = `v${nextVersionNumber}`;
+  // 5. Registrar/Actualizar estado inicial GENERATING de la versión
+  await versionRef.set({
+    id: versionId,
+    cycleId: targetCycleId,
+    cycleName,
+    versionId,
+    versionNumber,
+    closureVersion: closureVersion || null,
+    closureAttemptId: effectiveClosureAttemptId,
+    status: "GENERATING",
+    isCurrent: false,
+    startedAt: dates.startedAt,
+    openedAt: dates.openedAt,
+    closedAt: dates.closedAt,
+    durationHours: dates.durationHours,
+    closedByUid: authUid,
+    closedByName: adminName,
+    adminNotes: adminNotes || "",
+    trmApplied,
+    createdAt: vDataExists(versionSnap) ? (versionSnap.data().createdAt || nowIso) : nowIso,
+    snapshotGeneratedAt: nowIso,
+    isRetrospective: Boolean(isRetrospective),
+  }, { merge: true });
 
-  // 4. Marcar versiones previas como SUPERSEDED
-  const activeVersionsSnap = await versionsCollRef.where("isCurrent", "==", true).get();
-  const batchSupersede = db.batch();
-  activeVersionsSnap.forEach((doc) => {
-    batchSupersede.update(doc.ref, {
-      isCurrent: false,
-      status: "SUPERSEDED",
-      supersededAt: nowIso,
-      supersededByUid: authUid,
-      supersededByName: adminName,
-    });
-  });
-  if (!activeVersionsSnap.empty) {
-    await batchSupersede.commit();
+  function vDataExists(snap) {
+    return snap && snap.exists;
   }
 
-  // 5. Cargar datos de liquidación congelados (cycleUserResults)
+  // 6. Cargar datos de liquidación congelados (cycleUserResults)
   const resultsSnap = await db.collection("cycleUserResults")
     .where("cycleId", "==", targetCycleId)
     .get();
 
   if (resultsSnap.empty) {
-    console.warn(`[createCycleReportSnapshot] No se encontraron resultados individuales en cycleUserResults para ${targetCycleId}.`);
+    console.warn(`[createCycleReportSnapshot] No se encontraron resultados en cycleUserResults para ${targetCycleId}.`);
   }
 
-  // 6. Cargar solicitudes de reinversión para cruzar estados APPLIED
-  const reinvSnap = await db.collection("reinvestments")
+  // 7. Cargar solicitudes de reinversión para cruzar utilidades y capitales asegurados
+  const reinvSnap1 = await db.collection("reinvestments")
+    .where("sourceCycleId", "==", targetCycleId)
+    .get();
+  const reinvSnap2 = await db.collection("reinvestments")
     .where("cycleId", "==", targetCycleId)
     .get();
 
   const reinvByUserUid = {};
-  reinvSnap.forEach((doc) => {
+  const mergeDoc = (doc) => {
     const rData = doc.data() || {};
     const uUid = rData.userUid || rData.userId;
-    if (uUid) {
+    if (uUid && !reinvByUserUid[uUid]) {
       reinvByUserUid[uUid] = { id: doc.id, ...rData };
     }
-  });
+  };
+  reinvSnap1.forEach(mergeDoc);
+  reinvSnap2.forEach(mergeDoc);
 
-  // 7. Cargar usuarios para asegurar códigos y nombres si no están en cycleUserResults
+  // 8. Cargar usuarios únicamente si faltan metadatos visuales (userCode o userName)
+  let profileMetadataFallbackUsed = false;
   const userUidsToFetch = [];
   resultsSnap.forEach((d) => {
     const ur = d.data();
@@ -167,7 +278,7 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
 
   const userProfileMap = {};
   if (userUidsToFetch.length > 0) {
-    // Cargar en chunks de 30 para evitar límites de Firestore
+    profileMetadataFallbackUsed = true;
     const chunkSize = 30;
     for (let i = 0; i < userUidsToFetch.length; i += chunkSize) {
       const chunk = userUidsToFetch.slice(i, i + chunkSize);
@@ -178,7 +289,7 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     }
   }
 
-  // 8. Construir snapshots individuales de cada inversionista
+  // 9. Construir snapshots individuales de cada inversionista
   const bitacoras = {
     AZUL: {
       category: "AZUL",
@@ -242,7 +353,6 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     const userCode = ur.userCode || profile.userCode || "S/C";
     const userNameSnapshot = ur.userName || ur.fullName || profile.fullName || "Inversionista";
 
-    // Normalizar categoría
     let rawCategory = (ur.category || ur.bitacoraCategory || profile.category || "AZUL").toUpperCase();
     if (!["AZUL", "VERDE", "NEGRA"].includes(rawCategory)) {
       rawCategory = "AZUL";
@@ -260,9 +370,13 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     const adminCommissionCop = Math.round(Number(ur.adminCommissionCop || 0));
     const grossCop = Math.round(Number(ur.totalGrossCop || (userProfitCop + adminCommissionCop) || 0));
 
-    // Cruzar reinversión (exclusivamente APPLIED)
     const reinv = reinvByUserUid[uid];
-    const isApplied = reinv && reinv.status === "APPLIED";
+    const isAppliedOrClosure = reinv && (
+      reinv.status === "APPLIED" ||
+      reinv.profitAppliedAtCycleClosure === true ||
+      reinv.appliedAtCycleClosure === true ||
+      (reinv.status === "APPROVED" && (Number(reinv.profitAppliedCop || 0) > 0 || Number(reinv.cashInjectionCop || 0) > 0))
+    );
 
     let reinvestmentModality = "NONE";
     let reinvestmentStatus = "NONE";
@@ -272,8 +386,9 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     let cashInjectionCop = 0;
     let profitToDisburseCop = userProfitCop;
     let totalIncreaseCop = 0;
+    let externalContributionStatusAtClose = "NOT_REQUIRED";
 
-    if (isApplied) {
+    if (isAppliedOrClosure) {
       reinvestmentStatus = "APPLIED";
       const rawType = (reinv.type || reinv.modality || "PROFIT_REINVESTMENT").toUpperCase();
       reinvestmentModality = rawType.includes("CAPITAL") || rawType.includes("INJECTION")
@@ -286,9 +401,11 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
       if (reinvestmentModality === "PROFIT_REINVESTMENT") {
         profitAppliedCop = Math.round(Number(reinv.profitAppliedCop || reinv.requestedAmountCop || reinv.totalIncreaseCop || 0));
         cashInjectionCop = 0;
+        externalContributionStatusAtClose = "NOT_REQUIRED";
       } else {
         cashInjectionCop = Math.round(Number(reinv.cashInjectionCop || reinv.externalCapitalCop || 0));
         profitAppliedCop = Math.round(Number(reinv.profitAppliedCop || ((reinv.totalIncreaseCop || 0) - cashInjectionCop) || 0));
+        externalContributionStatusAtClose = reinv.externalFundingStatus || (cashInjectionCop > 0 ? (reinv.cashReceivedConfirmed ? "CONFIRMED" : "PENDING") : "NOT_REQUIRED");
       }
 
       profitToDisburseCop = Math.max(0, userProfitCop - profitAppliedCop);
@@ -296,8 +413,13 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     }
 
     const capitalBeforeCloseCop = cycleCapitalCop;
-    const capitalIncreaseAppliedCop = totalIncreaseCop;
-    const finalCapitalAfterCloseCop = capitalBeforeCloseCop + capitalIncreaseAppliedCop;
+    const profitReinvestedCop = profitAppliedCop;
+    const profitDisbursedCop = profitToDisburseCop;
+    const externalContributionRequestedCop = cashInjectionCop;
+    const securedNextCapitalCop = capitalBeforeCloseCop + profitReinvestedCop;
+    const projectedNextCapitalCop = securedNextCapitalCop + externalContributionRequestedCop;
+    const capitalIncreaseAppliedCop = profitReinvestedCop;
+    const finalCapitalAfterCloseCop = securedNextCapitalCop;
 
     const userSnapshot = {
       userUid: uid,
@@ -319,7 +441,13 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
       cycleProfitSnapshotCop,
       reinvestableProfitCop,
       profitAppliedCop,
+      profitReinvestedCop,
+      profitDisbursedCop,
       cashInjectionCop,
+      externalContributionRequestedCop,
+      externalContributionStatusAtClose,
+      securedNextCapitalCop,
+      projectedNextCapitalCop,
       profitToDisburseCop,
       totalIncreaseCop,
       capitalBeforeCloseCop,
@@ -329,7 +457,6 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
 
     userSnapshots.push(userSnapshot);
 
-    // Acumular a Bitácora
     const b = bitacoras[cycleCategory];
     b.usersCount += 1;
     b.managedCapitalCop += cycleCapitalCop;
@@ -342,7 +469,6 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     b.disbursementCop += profitToDisburseCop;
     b.totalCapitalIncreaseCop += totalIncreaseCop;
 
-    // Acumular a Global
     totalUsers += 1;
     totalManagedCapital += cycleCapitalCop;
     totalUsdOperated += usdOp;
@@ -355,75 +481,52 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     totalCapitalIncreaseCop += totalIncreaseCop;
   });
 
-  // 9. Reconciliación matemática obligatoria (Gate de Integridad)
+  // 10. Reconciliación matemática obligatoria contra cycleFinancialSummaries
+  const finSummarySnap = await db.collection("cycleFinancialSummaries").doc(targetCycleId).get();
+  if (isModern) {
+    if (!finSummarySnap.exists) {
+      await versionRef.update({ status: "FAILED" });
+      throw new Error(`REPORT_FINANCIAL_SUMMARY_MISMATCH: El resumen financiero 'cycleFinancialSummaries/${targetCycleId}' no existe.`);
+    }
+    const fin = finSummarySnap.data() || {};
+    if (fin.isCycleClosed !== true) {
+      await versionRef.update({ status: "FAILED" });
+      throw new Error(`REPORT_FINANCIAL_SUMMARY_MISMATCH: El resumen financiero 'cycleFinancialSummaries/${targetCycleId}' no está marcado como cerrado (isCycleClosed !== true).`);
+    }
+    if (fin.closureVersion !== undefined && fin.closureVersion !== null && fin.closureVersion !== closureVersion) {
+      await versionRef.update({ status: "FAILED" });
+      throw new Error(`REPORT_FINANCIAL_SUMMARY_MISMATCH: El closureVersion del resumen (${fin.closureVersion}) difiere del ciclo (${closureVersion}).`);
+    }
+  }
+
   let reconciliationStatus = "PASSED";
   const sumUserProfits = bitacoras.AZUL.userProfitCop + bitacoras.VERDE.userProfitCop + bitacoras.NEGRA.userProfitCop;
   const sumAdminCommissions = bitacoras.AZUL.adminCommissionCop + bitacoras.VERDE.adminCommissionCop + bitacoras.NEGRA.adminCommissionCop;
-  const sumGrossProfits = bitacoras.AZUL.grossProfitCop + bitacoras.VERDE.grossProfitCop + bitacoras.NEGRA.grossProfitCop;
 
-  // Comparar con resumen financiero si existe
-  const finSummarySnap = await db.collection("cycleFinancialSummaries").doc(targetCycleId).get();
   if (finSummarySnap.exists) {
     const fin = finSummarySnap.data() || {};
     const expectedUsersProfit = Number(fin.totalUsersProfitCop || 0);
     const expectedAdminProfit = Number(fin.totalAdminCommissionCop || 0);
 
-    // Tolerancia Canónica:
-    // - Para cierres regulares en vivo: igualdad exacta (0 COP de tolerancia), pues el resumen es la suma directa de cycleUserResults.
-    // - Para reconstrucciones retrospectivas legacy: divergencia máxima acotada a ±1 COP por usuario por diferencias de redondeo histórico a nivel de grupo.
     const maxAllowedProfitDiff = isRetrospective ? totalUsers : 0;
     const maxAllowedAdminDiff = isRetrospective ? totalUsers : 0;
 
     if (expectedUsersProfit > 0 && Math.abs(sumUserProfits - expectedUsersProfit) > maxAllowedProfitDiff) {
-      console.warn(`[createCycleReportSnapshot] Discrepancia de reconciliación en utilidades usuarios: sum=${sumUserProfits} vs summary=${expectedUsersProfit}`);
+      console.warn(`[createCycleReportSnapshot] Discrepancia en utilidades usuarios: sum=${sumUserProfits} vs summary=${expectedUsersProfit}`);
       reconciliationStatus = "FAILED";
     }
     if (expectedAdminProfit > 0 && Math.abs(sumAdminCommissions - expectedAdminProfit) > maxAllowedAdminDiff) {
-      console.warn(`[createCycleReportSnapshot] Discrepancia de reconciliación en comisiones admin: sum=${sumAdminCommissions} vs summary=${expectedAdminProfit}`);
+      console.warn(`[createCycleReportSnapshot] Discrepancia en comisiones admin: sum=${sumAdminCommissions} vs summary=${expectedAdminProfit}`);
       reconciliationStatus = "FAILED";
     }
   }
 
-  const finalReportStatus = reconciliationStatus === "PASSED" ? "READY" : "FAILED";
+  if (reconciliationStatus === "FAILED") {
+    await versionRef.update({ status: "FAILED", reconciliationStatus: "FAILED" });
+    throw new Error("RECONCILIATION_FAILED: La suma de resultados individuales no coincide con el resumen financiero.");
+  }
 
-  // 10. Documento de metadatos de versión
-  const metadataDoc = {
-    id: versionId,
-    cycleId: targetCycleId,
-    cycleName,
-    versionId,
-    versionNumber: nextVersionNumber,
-    closureAttemptId: closureAttemptId || `closure_${targetCycleId}_${nextVersionNumber}`,
-    status: finalReportStatus,
-    isCurrent: finalReportStatus === "READY",
-    openedAt,
-    closedAt,
-    closedByUid: authUid,
-    closedByName: adminName,
-    adminNotes: adminNotes || "",
-    trmApplied,
-    totalUsers,
-    totalManagedCapital,
-    totalUsdOperated,
-    totalGrossCop,
-    totalUsersProfitCop,
-    totalAdminCommissionCop,
-    totalReinvestedProfitCop,
-    totalCashInjectionCop,
-    totalDisbursementCop,
-    totalCapitalIncreaseCop,
-    bitacoras,
-    createdAt: nowIso,
-    snapshotGeneratedAt: nowIso,
-    isRetrospective: Boolean(isRetrospective),
-    reconciliationStatus,
-  };
-
-  // 11. Guardar versión en Firestore
-  const versionRef = versionsCollRef.doc(versionId);
-  await versionRef.set(metadataDoc);
-
-  // 12. Guardar snapshots de usuarios en subcolección users/{userUid} en lotes de 300
+  // 11. Guardar snapshots de usuarios en subcolección users/{userUid} en lotes determinísticos
   const userBatches = [];
   let currentBatch = db.batch();
   let countInBatch = 0;
@@ -447,13 +550,70 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     await b.commit();
   }
 
-  // 13. Actualizar documento raíz de cycleReports
+  // 12. Transición de la versión a READY y marcar versiones anteriores como SUPERSEDED
+  const metadataDoc = {
+    id: versionId,
+    cycleId: targetCycleId,
+    cycleName,
+    versionId,
+    versionNumber,
+    closureVersion: closureVersion || null,
+    closureAttemptId: effectiveClosureAttemptId,
+    status: "READY",
+    isCurrent: true,
+    startedAt: dates.startedAt,
+    openedAt: dates.openedAt,
+    closedAt: dates.closedAt,
+    durationHours: dates.durationHours,
+    closedByUid: authUid,
+    closedByName: adminName,
+    adminNotes: adminNotes || "",
+    trmApplied,
+    totalUsers,
+    totalManagedCapital,
+    totalUsdOperated,
+    totalGrossCop,
+    totalUsersProfitCop,
+    totalAdminCommissionCop,
+    totalReinvestedProfitCop,
+    totalCashInjectionCop,
+    totalDisbursementCop,
+    totalCapitalIncreaseCop,
+    bitacoras,
+    createdAt: nowIso,
+    snapshotGeneratedAt: nowIso,
+    isRetrospective: Boolean(isRetrospective),
+    profileMetadataFallbackUsed,
+    reconciliationStatus,
+  };
+
+  await versionRef.set(metadataDoc, { merge: true });
+
+  const activeVersionsSnap = await versionsCollRef.where("isCurrent", "==", true).get();
+  const batchSupersede = db.batch();
+  activeVersionsSnap.forEach((doc) => {
+    if (doc.id !== versionId) {
+      batchSupersede.update(doc.ref, {
+        isCurrent: false,
+        status: "SUPERSEDED",
+        supersededAt: nowIso,
+        supersededByUid: authUid,
+        supersededByName: adminName,
+      });
+    }
+  });
+  if (!activeVersionsSnap.empty) {
+    await batchSupersede.commit();
+  }
+
+  // 13. Actualizar documento raíz de cycleReports (sólo apunta a una versión READY vigente)
   await db.collection("cycleReports").doc(targetCycleId).set({
     cycleId: targetCycleId,
     cycleName,
     currentVersionId: versionId,
-    currentVersionNumber: nextVersionNumber,
-    status: finalReportStatus,
+    currentVersionNumber: versionNumber,
+    closureVersion: closureVersion || null,
+    status: "READY",
     updatedAt: nowIso,
     trmApplied,
     totalUsers,
@@ -467,9 +627,10 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     performedByName: adminName,
     cycleId: targetCycleId,
     versionId,
+    closureVersion: closureVersion || null,
     closureAttemptId: metadataDoc.closureAttemptId,
     reconciliationStatus,
-    status: finalReportStatus,
+    status: "READY",
     details: {
       totalUsers,
       totalManagedCapital,
@@ -484,7 +645,8 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
   return {
     success: true,
     versionId,
-    versionNumber: nextVersionNumber,
+    versionNumber,
+    closureVersion: closureVersion || null,
     metadata: metadataDoc,
   };
 }
@@ -536,6 +698,7 @@ async function supersedeCurrentCycleReport(db, admin, cycleId, authUid, adminNam
 
 /**
  * Genera el documento PDF oficial de cierre de ciclo bajo demanda en orientación Landscape A4.
+ * Lee estrictamente de los snapshots inmutables congelados en cycleReports.
  *
  * @param {admin.firestore.Firestore} db
  * @param {string} cycleId
@@ -554,21 +717,19 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
   }
 
   const metadata = versionSnap.data() || {};
-  if (metadata.status === "FAILED") {
-    throw new Error(`El snapshot '${targetVersionId}' está en estado FAILED (reconciliación fallida). No se puede emitir PDF.`);
+  if (metadata.status === "FAILED" || metadata.status === "GENERATING") {
+    throw new Error(`El snapshot '${targetVersionId}' está en estado ${metadata.status}. No se puede emitir PDF.`);
   }
 
-  // 2. Obtener usuarios congelados
+  // 2. Obtener usuarios congelados desde el snapshot
   const usersSnap = await versionRef.collection("users").get();
   const allUsers = [];
   usersSnap.forEach((doc) => {
     allUsers.push(doc.data());
   });
 
-  // Ordenar usuarios por código
   allUsers.sort((a, b) => (a.userCode || "").localeCompare(b.userCode || ""));
 
-  // Agrupar por bitácora
   const usersByBitacora = {
     AZUL: allUsers.filter((u) => u.cycleCategory === "AZUL"),
     VERDE: allUsers.filter((u) => u.cycleCategory === "VERDE"),
@@ -590,44 +751,32 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
   const PAGE_WIDTH = 841.89;
   const PAGE_HEIGHT = 595.28;
   const MARGIN = 30;
-  const CONTENT_WIDTH = PAGE_WIDTH - (MARGIN * 2); // 781.89 pt
+  const CONTENT_WIDTH = PAGE_WIDTH - (MARGIN * 2);
 
-  // =========================================================================
-  // PALETA DE COLORES PROFESIONAL
-  // =========================================================================
-  const C_DARK_BG = "#0f172a";      // Slate 900
-  const C_HEADER_BG = "#1e293b";    // Slate 800
-  const C_GOLD = "#d97706";         // Amber 600
-  const C_TEXT_MAIN = "#0f172a";    // Slate 900
-  const C_TEXT_MUTED = "#64748b";   // Slate 500
-  const C_BORDER = "#e2e8f0";       // Slate 200
-  const C_CARD_BG = "#f8fafc";      // Slate 50
-  const C_ROW_ALT = "#f1f5f9";      // Slate 100
-  const C_AZUL = "#0284c7";         // Sky 600
-  const C_VERDE = "#16a34a";        // Green 600
-  const C_NEGRA = "#334155";        // Slate 700
+  const C_DARK_BG = "#0f172a";
+  const C_HEADER_BG = "#1e293b";
+  const C_GOLD = "#d97706";
+  const C_TEXT_MAIN = "#0f172a";
+  const C_TEXT_MUTED = "#64748b";
+  const C_BORDER = "#e2e8f0";
+  const C_CARD_BG = "#f8fafc";
+  const C_ROW_ALT = "#f1f5f9";
+  const C_AZUL = "#0284c7";
+  const C_VERDE = "#16a34a";
+  const C_NEGRA = "#334155";
 
-  // =========================================================================
-  // PÁGINA 1: PORTADA Y RESUMEN EJECUTIVO CONSOLIDADO
-  // =========================================================================
-
-  // Encabezado institucional superior
   doc.rect(MARGIN, MARGIN, CONTENT_WIDTH, 56).fill(C_DARK_BG);
-
   doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(15).text("EASYTRADERS24 — INFORME OFICIAL DE CIERRE DE CICLO", MARGIN + 16, MARGIN + 12);
   doc.fillColor("#94a3b8").font("Helvetica").fontSize(9).text("Snapshot Inmutable de Rendimientos, TRM Aplicada y Liquidación Financiera", MARGIN + 16, MARGIN + 32);
 
-  // Badge de versión a la derecha
   const statusBadge = metadata.isCurrent ? "VERSIÓN OFICIAL VIGENTE" : "VERSIÓN HISTÓRICA (SUPERSEDED)";
   doc.rect(PAGE_WIDTH - MARGIN - 210, MARGIN + 14, 194, 26).fill(metadata.isCurrent ? "#065f46" : "#475569");
   doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(9).text(`${statusBadge} • ${metadata.versionId || "v1"}`, PAGE_WIDTH - MARGIN - 200, MARGIN + 22, { width: 174, align: "center" });
 
   let curY = MARGIN + 70;
 
-  // Cuadro de metadatos del ciclo
   doc.rect(MARGIN, curY, CONTENT_WIDTH, 60).fillAndStroke(C_CARD_BG, C_BORDER);
 
-  // Fila 1 metadatos
   doc.fillColor(C_TEXT_MUTED).font("Helvetica").fontSize(8).text("CICLO OPERATIVO", MARGIN + 14, curY + 10);
   doc.fillColor(C_TEXT_MAIN).font("Helvetica-Bold").fontSize(11).text(metadata.cycleName || metadata.cycleId, MARGIN + 14, curY + 22);
 
@@ -643,16 +792,13 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
   doc.fillColor(C_TEXT_MUTED).font("Helvetica").fontSize(8).text("RECONCILIACIÓN", MARGIN + 660, curY + 10);
   doc.fillColor(metadata.reconciliationStatus === "PASSED" ? "#16a34a" : "#dc2626").font("Helvetica-Bold").fontSize(10).text(metadata.reconciliationStatus || "PASSED", MARGIN + 660, curY + 22);
 
-  // Fila 2 metadatos (detalles de auditoría)
-  doc.fillColor(C_TEXT_MUTED).font("Helvetica").fontSize(7.5).text(`SuperAdmin: ${metadata.closedByName || "Sistema"} (${metadata.closedByUid || "N/A"}) • Intento: ${metadata.closureAttemptId || "N/A"} • Retrospectivo: ${metadata.isRetrospective ? "SÍ" : "NO"} • Snapshot: ${formatDateEs(metadata.snapshotGeneratedAt)}`, MARGIN + 14, curY + 44);
+  doc.fillColor(C_TEXT_MUTED).font("Helvetica").fontSize(7.5).text(`SuperAdmin: ${metadata.closedByName || "Sistema"} (${metadata.closedByUid || "N/A"}) • Intento: ${metadata.closureAttemptId || "N/A"} • Versión: ${metadata.versionId} • Snapshot: ${formatDateEs(metadata.snapshotGeneratedAt)}`, MARGIN + 14, curY + 44);
 
   curY += 72;
 
-  // Título: Consolidado Financiero Global
   doc.fillColor(C_TEXT_MAIN).font("Helvetica-Bold").fontSize(12).text("CONSOLIDADO FINANCIERO GLOBAL DEL CICLO", MARGIN, curY);
   curY += 16;
 
-  // Matriz de 8 tarjetas de KPIs financieros (2 filas de 4 columnas)
   const kpis = [
     { label: "CAPITAL OPERADO TOTAL", value: formatCop(metadata.totalManagedCapital), color: C_TEXT_MAIN },
     { label: "TOTAL USD OPERADO", value: formatUsd(metadata.totalUsdOperated), color: "#2563eb" },
@@ -664,7 +810,7 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
     { label: "TOTAL A DESEMBOLSAR NETO", value: formatCop(metadata.totalDisbursementCop), color: "#b45309" },
   ];
 
-  const kpiW = (CONTENT_WIDTH - 18) / 4; // ~190 pt cada tarjeta
+  const kpiW = (CONTENT_WIDTH - 18) / 4;
   const kpiH = 46;
 
   kpis.forEach((kpi, idx) => {
@@ -680,11 +826,9 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
 
   curY += (kpiH * 2) + 20;
 
-  // Título: Comparativo por Bitácora
   doc.fillColor(C_TEXT_MAIN).font("Helvetica-Bold").fontSize(12).text("RESUMEN COMPARATIVO POR BITÁCORA", MARGIN, curY);
   curY += 16;
 
-  // Tabla comparativa de bitácoras
   const bitCols = [
     { label: "Bitácora", w: 85, align: "left" },
     { label: "Usuarios", w: 55, align: "center" },
@@ -698,7 +842,6 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
     { label: "Desembolso", w: 76, align: "right" },
   ];
 
-  // Encabezado tabla
   doc.rect(MARGIN, curY, CONTENT_WIDTH, 20).fill(C_HEADER_BG);
   let colX = MARGIN + 6;
   bitCols.forEach((c) => {
@@ -718,49 +861,38 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
     doc.rect(MARGIN, curY, CONTENT_WIDTH, 22).fillAndStroke(rowBg, C_BORDER);
 
     colX = MARGIN + 6;
-    // Nombre bitácora
     doc.fillColor(br.color).font("Helvetica-Bold").fontSize(8.5).text(br.name, colX, curY + 6, { width: bitCols[0].w - 10, align: "left" });
     colX += bitCols[0].w;
 
-    // Usuarios
     doc.fillColor(C_TEXT_MAIN).font("Helvetica").fontSize(8).text(String(br.data.usersCount || 0), colX, curY + 6, { width: bitCols[1].w - 10, align: "center" });
     colX += bitCols[1].w;
 
-    // Capital
     doc.text(formatCop(br.data.managedCapitalCop), colX, curY + 6, { width: bitCols[2].w - 10, align: "right" });
     colX += bitCols[2].w;
 
-    // USD
     doc.text(formatUsd(br.data.totalUsdOperated), colX, curY + 6, { width: bitCols[3].w - 10, align: "right" });
     colX += bitCols[3].w;
 
-    // Bruta
     doc.text(formatCop(br.data.grossProfitCop), colX, curY + 6, { width: bitCols[4].w - 10, align: "right" });
     colX += bitCols[4].w;
 
-    // Usuarios
     doc.fillColor("#047857").font("Helvetica-Bold").text(formatCop(br.data.userProfitCop), colX, curY + 6, { width: bitCols[5].w - 10, align: "right" });
     colX += bitCols[5].w;
 
-    // Admin
     doc.fillColor(C_TEXT_MAIN).font("Helvetica").text(formatCop(br.data.adminCommissionCop), colX, curY + 6, { width: bitCols[6].w - 10, align: "right" });
     colX += bitCols[6].w;
 
-    // Reinvertido
     doc.text(formatCop(br.data.reinvestedProfitCop), colX, curY + 6, { width: bitCols[7].w - 10, align: "right" });
     colX += bitCols[7].w;
 
-    // Inyección
     doc.text(formatCop(br.data.cashInjectionCop), colX, curY + 6, { width: bitCols[8].w - 10, align: "right" });
     colX += bitCols[8].w;
 
-    // Desembolso
     doc.fillColor("#b45309").font("Helvetica-Bold").text(formatCop(br.data.disbursementCop), colX, curY + 6, { width: bitCols[9].w - 10, align: "right" });
 
     curY += 22;
   });
 
-  // Fila Total
   doc.rect(MARGIN, curY, CONTENT_WIDTH, 24).fillAndStroke(C_ROW_ALT, C_BORDER);
   colX = MARGIN + 6;
   doc.fillColor(C_TEXT_MAIN).font("Helvetica-Bold").fontSize(9).text("TOTAL CONSOLIDADO", colX, curY + 6, { width: bitCols[0].w - 10, align: "left" });
@@ -785,7 +917,6 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
 
   curY += 34;
 
-  // Sello de inmutabilidad y notas de auditoría
   doc.rect(MARGIN, curY, CONTENT_WIDTH, 42).fillAndStroke("#fefce8", "#fef08a");
   doc.fillColor("#854d0e").font("Helvetica-Bold").fontSize(8).text("CERTIFICACIÓN DE INMUTABILIDAD Y PROTECCIÓN DE DATOS:", MARGIN + 12, curY + 8);
   doc.fillColor("#713f12").font("Helvetica").fontSize(7).text(
@@ -794,10 +925,6 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
     curY + 20,
     { width: CONTENT_WIDTH - 24, lineGap: 2 }
   );
-
-  // =========================================================================
-  // PÁGINAS DE DETALLE POR BITÁCORA (AZUL, VERDE, NEGRA)
-  // =========================================================================
 
   const userCols = [
     { key: "code", label: "Código", w: 50, align: "left" },
@@ -812,11 +939,10 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
     { key: "reinv", label: "Reinvertido", w: 55, align: "right" },
     { key: "inj", label: "Inyección", w: 50, align: "right" },
     { key: "disb", label: "Desembolso", w: 60, align: "right" },
-    { key: "finalCap", label: "Capital Final", w: 67, align: "right" },
+    { key: "finalCap", label: "Cap. Asegurado", w: 67, align: "right" },
   ];
 
   function drawUserTableHeader(yPos, categoryName, categoryColor) {
-    // Encabezado de sección
     doc.rect(MARGIN, yPos, CONTENT_WIDTH, 22).fill(categoryColor);
     doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(9).text(`DETALLE DE INVERSIONISTAS — BITÁCORA ${categoryName}`, MARGIN + 12, yPos + 6);
 
@@ -839,7 +965,6 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
   ];
 
   bitacoraOrder.forEach((bObj) => {
-    // Solo si tiene usuarios o queremos mostrar la categoría
     doc.addPage();
     let rowY = MARGIN;
 
@@ -865,65 +990,49 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
 
       let cx = MARGIN + 4;
 
-      // Código
       doc.fillColor(C_TEXT_MAIN).font("Helvetica-Bold").fontSize(6.5).text(u.userCode || "S/C", cx, rowY + 4, { width: userCols[0].w - 6, align: "left" });
       cx += userCols[0].w;
 
-      // Nombre
       doc.font("Helvetica").text((u.userNameSnapshot || "Inversionista").substring(0, 22), cx, rowY + 4, { width: userCols[1].w - 6, align: "left" });
       cx += userCols[1].w;
 
-      // Capital
       doc.text(formatCop(u.cycleCapitalCop), cx, rowY + 4, { width: userCols[2].w - 6, align: "right" });
       cx += userCols[2].w;
 
-      // Split
       doc.text(`${u.userPercentage}/${u.adminPercentage}`, cx, rowY + 4, { width: userCols[3].w - 6, align: "center" });
       cx += userCols[3].w;
 
-      // USD
       doc.text(formatUsd(u.totalUsdOperated), cx, rowY + 4, { width: userCols[4].w - 6, align: "right" });
       cx += userCols[4].w;
 
-      // Bruta
       doc.text(formatCop(u.totalGrossCop), cx, rowY + 4, { width: userCols[5].w - 6, align: "right" });
       cx += userCols[5].w;
 
-      // Ganancia Usuario
       doc.fillColor("#047857").font("Helvetica-Bold").text(formatCop(u.userProfitCop), cx, rowY + 4, { width: userCols[6].w - 6, align: "right" });
       cx += userCols[6].w;
 
-      // Comisión Admin
       doc.fillColor(C_TEXT_MAIN).font("Helvetica").text(formatCop(u.adminCommissionCop), cx, rowY + 4, { width: userCols[7].w - 6, align: "right" });
       cx += userCols[7].w;
 
-      // Modalidad
       const modLabel = u.reinvestmentModality === "CAPITAL_INJECTION" ? "INYECCIÓN" : (u.reinvestmentModality === "PROFIT_REINVESTMENT" ? "REINVERSIÓN" : "-");
       doc.fontSize(6).text(modLabel, cx, rowY + 4.5, { width: userCols[8].w - 6, align: "center" });
       cx += userCols[8].w;
 
-      // Reinvertido
       doc.fontSize(6.5).text(u.profitAppliedCop > 0 ? formatCop(u.profitAppliedCop) : "-", cx, rowY + 4, { width: userCols[9].w - 6, align: "right" });
       cx += userCols[9].w;
 
-      // Inyección
       doc.text(u.cashInjectionCop > 0 ? formatCop(u.cashInjectionCop) : "-", cx, rowY + 4, { width: userCols[10].w - 6, align: "right" });
       cx += userCols[10].w;
 
-      // Desembolso
       doc.fillColor(u.profitToDisburseCop > 0 ? "#b45309" : C_TEXT_MUTED).font(u.profitToDisburseCop > 0 ? "Helvetica-Bold" : "Helvetica").text(formatCop(u.profitToDisburseCop), cx, rowY + 4, { width: userCols[11].w - 6, align: "right" });
       cx += userCols[11].w;
 
-      // Capital Final
       doc.fillColor(C_TEXT_MAIN).font("Helvetica-Bold").text(formatCop(u.finalCapitalAfterCloseCop), cx, rowY + 4, { width: userCols[12].w - 6, align: "right" });
 
       rowY += ROW_HEIGHT;
     });
   });
 
-  // =========================================================================
-  // PIE DE PÁGINA UNIFORME EN TODAS LAS PÁGINAS (Página X de Y)
-  // =========================================================================
   const range = doc.bufferedPageRange();
   const totalPages = range.count;
 
@@ -941,7 +1050,6 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
 
   doc.end();
 
-  // Esperar a que el buffer de PDF se complete
   const pdfBuffer = await new Promise((resolve, reject) => {
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
@@ -961,4 +1069,6 @@ module.exports = {
   createCycleReportSnapshot,
   supersedeCurrentCycleReport,
   generateCycleReportPdfBuffer,
+  isModernCycle,
+  resolveCycleDates,
 };

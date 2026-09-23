@@ -51,6 +51,7 @@ export interface UserProfile {
   isClaimed?: boolean;
   claimedAt?: string;
   migrationStatus?: MigrationStatus;
+  entryCycleId?: string | null;
 }
 
 /**
@@ -71,9 +72,9 @@ export interface UserPushToken {
  * Colección Firestore: monthlyCycles/{cycleId}
  */
 export interface MonthlyCycle {
-  id: string; // Igual a cycleId (ej. "2026-09")
-  cycleId: string; // "2026-09"
-  name: string; // "Septiembre 2026"
+  id: string; // Igual a cycleId (ej. "2026-09" o "cyc_...")
+  cycleId: string; // "2026-09" o "cyc_..."
+  name: string; // "Septiembre 2026", "Ciclo 2 - Septiembre"
   status: CycleStatus;
   trmApplied: number;
   openedAt?: string;
@@ -81,6 +82,10 @@ export interface MonthlyCycle {
   closedBy: string | null;
   notificationsSent: boolean;
   notificationsSentAt: string | null;
+  // Sucesión explícita y auditoría temporal de ciclos arbitrarios
+  nextCycleId?: string | null;
+  previousCycleId?: string | null;
+  createdAt?: string;
   // Campos de compatibilidad visual (derivados o enlazados a FinancialSummary)
   totalManagedCapital?: number;
   totalUsersActive?: number;
@@ -107,6 +112,25 @@ export interface MonthlyCycle {
   closingByUid?: string | null;
   closingByName?: string | null;
   closureAttemptId?: string | null;
+
+  // Estado Operativo y Lock Atómico de Inicio / Freeze de Capitales
+  operationalStatus?: 'PREPARING' | 'STARTED';
+  isStarting?: boolean;
+  startingStartedAt?: string | null;
+  startingByUid?: string | null;
+  startingByName?: string | null;
+  startAttemptId?: string | null;
+  lastStartRequestId?: string | null;
+  startedAt?: string | null;
+  startedByUid?: string | null;
+  startedByName?: string | null;
+  initialManagedCapitalCop?: number;
+  initialActiveUsersCount?: number;
+
+  // Fase 2A: Versión de cierre e integridad financiera de reconciliación
+  closureVersion?: number;
+  sourceClosureVersion?: number;
+  preparationNeedsReview?: boolean;
 }
 
 /**
@@ -232,6 +256,7 @@ export interface CycleUserResult {
   calculatedBy: string;
   calculatedByUid?: string;
   isCycleClosed: boolean;
+  isFrozen?: boolean;
   idempotencyKey?: string;
   isCorrected?: boolean;
   migrationStatus?: MigrationStatus;
@@ -328,7 +353,32 @@ export interface ReinvestmentRequest {
   cashReceivedByUid?: string | null;
   cashReceivedByName?: string | null;
 
+  // Política definitiva de aporte externo y ciclo operativo N+1
+  externalFundingStatus?: 'NOT_REQUIRED' | 'PENDING' | 'CONFIRMED' | 'NOT_RECEIVED';
+  confirmedAmountCop?: number;
+  confirmedAt?: string | null;
+  confirmedByUid?: string | null;
+  confirmedByName?: string | null;
+  bankReference?: string | null;
+
+  // Trazabilidad de Cierre de Ciclo N y Capital Asegurado
+  profitAppliedAtCycleClosure?: boolean;
+  profitAppliedAt?: string | null;
+  securedNextCapitalCop?: number;
+  projectedNextCapitalCop?: number;
+  appliedClosureVersion?: number;
+  fundingReconciliationStatus?: 'OK' | 'NEEDS_REVIEW';
+  fundingReconciliationReason?: string | null;
+
+  // Trazabilidad de Inicio Operativo de Ciclo N+1 y Capital Congelado
+  appliedAtCycleStart?: boolean;
+  finalCapitalCop?: number;
+  finalIncreaseAppliedCop?: number;
+  excludedCashAmountCop?: number;
+
   // Retrocompatibilidad con esquemas heredados
+  cycleId?: string;
+  baseCapital?: number;
   availableProfitCop: number;
   reinvestAmountCop: number; // Ganancia del ciclo efectivamente reinvertida (semántica histórica canónica = profitAppliedCop)
   withdrawAmountCop: number;
@@ -533,6 +583,8 @@ export interface GlobalConfig {
   trmLastSyncedAt?: string;
   trmSource?: string;
   activeCycleId: string;
+  operationalCycleId?: string | null;
+  preparingCycleId?: string | null;
   roundingRule: 'none' | 'nearest_100' | 'nearest_1000';
   categories: {
     id: BitacoraCategory;
@@ -707,11 +759,14 @@ export interface CycleReportMetadata {
   cycleName: string;
   versionId: string;
   versionNumber: number;
+  closureVersion?: number;
   closureAttemptId?: string;
-  status: 'READY' | 'SUPERSEDED' | 'FAILED';
+  status: 'GENERATING' | 'READY' | 'SUPERSEDED' | 'FAILED';
   isCurrent: boolean;
+  startedAt?: string;
   openedAt?: string;
   closedAt: string;
+  durationHours?: number;
   closedByUid?: string;
   closedByName?: string;
   trmApplied: number;
@@ -733,6 +788,7 @@ export interface CycleReportMetadata {
   createdAt: string;
   snapshotGeneratedAt: string;
   isRetrospective: boolean;
+  profileMetadataFallbackUsed?: boolean;
   reconciliationStatus?: 'PASSED' | 'FAILED';
 }
 
@@ -741,7 +797,7 @@ export interface CycleReportHeaderDoc {
   cycleName: string;
   currentVersionId: string;
   currentVersionNumber: number;
-  status: 'READY' | 'SUPERSEDED';
+  status: 'GENERATING' | 'READY' | 'SUPERSEDED' | 'FAILED';
   updatedAt: string;
 }
 

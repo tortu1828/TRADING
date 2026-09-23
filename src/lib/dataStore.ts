@@ -667,26 +667,8 @@ class DataStore {
       for (const u of this.users) {
         await firestoreService.saveUser(u);
       }
-      for (const c of this.cycles) {
-        await firestoreService.saveCycle(c);
-      }
-      for (const op of this.dailyOperations) {
-        await firestoreService.saveDailyOperation(op);
-      }
-      for (const gc of this.groupCalculations) {
-        await firestoreService.saveGroupCalculation(gc);
-      }
-      for (const ur of this.userResults) {
-        await firestoreService.saveUserResult(ur);
-      }
       if (this.applications.length > 0) {
         await firestoreService.saveApplicationsBatch(this.applications);
-      }
-      for (const r of this.reinvestments) {
-        await firestoreService.saveReinvestment(r);
-      }
-      for (const d of this.disbursements) {
-        await firestoreService.saveDisbursement(d);
       }
       await firestoreService.saveSettings(this.config);
       if (this.notifications.length > 0) {
@@ -3805,6 +3787,35 @@ class DataStore {
     return this.reinvestments[reqIndex];
   }
 
+  public async resolveFundingReconciliation(
+    requestId: string,
+    resolution: 'RESOLVE_MATCHING' | 'KEEP_REVIEW',
+    notes: string,
+    clientRequestId: string
+  ) {
+    const reqIndex = this.reinvestments.findIndex((r) => r.id === requestId);
+    if (reqIndex < 0) throw new Error('Solicitud no encontrada.');
+
+    const res = await firestoreService.adminResolveFundingReconciliationCallable({
+      requestId,
+      resolution,
+      notes,
+      clientRequestId,
+    });
+
+    if (res.success) {
+      const req = this.reinvestments[reqIndex];
+      this.reinvestments[reqIndex] = {
+        ...req,
+        fundingReconciliationStatus: resolution === 'RESOLVE_MATCHING' ? 'OK' : 'NEEDS_REVIEW',
+        fundingReconciliationReason: resolution === 'RESOLVE_MATCHING' ? null : req.fundingReconciliationReason,
+        notes: notes ? (req.notes ? `${req.notes} | RESOLVED: ${notes}` : `RESOLVED: ${notes}`) : (req.notes || ''),
+      };
+      this.notify();
+    }
+    return res;
+  }
+
   public async previewOrphanReinvestments() {
     return await firestoreService.adminPreviewOrphanReinvestmentsCallable();
   }
@@ -3817,10 +3828,10 @@ class DataStore {
   }
 
   /**
-   * GESTIÓN DE DESEMBOLSOS (DISBURSEMENTS)
+   * GESTIÓN DE DESEMBOLSOS (DISBURSEMENTS) - CANAL AUTORITATIVO POR BACKEND
    * Regla de Negocio: Para transferencias superiores a 10 millones COP es obligatoriamente en EFECTIVO.
    */
-  public createDisbursementRequest(params: {
+  public async createDisbursementRequest(params: {
     userId: string;
     sourceCycleId: string;
     amountCop: number;
@@ -3835,7 +3846,7 @@ class DataStore {
     receiverId?: string;
     receiverFullName?: string;
     notes?: string;
-  }): DisbursementRequest {
+  }): Promise<DisbursementRequest> {
     const user = this.getUserById(params.userId);
     if (!user) throw new Error('Usuario no encontrado.');
 
@@ -3843,271 +3854,102 @@ class DataStore {
       throw new Error('El monto de desembolso debe ser mayor a $0 COP.');
     }
 
-    // REGLA DE NEGOCIO CRÍTICA:
-    // Para transferencias superiores a 10 millones COP es en efectivo.
-    if (params.amountCop > 10_000_000 && params.method === 'TRANSFERENCIA') {
-      throw new Error(
-        'Por política de seguridad institucional y topes bancarios, todo desembolso superior a $10.000.000 COP debe realizarse obligatoriamente en EFECTIVO.'
-      );
-    }
+    const clientRequestId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `cl_${Math.random().toString(36).substring(2)}_${Date.now().toString(36)}`;
 
-    const effectiveMethod: DisbursementMethod =
-      params.amountCop > 10_000_000 ? 'EFECTIVO' : params.method;
-
-    const newRequest: DisbursementRequest = {
-      id: `disb_${Date.now()}`,
-      userId: user.id,
-      userCode: user.userCode,
-      userName: user.fullName,
+    const res = await firestoreService.adminRequestDisbursementCallable({
+      userId: params.userId,
       sourceCycleId: params.sourceCycleId,
       amountCop: params.amountCop,
       disbursementSource: params.disbursementSource || 'PROFIT',
-      method: effectiveMethod,
-      bankName: effectiveMethod === 'TRANSFERENCIA' ? params.bankName : undefined,
-      accountType: effectiveMethod === 'TRANSFERENCIA' ? params.accountType : undefined,
-      accountNumber: effectiveMethod === 'TRANSFERENCIA' ? params.accountNumber : undefined,
-      accountHolderName: effectiveMethod === 'TRANSFERENCIA' ? params.accountHolderName : undefined,
+      method: params.method,
+      bankName: params.bankName,
+      accountType: params.accountType,
+      accountNumber: params.accountNumber,
+      accountHolderName: params.accountHolderName,
       idDocument: params.idDocument,
-      cashOffice: effectiveMethod === 'EFECTIVO' ? (params.cashOffice || 'Sede Principal de Tesorería') : undefined,
-      receiverId: effectiveMethod === 'EFECTIVO' ? (params.receiverId || params.idDocument) : undefined,
-      receiverFullName: effectiveMethod === 'EFECTIVO' ? (params.receiverFullName || user.fullName) : undefined,
-      status: 'PENDING',
-      createdAt: new Date().toISOString(),
-      resolvedAt: null,
-      resolvedBy: null,
+      cashOffice: params.cashOffice,
+      receiverId: params.receiverId,
+      receiverFullName: params.receiverFullName,
       notes: params.notes,
-    };
-
-    this.disbursements.unshift(newRequest);
-
-    // Notificar al usuario
-    this.notifications.unshift({
-      id: `notif_disb_req_${Date.now()}`,
-      userId: user.id,
-      userCode: user.userCode,
-      userName: user.fullName,
-      cycleId: params.sourceCycleId,
-      type: 'DISBURSEMENT',
-      title: 'Solicitud de Desembolso Radicada',
-      message: `Tu solicitud de desembolso por $${params.amountCop.toLocaleString('es-CO')} COP (${
-        effectiveMethod === 'EFECTIVO' ? 'Efectivo en Taquilla' : 'Transferencia Bancaria'
-      }) fue radicada con éxito.`,
-      payload: {
-        cycleId: params.sourceCycleId,
-        usdAmount: 0,
-        copAmount: params.amountCop,
-        userProfitCop: 0,
-        userPercentage: user.userPercentage,
-      },
-      isRead: false,
-      sentAt: new Date().toISOString(),
-      readAt: null,
+      clientRequestId,
     });
 
-    this.addAuditLog({
-      action: 'DISBURSEMENT_REQUESTED',
-      performedBy: user.uid || user.id,
-      performedByName: user.fullName,
-      cycleId: params.sourceCycleId,
-      targetEntity: newRequest.id,
-      newValue: params.amountCop,
-      reason: `Solicitud de desembolso (${effectiveMethod})${
-        params.amountCop > 10_000_000 ? ' - Aplicada regla: > $10M COP obligatoriamente en efectivo' : ''
-      }`,
-      details: {
-        method: effectiveMethod,
-        amountCop: params.amountCop,
-        userCode: user.userCode,
-      },
-    });
-
-    this.notify();
-    return newRequest;
+    if (res.success && res.disbursement) {
+      this.disbursements.unshift(res.disbursement);
+      this.notify();
+      return res.disbursement;
+    }
+    throw new Error(res.message || 'Error al procesar la solicitud de desembolso en el servidor.');
   }
 
-  public approveDisbursement(
+  public async approveDisbursement(
     requestId: string,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
-  ) {
+  ): Promise<void> {
     const reqIndex = this.disbursements.findIndex((d) => d.id === requestId);
     if (reqIndex < 0) throw new Error('Solicitud de desembolso no encontrada.');
 
     const req = this.disbursements[reqIndex];
     if (req.status !== 'PENDING') throw new Error('La solicitud ya fue procesada.');
 
-    this.disbursements[reqIndex] = {
-      ...req,
-      status: 'APPROVED',
-      resolvedAt: new Date().toISOString(),
-      resolvedBy: adminName,
-    };
-
-    const user = this.getUserById(req.userId);
-    if (user) {
-      this.notifications.unshift({
-        id: `notif_disb_appr_${Date.now()}`,
-        userId: user.id,
-        userCode: user.userCode,
-        userName: user.fullName,
-        cycleId: req.sourceCycleId,
-        type: 'DISBURSEMENT',
-        title: '¡Desembolso Aprobado!',
-        message: `Tu desembolso por $${req.amountCop.toLocaleString('es-CO')} COP ha sido aprobado por Tesorería. Método: ${
-          req.method === 'EFECTIVO' ? 'Efectivo en Taquilla' : 'Transferencia Bancaria'
-        }.`,
-        payload: {
-          cycleId: req.sourceCycleId,
-          usdAmount: 0,
-          copAmount: req.amountCop,
-          userProfitCop: 0,
-          userPercentage: user.userPercentage,
-        },
-        isRead: false,
-        sentAt: new Date().toISOString(),
-        readAt: null,
-      });
-    }
-
-    this.addAuditLog({
-      action: 'DISBURSEMENT_APPROVED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      targetEntity: req.id,
-      newValue: req.amountCop,
-      details: {
-        userCode: req.userCode,
-        amountCop: req.amountCop,
-        method: req.method,
-      },
+    const res = await firestoreService.adminResolveDisbursementCallable({
+      requestId,
+      action: 'APPROVE',
     });
 
-    this.notify();
+    if (res.success && res.disbursement) {
+      this.disbursements[reqIndex] = res.disbursement;
+      this.notify();
+    } else {
+      throw new Error(res.message || 'Error al aprobar el desembolso en el servidor.');
+    }
   }
 
-  public markDisbursementAsPaid(
+  public async markDisbursementAsPaid(
     requestId: string,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal',
     voucherOrNotes?: string
-  ) {
+  ): Promise<void> {
     const reqIndex = this.disbursements.findIndex((d) => d.id === requestId);
     if (reqIndex < 0) throw new Error('Solicitud de desembolso no encontrada.');
 
-    const req = this.disbursements[reqIndex];
-    this.disbursements[reqIndex] = {
-      ...req,
-      status: 'PAID',
-      resolvedAt: new Date().toISOString(),
-      resolvedBy: adminName,
-      paidAt: new Date().toISOString(),
-      paymentVoucher: voucherOrNotes || null,
-      notes: voucherOrNotes
-        ? `${req.notes ? req.notes + ' | ' : ''}Liquidado: ${voucherOrNotes}`
-        : req.notes,
-    };
-
-    const user = this.getUserById(req.userId);
-    if (user) {
-      this.notifications.unshift({
-        id: `notif_disb_paid_${Date.now()}`,
-        userId: user.id,
-        userCode: user.userCode,
-        userName: user.fullName,
-        cycleId: req.sourceCycleId,
-        type: 'DISBURSEMENT',
-        title: '¡Desembolso Liquidado y Entregado!',
-        message: `Tu desembolso por $${req.amountCop.toLocaleString('es-CO')} COP ha sido procesado y entregado exitosamente mediante ${
-          req.method === 'EFECTIVO' ? 'Efectivo en Taquilla' : 'Transferencia Bancaria'
-        }.`,
-        payload: {
-          cycleId: req.sourceCycleId,
-          usdAmount: 0,
-          copAmount: req.amountCop,
-          userProfitCop: 0,
-          userPercentage: user.userPercentage,
-        },
-        isRead: false,
-        sentAt: new Date().toISOString(),
-        readAt: null,
-      });
-    }
-
-    this.addAuditLog({
-      action: 'DISBURSEMENT_PAID',
-      performedBy: adminUid,
-      performedByName: adminName,
-      targetEntity: req.id,
-      newValue: req.amountCop,
-      details: {
-        userCode: req.userCode,
-        amountCop: req.amountCop,
-        method: req.method,
-        voucherOrNotes,
-      },
+    const res = await firestoreService.adminResolveDisbursementCallable({
+      requestId,
+      action: 'PAY',
+      voucher: voucherOrNotes,
     });
 
-    this.notify();
+    if (res.success && res.disbursement) {
+      this.disbursements[reqIndex] = res.disbursement;
+      this.notify();
+    } else {
+      throw new Error(res.message || 'Error al marcar desembolso como liquidado en el servidor.');
+    }
   }
 
-  public rejectDisbursement(
+  public async rejectDisbursement(
     requestId: string,
     reason?: string,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
-  ) {
+  ): Promise<void> {
     const reqIndex = this.disbursements.findIndex((d) => d.id === requestId);
     if (reqIndex < 0) throw new Error('Solicitud de desembolso no encontrada.');
 
-    const req = this.disbursements[reqIndex];
-    this.disbursements[reqIndex] = {
-      ...req,
-      status: 'REJECTED',
-      resolvedAt: new Date().toISOString(),
-      resolvedBy: adminName,
-      rejectionReason: reason || null,
-      notes: reason ? `${req.notes ? req.notes + ' | ' : ''}Rechazo: ${reason}` : req.notes,
-    };
-
-    const user = this.getUserById(req.userId);
-    if (user) {
-      this.notifications.unshift({
-        id: `notif_disb_rej_${Date.now()}`,
-        userId: user.id,
-        userCode: user.userCode,
-        userName: user.fullName,
-        cycleId: req.sourceCycleId,
-        type: 'DISBURSEMENT',
-        title: 'Solicitud de Desembolso Rechazada',
-        message: `Tu solicitud de desembolso por $${req.amountCop.toLocaleString('es-CO')} COP no pudo ser tramitada.${
-          reason ? ' Motivo: ' + reason : ''
-        }`,
-        payload: {
-          cycleId: req.sourceCycleId,
-          usdAmount: 0,
-          copAmount: req.amountCop,
-          userProfitCop: 0,
-          userPercentage: user.userPercentage,
-        },
-        isRead: false,
-        sentAt: new Date().toISOString(),
-        readAt: null,
-      });
-    }
-
-    this.addAuditLog({
-      action: 'DISBURSEMENT_REJECTED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      targetEntity: req.id,
-      reason: reason || 'Rechazado por tesorería',
-      details: {
-        userCode: req.userCode,
-        amountCop: req.amountCop,
-      },
+    const res = await firestoreService.adminResolveDisbursementCallable({
+      requestId,
+      action: 'REJECT',
+      notes: reason,
     });
 
-    this.notify();
+    if (res.success && res.disbursement) {
+      this.disbursements[reqIndex] = res.disbursement;
+      this.notify();
+    } else {
+      throw new Error(res.message || 'Error al rechazar el desembolso en el servidor.');
+    }
   }
 
   public isNotificationOwned(n: NotificationItem): boolean {

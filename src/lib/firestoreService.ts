@@ -52,6 +52,7 @@ export const firestoreService = {
     paymentMethod?: string;
     paymentDetails?: string;
     role?: 'USER' | 'ADMIN';
+    targetCycleId?: string | null;
   }): Promise<{ success: boolean; user: UserProfile; message: string }> {
     const callable = httpsCallable(functions, 'adminCreateUser');
     const response = await callable(params);
@@ -71,6 +72,7 @@ export const firestoreService = {
     adminPercentage?: number;
     paymentMethod?: string;
     paymentDetails?: string;
+    targetCycleId?: string | null;
   }): Promise<{ success: boolean; user: UserProfile; message: string }> {
     const callable = httpsCallable(functions, 'adminCreatePendingInvestor');
     const response = await callable(params);
@@ -128,8 +130,31 @@ export const firestoreService = {
 
   async saveUser(user: UserProfile) {
     const targetUid = user.uid || user.id;
+
+    // Separar campos autoritativos del payload cliente legítimo
+    const {
+      currentCapital,
+      baseCapital,
+      category,
+      entryCycleId,
+      role,
+      status,
+      userPercentage,
+      adminPercentage,
+      userCode,
+      createdAt,
+      entryDate,
+      isClaimed,
+      claimedAt,
+      migrationStatus,
+      id,
+      uid,
+      password,
+      ...safeClientUser
+    } = user;
+
     const normalizedUser: Record<string, any> = {
-      ...user,
+      ...safeClientUser,
       id: targetUid,
       uid: targetUid,
     };
@@ -811,6 +836,132 @@ export const firestoreService = {
     return response.data as { success: boolean; message: string; cycleId?: string; closureAttemptId?: string };
   },
 
+  /**
+   * Confirmación administrativa de recepción de aporte externo (Exclusivo SuperAdmin)
+   */
+  async adminConfirmExternalContributionCallable(payload: {
+    requestId: string;
+    confirmedAmountCop: number;
+    bankReference?: string;
+    notes?: string;
+  }): Promise<{
+    success: boolean;
+    alreadyConfirmed?: boolean;
+    requestId: string;
+    message: string;
+    confirmedAmountCop: number;
+    confirmedAt: string;
+  }> {
+    const callable = httpsCallable(functions, 'adminConfirmExternalContributionCallable');
+    const response = await callable(payload);
+    return response.data as {
+      success: boolean;
+      alreadyConfirmed?: boolean;
+      requestId: string;
+      message: string;
+      confirmedAmountCop: number;
+      confirmedAt: string;
+    };
+  },
+
+  /**
+   * Resuelve conciliaciones en estado NEEDS_REVIEW (Exclusivo SuperAdmin)
+   */
+  async adminResolveFundingReconciliationCallable(payload: {
+    requestId: string;
+    resolution: 'RESOLVE_MATCHING' | 'KEEP_REVIEW';
+    notes?: string;
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const callable = httpsCallable(functions, 'adminResolveFundingReconciliationCallable');
+    const response = await callable(payload);
+    return response.data as { success: boolean; message: string };
+  },
+
+  /**
+   * Radica solicitud de desembolso (Exclusivo SuperAdmin)
+   */
+  async adminRequestDisbursementCallable(payload: {
+    userId: string;
+    sourceCycleId: string;
+    amountCop: number;
+    disbursementSource?: 'PROFIT' | 'CAPITAL' | 'MIXED';
+    method: 'TRANSFERENCIA' | 'EFECTIVO';
+    bankName?: string;
+    accountType?: string;
+    accountNumber?: string;
+    accountHolderName?: string;
+    idDocument?: string;
+    cashOffice?: string;
+    receiverId?: string;
+    receiverFullName?: string;
+    notes?: string;
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    disbursement: any;
+    message: string;
+  }> {
+    const callable = httpsCallable(functions, 'adminRequestDisbursementCallable');
+    const response = await callable(payload);
+    return response.data as { success: boolean; disbursement: any; message: string };
+  },
+
+  /**
+   * Resuelve solicitud de desembolso (Exclusivo SuperAdmin)
+   */
+  async adminResolveDisbursementCallable(payload: {
+    requestId: string;
+    action: 'APPROVE' | 'PAY' | 'REJECT';
+    notes?: string;
+    voucher?: string;
+  }): Promise<{
+    success: boolean;
+    disbursement: any;
+    message: string;
+  }> {
+    const callable = httpsCallable(functions, 'adminResolveDisbursementCallable');
+    const response = await callable(payload);
+    return response.data as { success: boolean; disbursement: any; message: string };
+  },
+
+  /**
+   * Inicio operativo y congelamiento de capitales del ciclo (Exclusivo SuperAdmin)
+   */
+  async adminStartCycleCallable(payload: {
+    cycleId: string;
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    cycleId: string;
+    alreadyStarted?: boolean;
+    operationalStatus: 'STARTED';
+    startedAt: string;
+    initialManagedCapitalCop: number;
+    initialActiveUsersCount: number;
+    reinvestmentsAppliedCount?: number;
+    usersCapitalUpdatedCount?: number;
+    message: string;
+  }> {
+    const callable = httpsCallable(functions, 'adminStartCycleCallable');
+    const response = await callable(payload);
+    return response.data as {
+      success: boolean;
+      cycleId: string;
+      alreadyStarted?: boolean;
+      operationalStatus: 'STARTED';
+      startedAt: string;
+      initialManagedCapitalCop: number;
+      initialActiveUsersCount: number;
+      reinvestmentsAppliedCount?: number;
+      usersCapitalUpdatedCount?: number;
+      message: string;
+    };
+  },
+
   async saveReinvestment(reinv: ReinvestmentRequest) {
     // Reglas de seguridad endurecidas: toda mutación debe realizarse por Cloud Functions autoritativas.
     // Se mantiene soporte en memoria y advertencia si se invoca directamente.
@@ -1089,7 +1240,13 @@ export const firestoreService = {
   // --- CONFIGURACIÓN GLOBAL & AUDITORÍA ---
   // ==========================================
   async saveSettings(config: GlobalConfig) {
-    await setDoc(doc(db, 'settings', 'global_config'), config, { merge: true });
+    const {
+      activeCycleId,
+      operationalCycleId,
+      preparingCycleId,
+      ...safeClientSettings
+    } = config;
+    await setDoc(doc(db, 'settings', 'global_config'), safeClientSettings, { merge: true });
   },
 
   async getSettings(): Promise<GlobalConfig | null> {

@@ -151,8 +151,14 @@ exports.adminExecuteDailyOperation = onCall(
       );
     }
 
-    // Validar targetType contra valores REALES permitidos
-    const VALID_TARGET_TYPES = ["INDIVIDUAL", "CUSTOM_GROUP", "CATEGORY", "GLOBAL"];
+    // Validar targetType contra valores REALES permitidos para distribución financiera
+    const VALID_TARGET_TYPES = ["INDIVIDUAL", "CUSTOM_GROUP", "CATEGORY"];
+    if (targetType === "GLOBAL") {
+      throw new HttpsError(
+        "invalid-argument",
+        "GLOBAL_NOT_SUPPORTED_FOR_FINANCIAL_OPERATION: Las operaciones de tipo GLOBAL no están permitidas para distribución financiera directa."
+      );
+    }
     if (!VALID_TARGET_TYPES.includes(targetType)) {
       throw new HttpsError(
         "invalid-argument",
@@ -173,16 +179,39 @@ exports.adminExecuteDailyOperation = onCall(
       throw new HttpsError("invalid-argument", "Identificador de ciclo o capital de grupo inválido.");
     }
 
+    // Validación estricta de consistencia categoría / capital para CUSTOM_GROUP
+    if (targetType === "CUSTOM_GROUP") {
+      const expectedCategory = getCategoryForCapitalLocal(Number(groupCapitalCop));
+      if (category !== expectedCategory) {
+        throw new HttpsError(
+          "invalid-argument",
+          `CATEGORY_CAPITAL_MISMATCH: La categoría '${category}' no corresponde al capital nominal $${Number(groupCapitalCop).toLocaleString("es-CO")} COP (categoría esperada: '${expectedCategory}').`
+        );
+      }
+    }
+
     if (typeof amountUsd !== "number" || isNaN(amountUsd)) {
       throw new HttpsError("invalid-argument", "El monto operado en USD ('amountUsd') debe ser un número válido.");
+    }
+
+    // Sanitización y normalización de customAuthorizedUids
+    let sanitizedCustomUids = null;
+    if (Array.isArray(customAuthorizedUids)) {
+      sanitizedCustomUids = Array.from(
+        new Set(
+          customAuthorizedUids
+            .filter((b) => typeof b === "string" && b.trim().length > 0)
+            .map((b) => b.trim())
+        )
+      );
     }
 
     // 2. FINGERPRINT AUTORITATIVO COMPLETO EN SERVIDOR
     const cleanNotes = (notes || "").trim();
     const opDate = date || new Date().toISOString().split("T")[0];
     const cleanTargetUser = targetUserId || "";
-    const normCustom = Array.isArray(customAuthorizedUids)
-      ? Array.from(new Set(customAuthorizedUids.filter((b) => typeof b === "string" && b.trim()))).sort().join(",")
+    const normCustom = sanitizedCustomUids && sanitizedCustomUids.length > 0
+      ? [...sanitizedCustomUids].sort().join(",")
       : "";
 
     const canonicalPayloadString = [
@@ -244,6 +273,36 @@ exports.adminExecuteDailyOperation = onCall(
         );
       }
 
+      // Guardrail Operativo y Compatibilidad Determinística con Ciclos Legacy (Sections 6, 7, 35)
+      const opStatus = cycleData.operationalStatus;
+      let isCycleStarted = false;
+
+      if (opStatus === "STARTED") {
+        isCycleStarted = true;
+      } else if (opStatus === "PREPARING") {
+        throw new HttpsError(
+          "failed-precondition",
+          `CYCLE_NOT_OPERATIONALLY_STARTED: El ciclo (${cycleData.name || cycleId}) está en preparación (PREPARING) y no ha sido iniciado operativamente. Debe congelar capitales e iniciar el ciclo antes de registrar operaciones.`
+        );
+      } else {
+        // operationalStatus no definido (Ciclo Legacy):
+        // Consultar determinísticamente si existen dailyOperations para este cycleId
+        const legacyOpsCheck = await transaction.get(
+          db.collection("dailyOperations").where("cycleId", "==", cycleId).limit(1)
+        );
+        if (!legacyOpsCheck.empty) {
+          // LEGACY_ALREADY_STARTED: Permite operar temporalmente como ciclo legacy ya iniciado
+          console.log(`[adminExecuteDailyOperation] Ciclo legacy ${cycleId} reconocido como LEGACY_ALREADY_STARTED por tener operaciones previas.`);
+          isCycleStarted = false;
+        } else {
+          // Ciclo legacy sin operaciones: TRADING BLOQUEADO hasta START
+          throw new HttpsError(
+            "failed-precondition",
+            `CYCLE_NOT_OPERATIONALLY_STARTED: El ciclo (${cycleData.name || cycleId}) no ha sido iniciado operativamente. Debe congelar capitales e iniciar el ciclo formalmente antes de registrar operaciones.`
+          );
+        }
+      }
+
       const trm = Number(cycleData.trmApplied);
       if (!trm || isNaN(trm) || trm <= 0) {
         throw new HttpsError(
@@ -259,73 +318,289 @@ exports.adminExecuteDailyOperation = onCall(
         .where("groupCapitalCop", "==", Number(groupCapitalCop));
       const opsSnap = await transaction.get(opsQuery);
 
-      // 4. Lectura estricta de usuarios objetivo según targetType
+      // 4. Lectura estricta de usuarios objetivo según targetType y operationalStatus
       let targetUserSnap = null;
+      let targetFrozenResultSnap = null;
       let targetUsersListSnap = null;
+      let targetResultsListSnap = null;
 
-      if (targetType === "INDIVIDUAL") {
-        if (!targetUserId || typeof targetUserId !== "string" || !targetUserId.trim()) {
-          throw new HttpsError("invalid-argument", "Para targetType INDIVIDUAL el parámetro 'targetUserId' es obligatorio.");
+      if (isCycleStarted) {
+        // === AUTORIDAD OPERATIVA CANÓNICA: cycleUserResults congelado post-START ===
+        if (targetType === "INDIVIDUAL") {
+          if (!targetUserId || typeof targetUserId !== "string" || !targetUserId.trim()) {
+            throw new HttpsError("invalid-argument", "Para targetType INDIVIDUAL el parámetro 'targetUserId' es obligatorio.");
+          }
+          const cleanUid = targetUserId.trim();
+          targetFrozenResultSnap = await transaction.get(
+            db.collection("cycleUserResults").doc(`${cycleId}_${cleanUid}`)
+          );
+          if (!targetFrozenResultSnap.exists || !targetFrozenResultSnap.data().isFrozen) {
+            throw new HttpsError(
+              "failed-precondition",
+              `CYCLE_USER_SNAPSHOT_MISSING: No existe un snapshot congelado en cycleUserResults para el usuario especificado (${cleanUid}) en el ciclo ${cycleId}.`
+            );
+          }
+          const frozenData = targetFrozenResultSnap.data();
+          if (
+            frozenData.cycleCategory !== category ||
+            Number(frozenData.groupCapitalCop) !== Number(groupCapitalCop)
+          ) {
+            throw new HttpsError(
+              "invalid-argument",
+              `INDIVIDUAL_TARGET_GROUP_MISMATCH: El usuario objetivo (categoría: '${frozenData.cycleCategory}', capital: $${frozenData.groupCapitalCop}) no coincide con la categoría ('${category}') o capital ($${groupCapitalCop}) especificados en el trade.`
+            );
+          }
+          targetUserSnap = await transaction.get(db.collection("users").doc(cleanUid));
+        } else if (targetType === "CATEGORY") {
+          targetResultsListSnap = await transaction.get(
+            db.collection("cycleUserResults")
+              .where("cycleId", "==", cycleId)
+              .where("cycleCategory", "==", category)
+          );
+        } else if (targetType === "CUSTOM_GROUP") {
+          targetResultsListSnap = await transaction.get(
+            db.collection("cycleUserResults")
+              .where("cycleId", "==", cycleId)
+              .where("cycleCategory", "==", category)
+              .where("groupCapitalCop", "==", Number(groupCapitalCop))
+          );
         }
-        targetUserSnap = await transaction.get(db.collection("users").doc(targetUserId.trim()));
-      } else if (targetType === "CATEGORY") {
-        targetUsersListSnap = await transaction.get(
-          db.collection("users").where("category", "==", category)
-        );
-      } else if (targetType === "CUSTOM_GROUP") {
-        targetUsersListSnap = await transaction.get(
-          db.collection("users").where("currentCapital", "==", Number(groupCapitalCop))
-        );
+      } else {
+        // === MODO COMPATIBILIDAD LEGACY: Lectura desde users para ciclos legacy sin START formal ===
+        if (targetType === "INDIVIDUAL") {
+          if (!targetUserId || typeof targetUserId !== "string" || !targetUserId.trim()) {
+            throw new HttpsError("invalid-argument", "Para targetType INDIVIDUAL el parámetro 'targetUserId' es obligatorio.");
+          }
+          targetUserSnap = await transaction.get(db.collection("users").doc(targetUserId.trim()));
+          targetFrozenResultSnap = await transaction.get(
+            db.collection("cycleUserResults").doc(`${cycleId}_${targetUserId.trim()}`)
+          );
+        } else if (targetType === "CATEGORY") {
+          targetUsersListSnap = await transaction.get(
+            db.collection("users").where("category", "==", category)
+          );
+        } else if (targetType === "CUSTOM_GROUP") {
+          targetUsersListSnap = await transaction.get(
+            db.collection("users").where("currentCapital", "==", Number(groupCapitalCop))
+          );
+        }
       }
 
       // === FASE DE CÁLCULO Y CONSTRUCCIÓN (CALCULATION PHASE) ===
 
-      // Resolución Canónica de authorizedUids (ÚNICAMENTE Firebase Auth UIDs)
       let authorizedUids = [];
-      let isPublicToActiveUsers = false;
       let targetUserDocData = null;
+      const userResultsToSet = [];
+      const opUsd = Number(amountUsd);
+      const opGrossCop = opUsd * trm;
 
-      if (targetType === "GLOBAL") {
-        authorizedUids = [];
-        isPublicToActiveUsers = true;
-      } else if (targetType === "INDIVIDUAL") {
-        // VALIDACIÓN ESTRICTA PARA INDIVIDUAL
-        if (!targetUserSnap || !targetUserSnap.exists) {
-          throw new HttpsError("failed-precondition", `El usuario objetivo especificado (${targetUserId}) no existe en Firestore.`);
-        }
-        targetUserDocData = targetUserSnap.data();
-        if (!targetUserDocData.uid || typeof targetUserDocData.uid !== "string" || !targetUserDocData.uid.trim()) {
-          throw new HttpsError("failed-precondition", "El usuario objetivo especificado carece de un Firebase Auth UID canónico válido.");
-        }
-        if (targetUserDocData.status !== "ACTIVE") {
-          throw new HttpsError("failed-precondition", `El usuario objetivo no se encuentra activo (estado actual: '${targetUserDocData.status}').`);
-        }
-        // Asignación exclusiva del UID canónico
-        authorizedUids = [targetUserDocData.uid.trim()];
-        isPublicToActiveUsers = false;
-      } else if (targetType === "CATEGORY" && targetUsersListSnap) {
-        const uids = [];
-        targetUsersListSnap.forEach((uDoc) => {
-          const u = uDoc.data();
-          if (u.status === "ACTIVE" && u.uid && typeof u.uid === "string" && u.uid.trim()) {
-            uids.push(u.uid.trim());
+      if (isCycleStarted) {
+        // Recopilar candidatos elegibles desde cycleUserResults congelado
+        let candidateResults = [];
+        if (targetType === "INDIVIDUAL") {
+          const r = targetFrozenResultSnap.data();
+          const uUid = (r.userUid || r.userId || targetUserId).trim();
+          candidateResults = [{
+            ref: targetFrozenResultSnap.ref,
+            id: targetFrozenResultSnap.id,
+            r,
+            uid: uUid,
+          }];
+          if (targetUserSnap && targetUserSnap.exists) {
+            targetUserDocData = targetUserSnap.data();
           }
-        });
-        authorizedUids = Array.from(new Set(uids));
-        isPublicToActiveUsers = false;
-      } else if (targetType === "CUSTOM_GROUP" && targetUsersListSnap) {
-        const uids = [];
-        targetUsersListSnap.forEach((uDoc) => {
-          const u = uDoc.data();
-          if (u.status === "ACTIVE" && (!category || u.category === category) && u.uid && typeof u.uid === "string" && u.uid.trim()) {
-            uids.push(u.uid.trim());
+        } else if (targetResultsListSnap) {
+          targetResultsListSnap.forEach((rDoc) => {
+            const r = rDoc.data();
+            const uUid = (r.userUid || r.userId || "").trim();
+            if (uUid) {
+              candidateResults.push({
+                ref: rDoc.ref,
+                id: rDoc.id,
+                r,
+                uid: uUid,
+              });
+            }
+          });
+        }
+
+        // Aplicar filtrado y validación estricta de customAuthorizedUids si fue provisto
+        let finalEligibleResults = [];
+        if (sanitizedCustomUids && sanitizedCustomUids.length > 0) {
+          const eligibleUidSet = new Set(candidateResults.map((c) => c.uid));
+          for (const cUid of sanitizedCustomUids) {
+            if (!eligibleUidSet.has(cUid)) {
+              throw new HttpsError(
+                "invalid-argument",
+                `AUTHORIZED_UID_NOT_ELIGIBLE: El UID '${cUid}' en customAuthorizedUids no pertenece al grupo o categoría seleccionada en este ciclo.`
+              );
+            }
           }
+          finalEligibleResults = candidateResults.filter((c) => sanitizedCustomUids.includes(c.uid));
+        } else {
+          finalEligibleResults = candidateResults;
+        }
+
+        // Guardrail: Cero usuarios elegibles en ciclo iniciado
+        if (finalEligibleResults.length === 0) {
+          throw new HttpsError(
+            "failed-precondition",
+            "NO_ELIGIBLE_USERS_FOR_OPERATION: No se encontraron usuarios elegibles para registrar la operación financiera."
+          );
+        }
+
+        authorizedUids = finalEligibleResults.map((c) => c.uid);
+
+        // Modelo de Acumulación Incremental Atómica sobre snapshot congelado de cada usuario
+        finalEligibleResults.forEach((item) => {
+          const r = item.r;
+          const uUid = item.uid;
+          const prevUsd = Number(r.totalUsdOperated || 0);
+          const prevGrossCop = Number(r.totalGrossCop || 0);
+          const prevUserProfitCop = Number(r.userProfitCop || 0);
+          const prevAdminCommCop = Number(r.adminCommissionCop || 0);
+          const prevUserProfitUsd = Number(r.userProfitUsd || 0);
+          const prevAdminCommUsd = Number(r.adminCommissionUsd || 0);
+
+          const userPctRaw = r.userPercentage !== undefined ? r.userPercentage : 75;
+          const adminPctRaw = r.adminPercentage !== undefined ? r.adminPercentage : 25;
+          const uRatio = userPctRaw > 1 ? userPctRaw / 100 : userPctRaw;
+          const aRatio = adminPctRaw > 1 ? adminPctRaw / 100 : adminPctRaw;
+
+          const deltaUserProfitCop = opGrossCop * uRatio;
+          const deltaAdminCommCop = opGrossCop * aRatio;
+          const deltaUserProfitUsd = opUsd * uRatio;
+          const deltaAdminCommUsd = opUsd * aRatio;
+
+          const userResultId = item.id || `${cycleId}_${uUid}`;
+          const userResDoc = {
+            id: userResultId,
+            cycleId,
+            userId: r.userId || uUid,
+            userUid: uUid,
+            userCode: r.userCode || "",
+            userName: r.userName || "",
+            email: r.email || "",
+            cycleCapitalCop: r.cycleCapitalCop,
+            cycleCategory: r.cycleCategory || category,
+            groupCapitalCop: r.groupCapitalCop !== undefined ? r.groupCapitalCop : Number(groupCapitalCop),
+            totalUsdOperated: prevUsd + opUsd,
+            totalGrossCop: prevGrossCop + opGrossCop,
+            userProfitCop: prevUserProfitCop + deltaUserProfitCop,
+            adminCommissionCop: prevAdminCommCop + deltaAdminCommCop,
+            userProfitUsd: prevUserProfitUsd + deltaUserProfitUsd,
+            adminCommissionUsd: prevAdminCommUsd + deltaAdminCommUsd,
+            userPercentage: uRatio * 100,
+            adminPercentage: aRatio * 100,
+            trmUsed: trm,
+            isFrozen: true,
+            updatedAt: new Date().toISOString(),
+          };
+
+          userResultsToSet.push({ ref: item.ref || db.collection("cycleUserResults").doc(userResultId), doc: userResDoc });
         });
-        authorizedUids = Array.from(new Set(uids));
-        isPublicToActiveUsers = false;
+      } else {
+        // === MODO LEGACY (para ciclos no iniciados formalmente) ===
+        let candidateLegacyUsers = [];
+        if (targetType === "INDIVIDUAL") {
+          if (!targetUserSnap || !targetUserSnap.exists) {
+            throw new HttpsError("failed-precondition", `El usuario objetivo especificado (${targetUserId}) no existe en Firestore.`);
+          }
+          targetUserDocData = targetUserSnap.data();
+          if (targetUserDocData.status !== "ACTIVE" || !targetUserDocData.uid) {
+            throw new HttpsError("failed-precondition", "El usuario objetivo no se encuentra activo o carece de UID.");
+          }
+          candidateLegacyUsers = [targetUserDocData];
+        } else if (targetUsersListSnap) {
+          targetUsersListSnap.forEach((uDoc) => {
+            const u = uDoc.data();
+            if (u.status === "ACTIVE" && u.uid && typeof u.uid === "string" && u.uid.trim()) {
+              if (targetType === "CUSTOM_GROUP" && category && u.category !== category) return;
+              candidateLegacyUsers.push({ ...u, id: uDoc.id });
+            }
+          });
+        }
+
+        let finalLegacyUsers = [];
+        if (sanitizedCustomUids && sanitizedCustomUids.length > 0) {
+          const eligibleUidSet = new Set(candidateLegacyUsers.map((u) => u.uid.trim()));
+          for (const cUid of sanitizedCustomUids) {
+            if (!eligibleUidSet.has(cUid)) {
+              throw new HttpsError(
+                "invalid-argument",
+                `AUTHORIZED_UID_NOT_ELIGIBLE: El UID '${cUid}' en customAuthorizedUids no pertenece al grupo o categoría seleccionada.`
+              );
+            }
+          }
+          finalLegacyUsers = candidateLegacyUsers.filter((u) => sanitizedCustomUids.includes(u.uid.trim()));
+        } else {
+          finalLegacyUsers = candidateLegacyUsers;
+        }
+
+        if (finalLegacyUsers.length === 0) {
+          throw new HttpsError(
+            "failed-precondition",
+            "NO_ELIGIBLE_USERS_FOR_OPERATION: No se encontraron usuarios elegibles para registrar la operación financiera."
+          );
+        }
+
+        authorizedUids = finalLegacyUsers.map((u) => u.uid.trim());
+
+        finalLegacyUsers.forEach((u) => {
+          const uUid = u.uid.trim();
+          const userPctRaw = u.userPercentage !== undefined ? u.userPercentage : 75;
+          const adminPctRaw = u.adminPercentage !== undefined ? u.adminPercentage : 25;
+          const uRatio = userPctRaw > 1 ? userPctRaw / 100 : userPctRaw;
+          const aRatio = adminPctRaw > 1 ? adminPctRaw / 100 : adminPctRaw;
+
+          const deltaUserProfitCop = opGrossCop * uRatio;
+          const deltaAdminCommCop = opGrossCop * aRatio;
+          const deltaUserProfitUsd = opUsd * uRatio;
+          const deltaAdminCommUsd = opUsd * aRatio;
+
+          // Si existe registro previo en targetFrozenResultSnap para individual
+          let prevUsd = 0;
+          let prevGrossCop = 0;
+          let prevUserProfitCop = 0;
+          let prevAdminCommCop = 0;
+          let prevUserProfitUsd = 0;
+          let prevAdminCommUsd = 0;
+
+          if (targetFrozenResultSnap && targetFrozenResultSnap.exists) {
+            const r = targetFrozenResultSnap.data();
+            prevUsd = Number(r.totalUsdOperated || 0);
+            prevGrossCop = Number(r.totalGrossCop || 0);
+            prevUserProfitCop = Number(r.userProfitCop || 0);
+            prevAdminCommCop = Number(r.adminCommissionCop || 0);
+            prevUserProfitUsd = Number(r.userProfitUsd || 0);
+            prevAdminCommUsd = Number(r.adminCommissionUsd || 0);
+          }
+
+          const userResultId = `${cycleId}_${uUid}`;
+          const userResDoc = {
+            id: userResultId,
+            cycleId,
+            userId: u.id || uUid,
+            userUid: uUid,
+            userCode: u.userCode || "",
+            userName: u.fullName || u.userName || "",
+            totalUsdOperated: prevUsd + opUsd,
+            totalGrossCop: prevGrossCop + opGrossCop,
+            userProfitCop: prevUserProfitCop + deltaUserProfitCop,
+            adminCommissionCop: prevAdminCommCop + deltaAdminCommCop,
+            userProfitUsd: prevUserProfitUsd + deltaUserProfitUsd,
+            adminCommissionUsd: prevAdminCommUsd + deltaAdminCommUsd,
+            userPercentage: uRatio * 100,
+            adminPercentage: aRatio * 100,
+            trmUsed: trm,
+            updatedAt: new Date().toISOString(),
+          };
+
+          userResultsToSet.push({ ref: db.collection("cycleUserResults").doc(userResultId), doc: userResDoc });
+        });
       }
 
-      // Cálculo de Acumulado USD del grupo
+      // Cálculo de Resumen de Actividad de Grupo para cycleGroupCalculations
       let accumulatedUsd = Number(amountUsd);
       opsSnap.forEach((docSnap) => {
         const op = docSnap.data();
@@ -367,60 +642,24 @@ exports.adminExecuteDailyOperation = onCall(
         status: "ACTIVE",
         targetType,
         authorizedUids,
-        isPublicToActiveUsers,
+        isPublicToActiveUsers: false,
       };
 
-      if (targetType === "INDIVIDUAL" && targetUserDocData) {
-        newOp.userId = targetUserDocData.id || targetUserDocData.uid;
-        newOp.userUid = targetUserDocData.uid;
-        if (targetUserDocData.email) newOp.userEmail = targetUserDocData.email;
-        if (targetUserDocData.userCode) newOp.userCode = targetUserDocData.userCode;
-        if (targetUserDocData.fullName) newOp.userName = targetUserDocData.fullName;
-      }
-
-      // Pre-calcular resultados de usuarios para la fase de escritura
-      const userResultsToSet = [];
-      if (targetUsersListSnap) {
-        targetUsersListSnap.forEach((uDoc) => {
-          const u = uDoc.data();
-          if (u.status !== "ACTIVE") return;
-          if (category && u.category !== category) return;
-
-          const uUid = u.uid;
-          if (!uUid || typeof uUid !== "string" || !uUid.trim()) return;
-
-          const userPctRaw = u.userPercentage !== undefined ? u.userPercentage : 75;
-          const adminPctRaw = u.adminPercentage !== undefined ? u.adminPercentage : 25;
-          const uRatio = userPctRaw > 1 ? userPctRaw / 100 : userPctRaw;
-          const aRatio = adminPctRaw > 1 ? adminPctRaw / 100 : adminPctRaw;
-
-          const userProfitCop = groupGrossCop * uRatio;
-          const adminCommCop = groupGrossCop * aRatio;
-          const userProfitUsd = accumulatedUsd * uRatio;
-          const adminCommUsd = accumulatedUsd * aRatio;
-
-          const userResultId = `${cycleId}_${uUid}`;
-          const userResDoc = {
-            id: userResultId,
-            cycleId,
-            userId: u.id || uUid,
-            userUid: uUid,
-            userCode: u.userCode || "",
-            userName: u.fullName || "",
-            totalUsdOperated: accumulatedUsd,
-            totalGrossCop: groupGrossCop,
-            userProfitCop,
-            adminCommissionCop: adminCommCop,
-            userProfitUsd,
-            adminCommissionUsd: adminCommUsd,
-            userPercentage: uRatio * 100,
-            adminPercentage: aRatio * 100,
-            trmUsed: trm,
-            updatedAt: new Date().toISOString(),
-          };
-
-          userResultsToSet.push({ ref: db.collection("cycleUserResults").doc(userResultId), doc: userResDoc });
-        });
+      if (targetType === "INDIVIDUAL") {
+        if (targetUserDocData) {
+          newOp.userId = targetUserDocData.id || targetUserDocData.uid;
+          newOp.userUid = targetUserDocData.uid;
+          if (targetUserDocData.email) newOp.userEmail = targetUserDocData.email;
+          if (targetUserDocData.userCode) newOp.userCode = targetUserDocData.userCode;
+          if (targetUserDocData.fullName) newOp.userName = targetUserDocData.fullName;
+        } else if (targetFrozenResultSnap && targetFrozenResultSnap.exists) {
+          const fr = targetFrozenResultSnap.data();
+          newOp.userId = fr.userId || targetUserId;
+          newOp.userUid = fr.userUid || targetUserId;
+          if (fr.email) newOp.userEmail = fr.email;
+          if (fr.userCode) newOp.userCode = fr.userCode;
+          if (fr.userName) newOp.userName = fr.userName;
+        }
       }
 
       // === FASE DE ESCRITURA (WRITE PHASE) ===
@@ -602,6 +841,7 @@ exports.adminCreateUser = onCall(
       paymentMethod = "",
       paymentDetails = "Cuenta Principal",
       role = "USER",
+      targetCycleId = null,
     } = data;
 
     if (!email || typeof email !== "string" || !email.includes("@")) {
@@ -623,6 +863,34 @@ exports.adminCreateUser = onCall(
     const capNum = Number(currentCapital) || 0;
     const userPctNum = Number(userPercentage) !== undefined ? Number(userPercentage) : 75;
     const adminPctNum = Number(adminPercentage) !== undefined ? Number(adminPercentage) : 25;
+
+    let entryCycleId = null;
+    if (targetCycleId && typeof targetCycleId === "string" && targetCycleId.trim()) {
+      const cleanTargetCycleId = targetCycleId.trim();
+      const targetCycleSnap = await db.collection("monthlyCycles").doc(cleanTargetCycleId).get();
+      if (!targetCycleSnap.exists) {
+        throw new HttpsError("not-found", `El ciclo especificado (${cleanTargetCycleId}) no existe.`);
+      }
+      const targetCycleData = targetCycleSnap.data() || {};
+      if (targetCycleData.status !== "OPEN") {
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_OPEN: El ciclo objetivo (${cleanTargetCycleId}) no se encuentra abierto.`);
+      }
+      if (targetCycleData.operationalStatus !== "PREPARING") {
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_PREPARING: El ciclo objetivo (${cleanTargetCycleId}) debe estar en estado de preparación (PREPARING).`);
+      }
+      if (!targetCycleData.previousCycleId) {
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NO_PREVIOUS: El ciclo objetivo (${cleanTargetCycleId}) no tiene ciclo previo registrado.`);
+      }
+
+      const prevCycleSnap = await db.collection("monthlyCycles").doc(targetCycleData.previousCycleId).get();
+      if (!prevCycleSnap.exists || prevCycleSnap.data().status !== "CLOSED") {
+        throw new HttpsError(
+          "failed-precondition",
+          `PREDECESSOR_CYCLE_NOT_CLOSED_FOR_NEW_ENTRY: El ciclo predecesor (${targetCycleData.previousCycleId}) debe estar en estado CLOSED para autorizar el ingreso de un nuevo inversionista en ${cleanTargetCycleId}.`
+        );
+      }
+      entryCycleId = cleanTargetCycleId;
+    }
 
     const category = getCanonicalCategoryForCapital(capNum);
 
@@ -674,6 +942,7 @@ exports.adminCreateUser = onCall(
       category,
       paymentMethod: cleanPaymentMethod,
       paymentDetails: cleanPaymentDetails,
+      entryCycleId: entryCycleId || null,
       entryDate: new Date().toISOString().split("T")[0],
       userCode,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -755,6 +1024,7 @@ exports.adminCreatePendingInvestor = onCall(
       adminPercentage = 25,
       paymentMethod = "",
       paymentDetails = "Cuenta Principal",
+      targetCycleId = null,
     } = data;
 
     if (!email || typeof email !== "string" || !email.includes("@")) {
@@ -773,6 +1043,34 @@ exports.adminCreatePendingInvestor = onCall(
     const capNum = Number(currentCapital) || 0;
     const userPctNum = Number(userPercentage) !== undefined ? Number(userPercentage) : 75;
     const adminPctNum = Number(adminPercentage) !== undefined ? Number(adminPercentage) : 25;
+
+    let entryCycleId = null;
+    if (targetCycleId && typeof targetCycleId === "string" && targetCycleId.trim()) {
+      const cleanTargetCycleId = targetCycleId.trim();
+      const targetCycleSnap = await db.collection("monthlyCycles").doc(cleanTargetCycleId).get();
+      if (!targetCycleSnap.exists) {
+        throw new HttpsError("not-found", `El ciclo especificado (${cleanTargetCycleId}) no existe.`);
+      }
+      const targetCycleData = targetCycleSnap.data() || {};
+      if (targetCycleData.status !== "OPEN") {
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_OPEN: El ciclo objetivo (${cleanTargetCycleId}) no se encuentra abierto.`);
+      }
+      if (targetCycleData.operationalStatus !== "PREPARING") {
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_PREPARING: El ciclo objetivo (${cleanTargetCycleId}) debe estar en estado de preparación (PREPARING).`);
+      }
+      if (!targetCycleData.previousCycleId) {
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NO_PREVIOUS: El ciclo objetivo (${cleanTargetCycleId}) no tiene ciclo previo registrado.`);
+      }
+
+      const prevCycleSnap = await db.collection("monthlyCycles").doc(targetCycleData.previousCycleId).get();
+      if (!prevCycleSnap.exists || prevCycleSnap.data().status !== "CLOSED") {
+        throw new HttpsError(
+          "failed-precondition",
+          `PREDECESSOR_CYCLE_NOT_CLOSED_FOR_NEW_ENTRY: El ciclo predecesor (${targetCycleData.previousCycleId}) debe estar en estado CLOSED para autorizar el ingreso de un nuevo inversionista en ${cleanTargetCycleId}.`
+        );
+      }
+      entryCycleId = cleanTargetCycleId;
+    }
 
     const category = getCanonicalCategoryForCapital(capNum);
 
@@ -831,6 +1129,7 @@ exports.adminCreatePendingInvestor = onCall(
       category,
       paymentMethod: cleanPaymentMethod,
       paymentDetails: cleanPaymentDetails,
+      entryCycleId: entryCycleId || null,
       entryDate: new Date().toISOString().split("T")[0],
       userCode,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1537,6 +1836,7 @@ exports.claimAccountCallable = onCall(
           paymentMethod: freshLegacyData.paymentMethod || "Bancolombia",
           paymentDetails: freshLegacyData.paymentDetails || "Cuenta Principal",
           entryDate: freshLegacyData.entryDate || new Date().toISOString().split("T")[0],
+          entryCycleId: freshLegacyData.entryCycleId || null,
           isClaimed: true,
           claimedAt: admin.firestore.FieldValue.serverTimestamp(),
           activationTokenHash: null,
@@ -2847,6 +3147,59 @@ function getCategoryForCapitalLocal(capital) {
   return 'AZUL';
 }
 
+function getNextCycleId(cycleId) {
+  if (!cycleId || typeof cycleId !== "string") return "2026-10";
+  const parts = cycleId.split("-");
+  if (parts.length === 2) {
+    let year = parseInt(parts[0], 10);
+    let month = parseInt(parts[1], 10);
+    if (!isNaN(year) && !isNaN(month)) {
+      month += 1;
+      if (month > 12) {
+        month = 1;
+        year += 1;
+      }
+      return `${year}-${String(month).padStart(2, "0")}`;
+    }
+  }
+  return `${cycleId}-NEXT`;
+}
+
+function getPreviousCycleId(cycleId) {
+  if (!cycleId || typeof cycleId !== "string") return "2026-08";
+  const parts = cycleId.split("-");
+  if (parts.length === 2) {
+    let year = parseInt(parts[0], 10);
+    let month = parseInt(parts[1], 10);
+    if (!isNaN(year) && !isNaN(month)) {
+      month -= 1;
+      if (month < 1) {
+        month = 12;
+        year -= 1;
+      }
+      return `${year}-${String(month).padStart(2, "0")}`;
+    }
+  }
+  return `${cycleId}-PREV`;
+}
+
+function getCycleMonthName(cycleId) {
+  if (!cycleId || typeof cycleId !== "string") return "Ciclo Operativo";
+  const parts = cycleId.split("-");
+  if (parts.length === 2) {
+    const year = parts[0];
+    const monthNum = parseInt(parts[1], 10);
+    const months = [
+      "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+      "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+    ];
+    if (monthNum >= 1 && monthNum <= 12) {
+      return `${months[monthNum - 1]} ${year}`;
+    }
+  }
+  return `Ciclo ${cycleId}`;
+}
+
 /**
  * Cloud Function HTTPS Callable: Radicación de Solicitud de Reinversión / Inyección de Capital
  * Exclusiva para usuarios activos (USER).
@@ -2920,7 +3273,7 @@ exports.submitReinvestmentRequestCallable = onCall(
         throw new HttpsError("failed-precondition", "Capital actual registrado inválido.");
       }
 
-      // B. Ciclo de origen autoritativo (Validación estricta de elegibilidad y Lock de Cierre)
+      // B. Ciclo de origen autoritativo (Validación estricta de elegibilidad, sucesor enlazado y Lock de Cierre)
       const cycleDocSnap = await transaction.get(cycleDocRef);
       if (!cycleDocSnap.exists) {
         throw new HttpsError("not-found", `El ciclo especificado (${sourceCycleId}) no existe.`);
@@ -2938,29 +3291,82 @@ exports.submitReinvestmentRequestCallable = onCall(
           `El ciclo (${sourceCycleId}) no se encuentra abierto/activo para solicitudes (estado actual: ${cycleData.status || "DESCONOCIDO"}). Solo ciclos con estado OPEN o REOPENED admiten nuevas radicaciones.`
         );
       }
-
-      // C. Ganancia de ciclo desde cycleUserResults canónico
-      const userResDocSnap = await transaction.get(userResDocRef);
-      let cycleProfitSnapshotCop = 0;
-      let hasUserCycleResult = false;
-
-      if (userResDocSnap.exists) {
-        const resData = userResDocSnap.data();
-        cycleProfitSnapshotCop = Number(resData.userProfitCop) || 0;
-        hasUserCycleResult = true;
+      if (cycleData.operationalStatus !== "STARTED") {
+        throw new HttpsError(
+          "failed-precondition",
+          `SOURCE_NOT_STARTED: El ciclo origen ${sourceCycleId} debe estar en estado operativo STARTED para recibir solicitudes de reinversión (estado operativo actual: ${cycleData.operationalStatus || "UNDEFINED"}).`
+        );
+      }
+      if (!cycleData.nextCycleId || typeof cycleData.nextCycleId !== "string" || !cycleData.nextCycleId.trim()) {
+        throw new HttpsError(
+          "failed-precondition",
+          `NO_SUCCESSOR_CYCLE: El ciclo origen ${sourceCycleId} no cuenta con un ciclo sucesor enlazado para recibir la solicitud.`
+        );
       }
 
-      // Si es PROFIT_REINVESTMENT, el resultado del ciclo es OBLIGATORIO (no se asume 0 silenciosamente)
-      if (modality === "PROFIT_REINVESTMENT") {
-        if (!hasUserCycleResult) {
+      // C. Verificar ciclo objetivo B (sucesores)
+      const targetCycleId = cycleData.nextCycleId.trim();
+      const targetCycleRef = db.collection("monthlyCycles").doc(targetCycleId);
+      const targetCycleSnap = await transaction.get(targetCycleRef);
+      if (!targetCycleSnap.exists) {
+        throw new HttpsError(
+          "not-found",
+          `TARGET_CYCLE_NOT_FOUND: El ciclo sucesor enlazado (${targetCycleId}) no existe en la base de datos.`
+        );
+      }
+      const targetCycleData = targetCycleSnap.data() || {};
+      if (targetCycleData.status !== "OPEN") {
+        throw new HttpsError(
+          "failed-precondition",
+          `TARGET_CYCLE_NOT_OPEN: El ciclo sucesor (${targetCycleId}) no se encuentra abierto (estado actual: ${targetCycleData.status || "UNKNOWN"}).`
+        );
+      }
+      if (targetCycleData.operationalStatus !== "PREPARING") {
+        throw new HttpsError(
+          "failed-precondition",
+          `TARGET_CYCLE_NOT_PREPARING: El ciclo sucesor (${targetCycleId}) debe estar en estado operativo PREPARING (estado actual: ${targetCycleData.operationalStatus || "UNKNOWN"}).`
+        );
+      }
+      if (targetCycleData.previousCycleId !== sourceCycleId.trim()) {
+        throw new HttpsError(
+          "failed-precondition",
+          `CYCLE_LINKAGE_MISMATCH: Incoherencia en el enlace de ciclos: El ciclo sucesor (${targetCycleId}) no tiene a ${sourceCycleId} como ciclo previo.`
+        );
+      }
+
+      // Check settings/global_config pointer
+      const globalConfigSnap = await transaction.get(db.collection("settings").doc("global_config"));
+      if (globalConfigSnap.exists) {
+        const globalData = globalConfigSnap.data() || {};
+        if (globalData.preparingCycleId && globalData.preparingCycleId !== targetCycleId) {
           throw new HttpsError(
             "failed-precondition",
-            `No se encontró el registro contable de liquidación para el ciclo ${sourceCycleId}. No es posible reinvertir utilidades antes de que el ciclo sea calculado.`
+            `CYCLE_POINTER_MISMATCH: El ciclo en preparación registrado en global_config (${globalData.preparingCycleId}) no coincide con el ciclo sucesor enlazado (${targetCycleId}).`
           );
         }
       }
 
-      // D. Documento canónico determinístico de reinversión para este usuario y ciclo
+      // D. Ganancia de ciclo desde cycleUserResults canónico y validación de capital congelado autoritativo
+      const userResDocSnap = await transaction.get(userResDocRef);
+      if (!userResDocSnap.exists) {
+        throw new HttpsError(
+          "failed-precondition",
+          `CYCLE_RESULT_NOT_FOUND: No se encontró el registro contable de liquidación para el ciclo ${sourceCycleId}. No es posible radicar solicitudes antes de calcular el resultado.`
+        );
+      }
+
+      const resData = userResDocSnap.data() || {};
+      const cycleProfitSnapshotCop = Number(resData.userProfitCop) || 0;
+      const cycleCapitalCop = Number(resData.cycleCapitalCop || 0);
+
+      if (currentCapitalSnapshotCop !== cycleCapitalCop) {
+        throw new HttpsError(
+          "failed-precondition",
+          `CAPITAL_BASE_SNAPSHOT_MISMATCH: El capital actual registrado ($${currentCapitalSnapshotCop.toLocaleString("es-CO")}) no coincide con el capital base congelado del ciclo ($${cycleCapitalCop.toLocaleString("es-CO")}).`
+        );
+      }
+
+      // E. Documento canónico determinístico de reinversión para este usuario y ciclo
       const existingReinvSnap = await transaction.get(reinvDocRef);
       let previousRejectionHistory = [];
       let requestVersion = 1;
@@ -3097,6 +3503,9 @@ exports.submitReinvestmentRequestCallable = onCall(
         userName: userData.fullName || "",
         userEmail: userData.email || "",
         sourceCycleId: sourceCycleId.trim(),
+        targetCycleId: targetCycleId,
+        fundingReconciliationStatus: "OK",
+        fundingReconciliationReason: null,
         modality,
         requestVersion,
         clientRequestId: clientRequestId || null,
@@ -3250,25 +3659,45 @@ exports.adminResolveReinvestmentCallable = onCall(
 
       const reinvData = reinvSnap.data() || {};
 
-      // Validar atómicamente si el ciclo correspondiente se encuentra en proceso de cierre activo (Lock de cierre)
-      if (reinvData.sourceCycleId) {
-        const cycleRef = db.collection("monthlyCycles").doc(reinvData.sourceCycleId);
-        const cycleSnap = await transaction.get(cycleRef);
-        if (cycleSnap.exists) {
-          const cycleData = cycleSnap.data() || {};
-          if (cycleData.isClosing === true) {
-            throw new HttpsError(
-              "failed-precondition",
-              "El ciclo está en proceso de cierre transaccional. No se pueden modificar solicitudes hasta que finalice o se libere el cierre."
-            );
-          }
-          if (cycleData.status === "CLOSED") {
-            throw new HttpsError(
-              "failed-precondition",
-              "El ciclo de origen ya se encuentra cerrado. No se pueden modificar solicitudes de ciclos finalizados."
-            );
-          }
-        }
+      // Validar enlace de ciclos A -> B y estado de cierre
+      const sourceCycleId = reinvData.sourceCycleId;
+      const targetCycleId = reinvData.targetCycleId;
+
+      if (!sourceCycleId || !targetCycleId) {
+        throw new HttpsError("failed-precondition", "CYCLE_LINK_MISMATCH: La solicitud debe especificar ciclo origen y ciclo objetivo.");
+      }
+
+      const cycleARef = db.collection("monthlyCycles").doc(sourceCycleId);
+      const cycleBRef = db.collection("monthlyCycles").doc(targetCycleId);
+
+      const cycleASnap = await transaction.get(cycleARef);
+      const cycleBSnap = await transaction.get(cycleBRef);
+
+      if (!cycleASnap.exists || !cycleBSnap.exists) {
+        throw new HttpsError("not-found", "CYCLE_LINK_MISMATCH: Los ciclos origen y objetivo deben existir en Firestore.");
+      }
+
+      const cycleAData = cycleASnap.data() || {};
+      const cycleBData = cycleBSnap.data() || {};
+
+      if (cycleAData.nextCycleId !== targetCycleId || cycleBData.previousCycleId !== sourceCycleId) {
+        throw new HttpsError(
+          "failed-precondition",
+          `CYCLE_LINK_MISMATCH: Enlace inválido entre ${sourceCycleId} y ${targetCycleId}. A.nextCycleId debe coincidir con B y B.previousCycleId con A.`
+        );
+      }
+
+      if (cycleAData.isClosing === true) {
+        throw new HttpsError(
+          "failed-precondition",
+          "El ciclo está en proceso de cierre transaccional. No se pueden modificar solicitudes hasta que finalice o se libere el cierre."
+        );
+      }
+      if (cycleAData.status === "CLOSED") {
+        throw new HttpsError(
+          "failed-precondition",
+          "El ciclo de origen ya se encuentra cerrado. No se pueden modificar solicitudes de ciclos finalizados."
+        );
       }
 
       if (reinvData.status === "APPLIED" || reinvData.appliedAtCycleClosure === true) {
@@ -3286,28 +3715,16 @@ exports.adminResolveReinvestmentCallable = onCall(
             "Una solicitud en revisión no puede ser aprobada directamente por la administración. El inversionista debe corregir y radicar nuevamente la solicitud."
           );
         }
-        if (reinvData.status !== "PENDING") {
-          throw new HttpsError("failed-precondition", `Solo solicitudes en estado PENDING pueden ser aprobadas directamente (estado actual: ${reinvData.status}).`);
-        }
-        if (isCapitalInjectionWithCash) {
-          throw new HttpsError(
-            "failed-precondition",
-            `Esta solicitud contempla un aporte de dinero nuevo de $${cashInjectionCop.toLocaleString("es-CO")} COP. Debe ser PREAPROBADA primero y luego APROBADA confirmando la recepción del dinero.`
-          );
+        if (reinvData.status !== "PENDING" && reinvData.status !== "PREAPPROVED") {
+          throw new HttpsError("failed-precondition", `Solo solicitudes en estado PENDING o PREAPPROVED pueden ser aprobadas (estado actual: ${reinvData.status}).`);
         }
       } else if (action === "PREAPPROVE") {
         if (reinvData.status !== "PENDING") {
           throw new HttpsError("failed-precondition", `Solo solicitudes PENDING pueden ser preaprobadas (estado actual: ${reinvData.status}).`);
         }
-        if (!isCapitalInjectionWithCash) {
-          throw new HttpsError(
-            "failed-precondition",
-            "El estado PREAPPROVED solo aplica para inyecciones de capital con dinero nuevo por recibir (cashInjectionCop > 0)."
-          );
-        }
       } else if (action === "CONFIRM_CASH_AND_APPROVE") {
-        if (reinvData.status !== "PREAPPROVED") {
-          throw new HttpsError("failed-precondition", `Solo solicitudes en estado PREAPPROVED admiten confirmación de dinero (estado actual: ${reinvData.status}).`);
+        if (reinvData.status !== "PREAPPROVED" && reinvData.status !== "APPROVED") {
+          throw new HttpsError("failed-precondition", `Solo solicitudes en estado APPROVED o PREAPPROVED admiten confirmación de dinero (estado actual: ${reinvData.status}).`);
         }
         if (!isCapitalInjectionWithCash) {
           throw new HttpsError("failed-precondition", "La solicitud no registra dinero nuevo por recibir.");
@@ -3334,15 +3751,24 @@ exports.adminResolveReinvestmentCallable = onCall(
         newStatus = "APPROVED";
         updateFields.status = "APPROVED";
         updateFields.rejectionReason = null;
+        updateFields.externalFundingStatus = isCapitalInjectionWithCash
+          ? (reinvData.externalFundingStatus === "CONFIRMED" ? "CONFIRMED" : "PENDING")
+          : "NOT_REQUIRED";
       } else if (action === "PREAPPROVE") {
-        newStatus = "PREAPPROVED";
-        updateFields.status = "PREAPPROVED";
+        newStatus = "APPROVED";
+        updateFields.status = "APPROVED";
         updateFields.rejectionReason = null;
+        updateFields.externalFundingStatus = "PENDING";
       } else if (action === "CONFIRM_CASH_AND_APPROVE") {
         newStatus = "APPROVED";
         updateFields.status = "APPROVED";
         updateFields.cashReceivedConfirmed = true;
         updateFields.cashReceivedAmountCop = cashInjectionCop; // Backend authoritative
+        updateFields.confirmedAmountCop = cashInjectionCop;
+        updateFields.confirmedAt = nowIso;
+        updateFields.confirmedByUid = authUid;
+        updateFields.confirmedByName = adminName;
+        updateFields.externalFundingStatus = "CONFIRMED";
         updateFields.cashReceivedAt = nowIso;
         updateFields.cashReceivedByUid = authUid;
         updateFields.cashReceivedByName = adminName;
@@ -3591,29 +4017,28 @@ exports.adminCloseCycleCallable = onCall(
         const data = d.data() || {};
         if (data.status === "PENDING") {
           pendingCount++;
-        } else if (data.status === "PREAPPROVED") {
-          preapprovedCount++;
         } else if (data.status === "NEEDS_REVIEW") {
           needsReviewCount++;
-        } else if (data.status === "APPROVED") {
-          if (data.appliedAtCycleClosure === true || data.status === "APPLIED") {
+        } else if (data.status === "APPROVED" || data.status === "PREAPPROVED") {
+          if (data.profitAppliedAtCycleClosure === true || data.status === "APPLIED") {
             alreadyAppliedCount++;
           } else {
             approvedCount++;
           }
         } else if (data.status === "REJECTED") {
           rejectedCount++;
-        } else if (data.status === "APPLIED" || data.appliedAtCycleClosure === true) {
+        } else if (data.status === "APPLIED" || data.profitAppliedAtCycleClosure === true) {
           alreadyAppliedCount++;
         }
       });
 
-      // Si existen solicitudes PENDING, PREAPPROVED o NEEDS_REVIEW: ABORTAR SIN ADQUIRIR LOCK
-      if (pendingCount > 0 || preapprovedCount > 0 || needsReviewCount > 0) {
+      // Si existen solicitudes PENDING o NEEDS_REVIEW: ABORTAR SIN ADQUIRIR LOCK
+      // Nota: Solicitudes APPROVED (con aporte externo pendiente o confirmado) NO bloquean el cierre
+      if (pendingCount > 0 || needsReviewCount > 0) {
         return {
           gate1Blocked: true,
           pendingCount,
-          preapprovedCount,
+          preapprovedCount: 0,
           needsReviewCount,
           approvedCount,
           rejectedCount,
@@ -4025,6 +4450,13 @@ exports.adminCloseCycleCallable = onCall(
         }
       }
 
+      const cashInjectionCop = Number(reinvData.cashInjectionCop || 0);
+      const securedNextCapitalCop = currentCapitalSnapshotCop + profitAppliedCop;
+      const projectedNextCapitalCop = securedNextCapitalCop + cashInjectionCop;
+      const securedCategory = getCategoryForCapitalLocal(securedNextCapitalCop);
+      const projectedCategory = getCategoryForCapitalLocal(projectedNextCapitalCop);
+      const externalFundingStatus = cashInjectionCop > 0 ? (reinvData.externalFundingStatus === "CONFIRMED" ? "CONFIRMED" : "PENDING") : "NOT_REQUIRED";
+
       // Toda la validación fue exitosa para este ítem: encolar para aplicación atómica
       pendingItemsToApply.push({
         reinvDocRef: docSnap.ref,
@@ -4035,9 +4467,15 @@ exports.adminCloseCycleCallable = onCall(
         userName: userData.fullName || reinvData.userName || "",
         currentCapitalSnapshotCop,
         actualCurrentCapital,
+        profitAppliedCop,
+        cashInjectionCop,
         totalIncreaseCop,
-        newCapital: projectedCapitalCop,
-        newCategory: getCategoryForCapitalLocal(projectedCapitalCop),
+        securedNextCapitalCop,
+        projectedNextCapitalCop,
+        securedCategory,
+        projectedCategory,
+        hasCash: cashInjectionCop > 0,
+        externalFundingStatus,
         requestVersion: Number(reinvData.requestVersion || 1),
       });
     }
@@ -4090,9 +4528,9 @@ exports.adminCloseCycleCallable = onCall(
     // =========================================================================
     const MAX_FINANCIAL_CLOSE_WRITES = 450;
     // Cálculo exacto de escrituras requeridas en la transacción financiera atómica:
-    // 1 (monthlyCycles/{cycleId}) + 1 (cycleFinancialSummaries/{cycleId}) +
-    // pendingItemsToApply.length (users/{userUid}) + pendingItemsToApply.length (reinvestments/{reinvId})
-    const requiredFinancialWrites = 2 + (pendingItemsToApply.length * 2);
+    // 4 fijos: monthlyCycles/A, monthlyCycles/B, cycleFinancialSummaries/A, settings/global_config
+    // + (2 * N): N users/{uid} + N reinvestments/{reinvId}
+    const requiredFinancialWrites = 4 + (pendingItemsToApply.length * 2);
 
     if (requiredFinancialWrites > MAX_FINANCIAL_CLOSE_WRITES) {
       console.warn(
@@ -4136,11 +4574,17 @@ exports.adminCloseCycleCallable = onCall(
         }
         const freshCycleData = freshCycleSnap.data() || {};
         if (freshCycleData.status === "CLOSED") {
-          throw new Error(`El ciclo ${targetCycleId} ya se encuentra cerrado.`);
+          if (clientRequestId && freshCycleData.lastCloseRequestId === clientRequestId) {
+            return;
+          }
+          throw new Error(`CYCLE_ALREADY_CLOSED: El ciclo ${targetCycleId} ya se encuentra cerrado.`);
         }
         if (freshCycleData.closureAttemptId !== closureAttemptId) {
           throw new Error("Concurrencia: el intento de cierre fue invalidado por otra operación.");
         }
+
+        const newClosureVersion = Number(freshCycleData.closureVersion || 0) + 1;
+        const successorCycleId = freshCycleData.nextCycleId ? String(freshCycleData.nextCycleId).trim() : null;
 
         // 2. Re-verificar cada usuario y solicitud dentro de la transacción
         for (const item of pendingItemsToApply) {
@@ -4157,55 +4601,75 @@ exports.adminCloseCycleCallable = onCall(
           const txUserData = txUserSnap.data() || {};
           const txReinvData = txReinvSnap.data() || {};
 
-          if (txReinvData.appliedAtCycleClosure === true || txReinvData.status === "APPLIED") {
-            continue;
+          let reconStatus = "OK";
+          let reconReason = null;
+          if (txReinvData.externalFundingStatus === "CONFIRMED") {
+            const confirmedAmt = Number(txReinvData.confirmedAmountCop || 0);
+            if (confirmedAmt !== item.cashInjectionCop) {
+              reconStatus = "NEEDS_REVIEW";
+              reconReason = `Aporte verificado de $${confirmedAmt.toLocaleString("es-CO")} COP difiere de la nueva inyección requerida ($${item.cashInjectionCop.toLocaleString("es-CO")} COP).`;
+            }
           }
 
-          if (Number(txUserData.currentCapital) !== item.currentCapitalSnapshotCop) {
-            throw new Error(`Concurrencia: capital drift detectado para ${item.userCode} durante la transacción.`);
-          }
-
-          // ESCRITURA ATÓMICA 1: Usuario (nuevo capital y categoría)
+          // ESCRITURA ATÓMICA 1: Usuario (ASIGNACIÓN ABSOLUTA: base + ganancia aplicada)
           transaction.update(item.userDocRef, {
-            currentCapital: item.newCapital,
-            category: item.newCategory,
+            currentCapital: item.securedNextCapitalCop,
+            category: item.securedCategory,
             updatedAt: nowIso,
             updatedBy: adminName,
           });
 
-          // ESCRITURA ATÓMICA 2: Solicitud de reinversión (pasa formalmente a APPLIED)
+          // ESCRITURA ATÓMICA 2: Solicitud de reinversión
           transaction.update(item.reinvDocRef, {
-            status: "APPLIED",
-            appliedAtCycleClosure: true,
-            appliedAt: nowIso,
+            status: "APPROVED",
+            profitAppliedAtCycleClosure: true,
+            profitAppliedAt: nowIso,
+            appliedClosureVersion: newClosureVersion,
             appliedInCycleId: targetCycleId,
             appliedByUid: authUid,
             appliedByName: adminName,
-            previousCapitalAtApplicationCop: item.actualCurrentCapital,
-            finalCapitalAtApplicationCop: item.newCapital,
+            securedNextCapitalCop: item.securedNextCapitalCop,
+            projectedNextCapitalCop: item.projectedNextCapitalCop,
+            profitAppliedCop: item.profitAppliedCop,
+            cashInjectionCop: item.cashInjectionCop,
+            totalIncreaseCop: item.totalIncreaseCop,
+            externalFundingStatus: txReinvData.externalFundingStatus === "CONFIRMED" ? "CONFIRMED" : item.externalFundingStatus,
+            fundingReconciliationStatus: reconStatus,
+            fundingReconciliationReason: reconReason,
+            previousCapitalAtClosureCop: item.actualCurrentCapital,
+            capitalAfterClosureCop: item.securedNextCapitalCop,
+            updatedAt: nowIso,
           });
 
           appliedReinvestments.push({
-            type: "APPLIED",
+            type: "APPLIED_CLOSURE",
             reinvestmentId: item.reinvId,
             requestVersion: item.requestVersion || 1,
             userUid: item.userUid,
             userCode: item.userCode,
             userName: item.userName,
             previousCapital: item.actualCurrentCapital,
-            newCapital: item.newCapital,
-            newCategory: item.newCategory,
+            securedNextCapital: item.securedNextCapitalCop,
+            projectedCapital: item.projectedNextCapitalCop,
+            securedCategory: item.securedCategory,
+            projectedCategory: item.projectedCategory,
+            profitAppliedCop: item.profitAppliedCop,
+            cashInjectionCop: item.cashInjectionCop,
             totalIncreaseCop: item.totalIncreaseCop,
+            hasCash: item.hasCash,
+            externalFundingStatus: item.externalFundingStatus,
           });
         }
 
-        // ESCRITURA ATÓMICA 3: Cerrar formalmente el ciclo operativo y liberar lock
+        // ESCRITURA ATÓMICA 3: Cerrar formalmente el ciclo operativo A y liberar lock
         transaction.update(cycleRef, {
           status: "CLOSED",
           closedAt: nowIso,
           closedBy: adminName,
           closedByUid: authUid,
           closureNotes: adminNotes || null,
+          closureVersion: newClosureVersion,
+          lastCloseRequestId: clientRequestId || null,
           appliedReinvestmentsCount: pendingItemsToApply.length + alreadyAppliedCount,
           isClosing: false,
           closingStartedAt: null,
@@ -4214,7 +4678,21 @@ exports.adminCloseCycleCallable = onCall(
           closureAttemptId: null,
         });
 
-        // ESCRITURA ATÓMICA 4: Resumen financiero
+        // ESCRITURA ATÓMICA 4: Actualizar ciclo B (sucesores) en la misma transacción
+        if (successorCycleId) {
+          const succRef = db.collection("monthlyCycles").doc(successorCycleId);
+          transaction.set(
+            succRef,
+            {
+              sourceClosureVersion: newClosureVersion,
+              preparationNeedsReview: false,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          );
+        }
+
+        // ESCRITURA ATÓMICA 5: Resumen financiero A
         const summaryRef = db.collection("cycleFinancialSummaries").doc(targetCycleId);
         transaction.set(
           summaryRef,
@@ -4223,6 +4701,19 @@ exports.adminCloseCycleCallable = onCall(
             isCycleClosed: true,
             closedAt: nowIso,
             closedBy: adminName,
+            updatedAt: nowIso,
+          },
+          { merge: true }
+        );
+
+        // ESCRITURA ATÓMICA 6: Punteros globales en settings/global_config
+        const globalConfigRef = db.collection("settings").doc("global_config");
+        transaction.set(
+          globalConfigRef,
+          {
+            operationalCycleId: null,
+            preparingCycleId: successorCycleId || null,
+            activeCycleId: successorCycleId || null,
             updatedAt: nowIso,
           },
           { merge: true }
@@ -4250,25 +4741,35 @@ exports.adminCloseCycleCallable = onCall(
     // Registrar auditoría de aplicaciones y cierre completado
     for (const applied of appliedReinvestments) {
       await db.collection("auditLogs").add({
-        action: "REINVESTMENT_APPLIED_AT_CLOSURE",
+        action: "REINVESTMENT_SECURED_AT_CLOSURE",
         performedBy: authUid,
         performedByName: adminName,
         cycleId: targetCycleId,
         targetEntity: applied.reinvestmentId,
         userUid: applied.userUid,
         previousValue: applied.previousCapital,
-        newValue: applied.newCapital,
+        newValue: applied.securedNextCapital,
         details: {
           userCode: applied.userCode,
           requestVersion: applied.requestVersion || 1,
-          totalIncreaseCop: applied.totalIncreaseCop,
-          newCategory: applied.newCategory,
+          securedNextCapital: applied.securedNextCapital,
+          projectedCapital: applied.projectedCapital,
+          profitAppliedCop: applied.profitAppliedCop,
+          cashInjectionCop: applied.cashInjectionCop,
+          hasCash: applied.hasCash,
+          externalFundingStatus: applied.externalFundingStatus,
+          securedCategory: applied.securedCategory,
         },
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
 
       // Notificación Push determinística al inversionista tras éxito del cierre (Versionada)
-      const notifAppliedId = `notif_reinv_${applied.reinvestmentId}_v${applied.requestVersion || 1}_${targetCycleId}_APPLIED`;
+      const notifAppliedId = `notif_reinv_${applied.reinvestmentId}_v${applied.requestVersion || 1}_${targetCycleId}_CLOSURE`;
+      let notifMsg = `Tu ganancia de $${applied.profitAppliedCop.toLocaleString("es-CO")} COP fue reinvertida formalmente al cierre del ciclo ${targetCycleId}. Tu capital asegurado es de $${applied.securedNextCapital.toLocaleString("es-CO")} COP (${applied.securedCategory}).`;
+      if (applied.hasCash) {
+        notifMsg += ` Tienes un aporte de capital externo de $${applied.cashInjectionCop.toLocaleString("es-CO")} COP pendiente de confirmación bancaria para el próximo ciclo.`;
+      }
+
       await db.collection("notifications").doc(notifAppliedId).set({
         id: notifAppliedId,
         userId: applied.userUid,
@@ -4277,22 +4778,26 @@ exports.adminCloseCycleCallable = onCall(
         userName: applied.userName || "",
         cycleId: targetCycleId,
         type: "REINVESTMENT",
-        title: "¡Capital Actualizado por Cierre de Ciclo!",
-        message: `Tu aumento de capital fue aplicado formalmente en el cierre del ciclo ${targetCycleId}. Tu nuevo capital operativo es de $${applied.newCapital.toLocaleString("es-CO")} COP (${applied.newCategory}).`,
+        title: "¡Capital Asegurado por Cierre de Ciclo!",
+        message: notifMsg,
         actionUrl: "/portfolio",
         payload: {
           reinvestmentId: applied.reinvestmentId,
           requestVersion: applied.requestVersion || 1,
-          status: "APPLIED",
-          newCapital: applied.newCapital,
-          newCategory: applied.newCategory,
-          totalIncreaseCop: applied.totalIncreaseCop,
+          status: "APPROVED",
+          securedNextCapital: applied.securedNextCapital,
+          projectedCapital: applied.projectedCapital,
+          securedCategory: applied.securedCategory,
+          profitAppliedCop: applied.profitAppliedCop,
+          cashInjectionCop: applied.cashInjectionCop,
+          hasCash: applied.hasCash,
+          externalFundingStatus: applied.externalFundingStatus,
         },
         isRead: false,
         sentAt: nowIso,
         readAt: null,
       }).catch((notifErr) => {
-        console.warn(`[adminCloseCycleCallable] Error enviando notificación APPLIED para ${applied.userCode}:`, notifErr);
+        console.warn(`[adminCloseCycleCallable] Error enviando notificación de cierre para ${applied.userCode}:`, notifErr);
       });
     }
 
@@ -4310,6 +4815,8 @@ exports.adminCloseCycleCallable = onCall(
       },
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
     }).catch(() => {});
+
+    // Nota: El ciclo sucesor es creado y gestionado exclusivamente vía adminCreateNextCycleCallable.
 
     // Generación del Snapshot Oficial e Inmutable de Cierre de Ciclo
     let reportVersionId = null;
@@ -4572,6 +5079,34 @@ exports.adminReopenCycleCallable = onCall(
         reopenAudit: existingAudit,
       });
 
+      // Si existe B enlazado y sigue PREPARING, marcar B.preparationNeedsReview = true
+      if (cycleData.nextCycleId) {
+        const succRef = db.collection("monthlyCycles").doc(cycleData.nextCycleId.trim());
+        const succSnap = await transaction.get(succRef);
+        if (succSnap.exists) {
+          const succData = succSnap.data() || {};
+          if (succData.operationalStatus === "PREPARING") {
+            transaction.update(succRef, {
+              preparationNeedsReview: true,
+              updatedAt: nowIso,
+            });
+          }
+        }
+      }
+
+      // Reabrir resumen financiero de A
+      const summaryRef = db.collection("cycleFinancialSummaries").doc(targetCycleId);
+      transaction.set(
+        summaryRef,
+        {
+          cycleId: targetCycleId,
+          isCycleClosed: false,
+          closedAt: null,
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      );
+
       // 2. Registro de Auditoría ATÓMICO en auditLogs
       const auditRef = db.collection("auditLogs").doc();
       transaction.set(auditRef, {
@@ -4601,6 +5136,1315 @@ exports.adminReopenCycleCallable = onCall(
       status: "REOPENED",
       message: `El ciclo ${targetCycleId} fue reabierto exitosamente para ajustes autorizados. El informe previo fue marcado como SUPERSEDED.`,
     };
+  }
+);
+
+/**
+ * Cloud Function HTTPS Callable: Reintento Administrativo de Generación de Informe Oficial
+ * Exclusivo SuperAdmin. Re-ejecuta de forma aislada e idempotente la generación del snapshot
+ * del informe oficial para un ciclo ya CERRADO (CLOSED), sin alterar el estado financiero ni incrementos.
+ */
+exports.adminRetryCycleReportGenerationCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    if (!request.auth || !request.auth.uid) {
+      throw new HttpsError("unauthenticated", "Usuario no autenticado.");
+    }
+
+    const authUid = request.auth.uid;
+    const authEmail = (request.auth.token && request.auth.token.email) ? request.auth.token.email.toLowerCase() : "";
+    const adminDoc = await db.collection("users").doc(authUid).get();
+
+    let isSuperAdmin = false;
+    let adminName = "SuperAdmin";
+
+    if (
+      authUid === "lpx4NLEEMkeh9EJFcG68oPMVdXF2" ||
+      authEmail === "juanes9802@gmail.com" ||
+      authEmail === "elcocalombiano1828@gmail.com" ||
+      (request.auth.token && (request.auth.token.superadmin === true || request.auth.token.role === "superadmin"))
+    ) {
+      isSuperAdmin = true;
+      if (adminDoc.exists && adminDoc.data().fullName) {
+        adminName = adminDoc.data().fullName;
+      }
+    }
+
+    if (!isSuperAdmin) {
+      throw new HttpsError(
+        "permission-denied",
+        "Acceso denegado: Se requieren privilegios canónicos de SuperAdmin para reintentar la generación del informe."
+      );
+    }
+
+    const { cycleId } = request.data || {};
+    if (!cycleId || typeof cycleId !== "string" || !cycleId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'cycleId' es obligatorio.");
+    }
+
+    const targetCycleId = cycleId.trim();
+    const cycleRef = db.collection("monthlyCycles").doc(targetCycleId);
+    const cycleSnap = await cycleRef.get();
+
+    if (!cycleSnap.exists) {
+      throw new HttpsError("not-found", `El ciclo '${targetCycleId}' no existe en Firestore.`);
+    }
+
+    const cycleData = cycleSnap.data() || {};
+    if (cycleData.status !== "CLOSED") {
+      throw new HttpsError(
+        "failed-precondition",
+        `Solo ciclos en estado CLOSED admiten reintento de informe (estado actual: ${cycleData.status || "DESCONOCIDO"}).`
+      );
+    }
+
+    const closureAttemptId = cycleData.lastClosureAttemptId || cycleData.closureAttemptId || `closure_${targetCycleId}_v${cycleData.closureVersion || 1}`;
+
+    let reportResult;
+    try {
+      reportResult = await createCycleReportSnapshot(
+        db,
+        admin,
+        targetCycleId,
+        closureAttemptId,
+        authUid,
+        adminName,
+        cycleData.closureNotes || "Reintento administrativo de informe",
+        false
+      );
+    } catch (err) {
+      console.error("[adminRetryCycleReportGenerationCallable] Error regenerando informe:", err);
+      throw new HttpsError("internal", `Error regenerando el informe del ciclo ${targetCycleId}: ${err.message}`);
+    }
+
+    return {
+      success: true,
+      cycleId: targetCycleId,
+      reportVersionId: reportResult ? reportResult.versionId : null,
+      isIdempotent: Boolean(reportResult && reportResult.isIdempotent),
+      message: `Informe para el ciclo ${targetCycleId} regenerado exitosamente (${reportResult ? reportResult.versionId : "v1"}).`,
+    };
+  }
+);
+
+/**
+ * Cloud Function HTTPS Callable: Confirmación Administrativa de Aporte Externo en Efectivo
+ * Exclusivo SuperAdmin. Valida recepción bancaria exacta del aporte externo en la etapa de preparación (PREPARING).
+ * IMPORTANTE: No modifica users.currentCapital en esta etapa. El capital se activa formalmente en adminStartCycleCallable.
+ */
+exports.adminConfirmExternalContributionCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    if (!request.auth || !request.auth.uid) {
+      throw new HttpsError("unauthenticated", "Usuario no autenticado.");
+    }
+
+    const authUid = request.auth.uid;
+    const authEmail = (request.auth.token && request.auth.token.email) ? request.auth.token.email.toLowerCase() : "";
+    const adminDoc = await db.collection("users").doc(authUid).get();
+
+    // Verificación canónica exclusiva de SuperAdmin
+    let isSuperAdmin = false;
+    let adminName = "SuperAdmin";
+
+    if (
+      authUid === "lpx4NLEEMkeh9EJFcG68oPMVdXF2" ||
+      authEmail === "juanes9802@gmail.com" ||
+      authEmail === "elcocalombiano1828@gmail.com" ||
+      (request.auth.token && (request.auth.token.superadmin === true || request.auth.token.role === "superadmin")) ||
+      (adminDoc.exists && (adminDoc.data().role === "SUPERADMIN" || adminDoc.data().isSuperAdmin === true))
+    ) {
+      isSuperAdmin = true;
+      if (adminDoc.exists && adminDoc.data().fullName) {
+        adminName = adminDoc.data().fullName;
+      }
+    }
+
+    if (!isSuperAdmin) {
+      throw new HttpsError(
+        "permission-denied",
+        "Acceso denegado: Se requieren privilegios canónicos de SuperAdmin para confirmar aportes externos."
+      );
+    }
+
+    const { cycleId, reinvestmentId, confirmedAmountCop, bankReference, notes } = request.data || {};
+
+    if (!cycleId || typeof cycleId !== "string" || !cycleId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'cycleId' es obligatorio.");
+    }
+    if (!reinvestmentId || typeof reinvestmentId !== "string" || !reinvestmentId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'reinvestmentId' es obligatorio.");
+    }
+
+    const confirmedAmount = Math.round(Number(confirmedAmountCop));
+    if (isNaN(confirmedAmount) || confirmedAmount <= 0) {
+      throw new HttpsError("invalid-argument", "El monto confirmado debe ser un número entero positivo mayor a cero.");
+    }
+
+    const targetCycleId = cycleId.trim();
+    const cleanReinvId = reinvestmentId.trim();
+    const nowIso = new Date().toISOString();
+
+    // 1. Transacción atómica sobre la solicitud canónica y ciclos A y B
+    const reinvRef = db.collection("reinvestments").doc(cleanReinvId);
+    let targetUid = "";
+    let userCode = "";
+    let userName = "";
+    let requiredCashCop = 0;
+
+    await db.runTransaction(async (transaction) => {
+      const reinvSnap = await transaction.get(reinvRef);
+      if (!reinvSnap.exists) {
+        throw new HttpsError("not-found", `La solicitud de reinversión ${cleanReinvId} no existe.`);
+      }
+
+      const reinvData = reinvSnap.data() || {};
+      targetUid = reinvData.userId || reinvData.userUid || "";
+      userCode = reinvData.userCode || "";
+      userName = reinvData.userName || "";
+
+      // Guard targetCycleId
+      if (reinvData.targetCycleId && reinvData.targetCycleId.trim() !== targetCycleId) {
+        throw new HttpsError("failed-precondition", `CYCLE_LINK_MISMATCH: La solicitud está vinculada al ciclo objetivo ${reinvData.targetCycleId}, no a ${targetCycleId}.`);
+      }
+
+      // Validar B
+      const cycleBRef = db.collection("monthlyCycles").doc(targetCycleId);
+      const cycleBSnap = await transaction.get(cycleBRef);
+      if (!cycleBSnap.exists) {
+        throw new HttpsError("not-found", `El ciclo objetivo ${targetCycleId} no existe.`);
+      }
+      const cycleBData = cycleBSnap.data() || {};
+      if (cycleBData.status !== "OPEN") {
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_OPEN: El ciclo objetivo ${targetCycleId} debe estar OPEN.`);
+      }
+      if (cycleBData.operationalStatus !== "PREPARING") {
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_PREPARING: El ciclo objetivo ${targetCycleId} debe estar en PREPARING.`);
+      }
+      if (!cycleBData.previousCycleId) {
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NO_PREVIOUS: El ciclo objetivo ${targetCycleId} no tiene ciclo previo.`);
+      }
+
+      // Validar A
+      const sourceCycleId = cycleBData.previousCycleId;
+      const cycleARef = db.collection("monthlyCycles").doc(sourceCycleId);
+      const cycleASnap = await transaction.get(cycleARef);
+      if (!cycleASnap.exists) {
+        throw new HttpsError("not-found", `El ciclo previo ${sourceCycleId} no existe.`);
+      }
+      const cycleAData = cycleASnap.data() || {};
+      if (cycleAData.status !== "CLOSED") {
+        throw new HttpsError("failed-precondition", `PREDECESSOR_CYCLE_NOT_CLOSED: El ciclo previo ${sourceCycleId} debe estar CLOSED.`);
+      }
+      if (cycleAData.nextCycleId !== targetCycleId) {
+        throw new HttpsError("failed-precondition", `CYCLE_LINK_MISMATCH: A.nextCycleId (${cycleAData.nextCycleId}) debe coincidir con B (${targetCycleId}).`);
+      }
+
+      if (reinvData.status !== "APPROVED" && reinvData.status !== "PREAPPROVED") {
+        throw new HttpsError(
+          "failed-precondition",
+          `La solicitud debe estar en estado APPROVED para confirmar su aporte externo (estado actual: ${reinvData.status}).`
+        );
+      }
+
+      requiredCashCop = Math.round(Number(reinvData.cashInjectionCop || 0));
+      if (requiredCashCop <= 0) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Esta solicitud no requiere aporte externo de dinero nuevo (cashInjectionCop es 0)."
+        );
+      }
+
+      const currentFundingStatus = reinvData.externalFundingStatus || "PENDING";
+      if (currentFundingStatus !== "PENDING") {
+        if (currentFundingStatus === "CONFIRMED" && Number(reinvData.confirmedAmountCop) === confirmedAmount) {
+          return;
+        }
+        throw new HttpsError(
+          "failed-precondition",
+          `EXTERNAL_FUNDING_NOT_PENDING: El estado del aporte externo es '${currentFundingStatus}', se requiere PENDING.`
+        );
+      }
+
+      // REGLA FINANCIERA ESTRICTA: NO SE ADMITEN APORTES PARCIALES
+      if (confirmedAmount !== requiredCashCop) {
+        throw new HttpsError(
+          "invalid-argument",
+          `INVALID_CONFIRMATION_AMOUNT: El aporte externo requerido es de exactamente $${requiredCashCop.toLocaleString("es-CO")} COP. No se permiten montos parciales ($${confirmedAmount.toLocaleString("es-CO")} COP). El aporte continúa en estado PENDING hasta recibir el valor exacto completo.`
+        );
+      }
+
+      // Actualizar solicitud de reinversión con confirmación bancaria
+      // IMPORTANTE: NO TOCAR users.currentCapital. El capital se activa en adminStartCycleCallable
+      transaction.update(reinvRef, {
+        externalFundingStatus: "CONFIRMED",
+        confirmedAmountCop: confirmedAmount,
+        confirmedAt: nowIso,
+        confirmedByUid: authUid,
+        confirmedByName: adminName,
+        bankReference: (bankReference || "").trim(),
+        notes: notes ? (reinvData.notes ? `${reinvData.notes} | ${notes.trim()}` : notes.trim()) : (reinvData.notes || ""),
+        updatedAt: nowIso,
+      });
+    });
+
+    // 3. Registrar auditoría autoritativa
+    await db.collection("auditLogs").add({
+      action: "EXTERNAL_CONTRIBUTION_CONFIRMED",
+      performedBy: authUid,
+      performedByName: adminName,
+      cycleId: targetCycleId,
+      targetEntity: cleanReinvId,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      details: {
+        reinvestmentId: cleanReinvId,
+        userUid: targetUid,
+        userCode,
+        userName,
+        confirmedAmountCop: confirmedAmount,
+        requiredCashCop,
+        bankReference: bankReference ? bankReference.trim() : null,
+      },
+    }).catch(() => {});
+
+    // 4. Notificación determinística al inversionista
+    if (targetUid) {
+      const notifId = `notif_ext_cash_${cleanReinvId}_confirmed`;
+      await db.collection("notifications").doc(notifId).set({
+        id: notifId,
+        userId: targetUid,
+        userUid: targetUid,
+        userCode,
+        userName,
+        cycleId: targetCycleId,
+        type: "REINVESTMENT",
+        title: "✅ Aporte Externo Confirmado",
+        message: `Se ha verificado la recepción de tu aporte externo por $${confirmedAmount.toLocaleString("es-CO")} COP. Será activado al iniciar formalmente el ciclo operativo ${targetCycleId}.`,
+        read: false,
+        sentAt: nowIso,
+        createdAt: nowIso,
+        payload: {
+          reinvestmentId: cleanReinvId,
+          confirmedAmountCop: confirmedAmount,
+        },
+      }, { merge: true }).catch((err) => {
+        console.warn("[adminConfirmExternalContributionCallable] Error enviando notificación:", err);
+      });
+    }
+
+    return {
+      success: true,
+      cycleId: targetCycleId,
+      reinvestmentId: cleanReinvId,
+      externalFundingStatus: "CONFIRMED",
+      confirmedAmountCop: confirmedAmount,
+      message: `Aporte externo de $${confirmedAmount.toLocaleString("es-CO")} COP verificado exitosamente. Será activado al iniciar formalmente el ciclo operativo.`,
+    };
+  }
+);
+
+/**
+ * Cloud Function HTTPS Callable: Resolver Conciliación de Aporte de Inyección
+ * Exclusivo SuperAdmin. Permite resolver discrepancias entre confirmedAmountCop y cashInjectionCop.
+ */
+exports.adminResolveFundingReconciliationCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    // 1. Verificar SuperAdmin
+    const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
+    const adminName = createdByName || "SuperAdmin";
+
+    const data = request.data || {};
+    const { requestId, resolution, notes = "", clientRequestId } = data;
+
+    if (!requestId || typeof requestId !== "string" || !requestId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'requestId' es obligatorio.");
+    }
+    if (!resolution || typeof resolution !== "string" || !resolution.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'resolution' es obligatorio.");
+    }
+    if (!clientRequestId || typeof clientRequestId !== "string" || !clientRequestId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'clientRequestId' es obligatorio.");
+    }
+
+    const cleanRequestId = requestId.trim();
+    const cleanResolution = resolution.trim();
+    const cleanClientRequestId = clientRequestId.trim();
+
+    // Idempotencia
+    const idemRef = db.collection("idempotencyKeys").doc(`resolve_recon_${cleanClientRequestId}`);
+    const reinvRef = db.collection("reinvestments").doc(cleanRequestId);
+
+    let resultMsg = "";
+    await db.runTransaction(async (transaction) => {
+      const [idemSnap, reinvSnap] = await Promise.all([
+        transaction.get(idemRef),
+        transaction.get(reinvRef),
+      ]);
+
+      if (idemSnap.exists) {
+        const idxData = idemSnap.data() || {};
+        resultMsg = idxData.message || "Operación de conciliación resuelta con éxito (Idempotente).";
+        return;
+      }
+
+      if (!reinvSnap.exists) {
+        throw new HttpsError("not-found", `La solicitud ${cleanRequestId} no existe.`);
+      }
+
+      const reinvData = reinvSnap.data() || {};
+      if (reinvData.fundingReconciliationStatus !== "NEEDS_REVIEW") {
+        throw new HttpsError("failed-precondition", `La solicitud no está en estado NEEDS_REVIEW (estado actual: ${reinvData.fundingReconciliationStatus || 'OK'}).`);
+      }
+
+      // Reglas inmutables:
+      // NO borrar/modificar: confirmedAmountCop, bankReference, confirmedAt, confirmedByUid, confirmedByName
+      // NO convertir automáticamente una discrepancia en OK.
+      // NO cambiar users.currentCapital durante la conciliación.
+      
+      const confirmedAmount = Number(reinvData.confirmedAmountCop || 0);
+      const requiredCash = Number(reinvData.cashInjectionCop || 0);
+
+      if (cleanResolution === "RESOLVE_MATCHING") {
+        if (confirmedAmount === requiredCash) {
+          // Coinciden, podemos pasar a OK!
+          transaction.update(reinvRef, {
+            fundingReconciliationStatus: "OK",
+            fundingReconciliationReason: null,
+            notes: notes ? (reinvData.notes ? `${reinvData.notes} | RESOLVED: ${notes.trim()}` : `RESOLVED: ${notes.trim()}`) : (reinvData.notes || ""),
+            updatedAt: new Date().toISOString(),
+          });
+          resultMsg = "Conciliación resuelta exitosamente: El aporte verificado coincide matemáticamente con la inyección requerida.";
+        } else {
+          throw new HttpsError(
+            "failed-precondition",
+            `RECONCILIATION_AMOUNT_MISMATCH: El aporte verificado ($${confirmedAmount.toLocaleString("es-CO")} COP) no coincide con el capital requerido ($${requiredCash.toLocaleString("es-CO")} COP). Para resolver esta discrepancia se requiere reversión administrativa o ajuste manual futuro.`
+          );
+        }
+      } else if (cleanResolution === "KEEP_REVIEW") {
+        // Mantener en revisión
+        transaction.update(reinvRef, {
+          notes: notes ? (reinvData.notes ? `${reinvData.notes} | REVIEW_NOTE: ${notes.trim()}` : `REVIEW_NOTE: ${notes.trim()}`) : (reinvData.notes || ""),
+          updatedAt: new Date().toISOString(),
+        });
+        resultMsg = "Nota de revisión agregada. La solicitud continúa en NEEDS_REVIEW.";
+      } else {
+        throw new HttpsError("invalid-argument", `Resolución '${cleanResolution}' no soportada en la Estrategia V1.`);
+      }
+
+      // Registrar idempotencia
+      transaction.set(idemRef, {
+        clientRequestId: cleanClientRequestId,
+        requestId: cleanRequestId,
+        resolution: cleanResolution,
+        message: resultMsg,
+        resolvedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    // Auditoría
+    await db.collection("auditLogs").add({
+      action: "RECONCILIATION_RESOLVED",
+      performedBy: authUid,
+      performedByName: adminName,
+      targetEntity: cleanRequestId,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      details: {
+        requestId: cleanRequestId,
+        resolution: cleanResolution,
+        message: resultMsg,
+      },
+    }).catch(() => {});
+
+    return {
+      success: true,
+      message: resultMsg,
+    };
+  }
+);
+
+/**
+ * Cloud Function HTTPS Callable: Radicar Solicitud de Desembolso (Exclusivo SuperAdmin)
+ * Permite que la administración registre solicitudes de desembolso de forma autoritativa.
+ */
+exports.adminRequestDisbursementCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    // 1. Verificar SuperAdmin
+    const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
+    const adminName = createdByName || "SuperAdmin";
+
+    const data = request.data || {};
+    const {
+      userId,
+      sourceCycleId,
+      amountCop,
+      disbursementSource = "PROFIT",
+      method,
+      bankName = "",
+      accountType = "",
+      accountNumber = "",
+      accountHolderName = "",
+      idDocument = "",
+      cashOffice = "",
+      receiverId = "",
+      receiverFullName = "",
+      notes = "",
+      clientRequestId,
+    } = data;
+
+    if (!clientRequestId || typeof clientRequestId !== "string" || !clientRequestId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'clientRequestId' es obligatorio para prevenir duplicados.");
+    }
+    if (!userId || typeof userId !== "string" || !userId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'userId' es obligatorio.");
+    }
+    if (!sourceCycleId || typeof sourceCycleId !== "string" || !sourceCycleId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'sourceCycleId' es obligatorio.");
+    }
+    
+    const amt = Math.round(Number(amountCop));
+    if (isNaN(amt) || amt <= 0) {
+      throw new HttpsError("invalid-argument", "El monto de desembolso debe ser mayor a $0 COP.");
+    }
+
+    const cleanUserId = userId.trim();
+    const cleanCycleId = sourceCycleId.trim();
+    const cleanMethod = String(method || "TRANSFERENCIA").trim().toUpperCase();
+    const cleanClientRequestId = clientRequestId.trim();
+
+    // Idempotencia
+    const idemRef = db.collection("idempotencyKeys").doc(`disb_req_${cleanClientRequestId}`);
+    const id = `disb_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const disbRef = db.collection("disbursements").doc(id);
+
+    let savedRequest = null;
+    let messageResult = "";
+
+    await db.runTransaction(async (transaction) => {
+      const idemSnap = await transaction.get(idemRef);
+      if (idemSnap.exists) {
+        const idxData = idemSnap.data() || {};
+        savedRequest = idxData.disbursement;
+        messageResult = "Solicitud de desembolso recuperada exitosamente (Idempotente).";
+        return;
+      }
+
+      // Validar usuario
+      const userSnap = await db.collection("users").doc(cleanUserId).get();
+      if (!userSnap.exists) {
+        throw new HttpsError("not-found", "Inversionista no encontrado.");
+      }
+      const userData = userSnap.data() || {};
+
+      const nowIso = new Date().toISOString();
+      const newRequest = {
+        id,
+        userId: cleanUserId,
+        userUid: cleanUserId,
+        userCode: userData.userCode || "",
+        userName: userData.fullName || "",
+        sourceCycleId: cleanCycleId,
+        amountCop: amt,
+        disbursementSource,
+        method: cleanMethod,
+        bankName: cleanMethod === "TRANSFERENCIA" ? bankName.trim() : null,
+        accountType: cleanMethod === "TRANSFERENCIA" ? accountType.trim() : null,
+        accountNumber: cleanMethod === "TRANSFERENCIA" ? accountNumber.trim() : null,
+        accountHolderName: cleanMethod === "TRANSFERENCIA" ? accountHolderName.trim() : null,
+        idDocument: idDocument.trim(),
+        cashOffice: cleanMethod === "EFECTIVO" ? (cashOffice.trim() || "Sede Principal de Tesorería") : null,
+        receiverId: cleanMethod === "EFECTIVO" ? (receiverId.trim() || idDocument.trim()) : null,
+        receiverFullName: cleanMethod === "EFECTIVO" ? (receiverFullName.trim() || userData.fullName) : null,
+        status: "PENDING",
+        createdAt: nowIso,
+        resolvedAt: null,
+        resolvedBy: null,
+        notes: notes.trim(),
+        clientRequestId: cleanClientRequestId,
+      };
+
+      // Guardar directamente en Firestore desde la transacción
+      transaction.set(disbRef, newRequest);
+
+      // Registrar llave de idempotencia
+      transaction.set(idemRef, {
+        clientRequestId: cleanClientRequestId,
+        disbursement: newRequest,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      savedRequest = newRequest;
+      messageResult = `Solicitud de desembolso radicada exitosamente con código ${id}.`;
+    });
+
+    if (messageResult.includes("(Idempotente)")) {
+      return {
+        success: true,
+        disbursement: savedRequest,
+        message: messageResult,
+      };
+    }
+
+    // Acciones secundarias no transaccionales de cara a auditoría y notificaciones
+    if (savedRequest) {
+      const nowIso = new Date().toISOString();
+      // Registro de Auditoría
+      await db.collection("auditLogs").add({
+        action: "DISBURSEMENT_REQUESTED",
+        performedBy: authUid,
+        performedByName: adminName,
+        cycleId: cleanCycleId,
+        targetEntity: id,
+        newValue: amt,
+        timestamp: nowIso,
+        details: {
+          method: cleanMethod,
+          amountCop: amt,
+          userCode: savedRequest.userCode,
+          userName: savedRequest.userName,
+          clientRequestId: cleanClientRequestId,
+        },
+      }).catch(() => {});
+
+      // Notificación determinística al inversionista
+      const notifId = `notif_disb_req_${id}`;
+      await db.collection("notifications").doc(notifId).set({
+        id: notifId,
+        userId: cleanUserId,
+        userUid: cleanUserId,
+        userCode: savedRequest.userCode || "",
+        userName: savedRequest.userName || "",
+        cycleId: cleanCycleId,
+        type: "DISBURSEMENT",
+        title: "Solicitud de Desembolso Radicada",
+        message: `Tu solicitud de desembolso por $${amt.toLocaleString("es-CO")} COP (${
+          cleanMethod === "EFECTIVO" ? "Efectivo en Taquilla" : "Transferencia Bancaria"
+        }) fue radicada con éxito por administración.`,
+        payload: {
+          cycleId: cleanCycleId,
+          usdAmount: 0,
+          copAmount: amt,
+          userProfitCop: 0,
+        },
+        isRead: false,
+        sentAt: nowIso,
+        readAt: null,
+      }).catch(() => {});
+    }
+
+    return {
+      success: true,
+      disbursement: savedRequest,
+      message: messageResult,
+    };
+  }
+);
+
+/**
+ * Cloud Function HTTPS Callable: Resolver Solicitud de Desembolso (Exclusivo SuperAdmin)
+ * Permite que la administración apruebe, liquide (pague) o rechace un desembolso.
+ */
+exports.adminResolveDisbursementCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    // 1. Verificar SuperAdmin
+    const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
+    const adminName = createdByName || "SuperAdmin";
+
+    const data = request.data || {};
+    const { requestId, action, notes = "", voucher = "" } = data;
+
+    if (!requestId || typeof requestId !== "string" || !requestId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'requestId' es obligatorio.");
+    }
+    if (!action || typeof action !== "string" || !action.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'action' es obligatorio.");
+    }
+
+    const cleanRequestId = requestId.trim();
+    const cleanAction = action.trim().toUpperCase(); // APPROVE, PAY, REJECT
+    const nowIso = new Date().toISOString();
+
+    const disbRef = db.collection("disbursements").doc(cleanRequestId);
+    let updatedDisb = null;
+
+    await db.runTransaction(async (transaction) => {
+      const disbSnap = await transaction.get(disbRef);
+      if (!disbSnap.exists) {
+        throw new HttpsError("not-found", "La solicitud de desembolso no existe.");
+      }
+
+      const disbData = disbSnap.data() || {};
+      
+      if (cleanAction === "APPROVE") {
+        if (disbData.status !== "PENDING") {
+          throw new HttpsError("failed-precondition", `La solicitud ya no está PENDING (estado actual: ${disbData.status}).`);
+        }
+        updatedDisb = {
+          ...disbData,
+          status: "APPROVED",
+          resolvedAt: nowIso,
+          resolvedBy: adminName,
+          updatedAt: nowIso,
+        };
+        transaction.set(disbRef, updatedDisb);
+      } else if (cleanAction === "PAY") {
+        if (disbData.status !== "APPROVED") {
+          throw new HttpsError("failed-precondition", `Solo las solicitudes en estado APPROVED pueden ser liquidadas (PAID) (estado actual: ${disbData.status}).`);
+        }
+        updatedDisb = {
+          ...disbData,
+          status: "PAID",
+          resolvedAt: nowIso,
+          resolvedBy: adminName,
+          paidAt: nowIso,
+          paymentVoucher: voucher.trim() || null,
+          notes: voucher.trim() ? `${disbData.notes ? disbData.notes + " | " : ""}Liquidado: ${voucher.trim()}` : disbData.notes,
+          updatedAt: nowIso,
+        };
+        transaction.set(disbRef, updatedDisb);
+      } else if (cleanAction === "REJECT") {
+        if (disbData.status !== "PENDING") {
+          throw new HttpsError("failed-precondition", `Solo las solicitudes en estado PENDING pueden ser rechazadas (estado actual: ${disbData.status}).`);
+        }
+        updatedDisb = {
+          ...disbData,
+          status: "REJECTED",
+          resolvedAt: nowIso,
+          resolvedBy: adminName,
+          rejectionReason: notes.trim() || null,
+          notes: notes.trim() ? `${disbData.notes ? disbData.notes + " | " : ""}Rechazo: ${notes.trim()}` : disbData.notes,
+          updatedAt: nowIso,
+        };
+        transaction.set(disbRef, updatedDisb);
+      } else {
+        throw new HttpsError("invalid-argument", `Acción '${cleanAction}' no soportada.`);
+      }
+    });
+
+    // Auditoría
+    await db.collection("auditLogs").add({
+      action: `DISBURSEMENT_${cleanAction}D`,
+      performedBy: authUid,
+      performedByName: adminName,
+      targetEntity: cleanRequestId,
+      timestamp: nowIso,
+      details: {
+        requestId: cleanRequestId,
+        amountCop: updatedDisb.amountCop,
+        userCode: updatedDisb.userCode,
+      },
+    }).catch(() => {});
+
+    // Notificación
+    let title = "";
+    let message = "";
+    if (cleanAction === "APPROVE") {
+      title = "¡Desembolso Aprobado!";
+      message = `Tu desembolso por $${updatedDisb.amountCop.toLocaleString("es-CO")} COP ha sido aprobado por Tesorería.`;
+    } else if (cleanAction === "PAY") {
+      title = "¡Desembolso Liquidado y Entregado!";
+      message = `Tu desembolso por $${updatedDisb.amountCop.toLocaleString("es-CO")} COP ha sido procesado y entregado exitosamente.`;
+    } else if (cleanAction === "REJECT") {
+      title = "Solicitud de Desembolso Rechazada";
+      message = `Tu solicitud de desembolso por $${updatedDisb.amountCop.toLocaleString("es-CO")} COP no pudo ser tramitada.`;
+    }
+
+    if (updatedDisb && updatedDisb.userId) {
+      const notifId = `notif_disb_res_${cleanRequestId}_${cleanAction.toLowerCase()}`;
+      await db.collection("notifications").doc(notifId).set({
+        id: notifId,
+        userId: updatedDisb.userId,
+        userUid: updatedDisb.userId,
+        userCode: updatedDisb.userCode || "",
+        userName: updatedDisb.userName || "",
+        cycleId: updatedDisb.sourceCycleId || "",
+        type: "DISBURSEMENT",
+        title,
+        message,
+        payload: {
+          copAmount: updatedDisb.amountCop,
+        },
+        isRead: false,
+        sentAt: nowIso,
+        readAt: null,
+      }).catch(() => {});
+    }
+
+    return {
+      success: true,
+      disbursement: updatedDisb,
+      message: `Desembolso resuelto con éxito (${cleanAction}).`,
+    };
+  }
+);
+
+/**
+ * Cloud Function HTTPS Callable: Inicio Operativo Atómico de Ciclo (Freeze de Capitales)
+ * Exclusivo SuperAdmin. Transición autoritativa: PREPARING -> STARTED.
+ * Realiza congelamiento atómico de capitales en cycleUserResults y activa aportes externos confirmados.
+ * Si requiredStartWrites > 450, aborta estrictamente antes de modificar ningún documento.
+ */
+exports.adminStartCycleCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    if (!request.auth || !request.auth.uid) {
+      throw new HttpsError("unauthenticated", "Usuario no autenticado.");
+    }
+
+    const authUid = request.auth.uid;
+    const authEmail = (request.auth.token && request.auth.token.email) ? request.auth.token.email.toLowerCase() : "";
+    const adminDoc = await db.collection("users").doc(authUid).get();
+
+    // Verificación canónica exclusiva de SuperAdmin
+    let isSuperAdmin = false;
+    let adminName = "SuperAdmin";
+
+    if (
+      authUid === "lpx4NLEEMkeh9EJFcG68oPMVdXF2" ||
+      authEmail === "juanes9802@gmail.com" ||
+      authEmail === "elcocalombiano1828@gmail.com" ||
+      (request.auth.token && (request.auth.token.superadmin === true || request.auth.token.role === "superadmin")) ||
+      (adminDoc.exists && (adminDoc.data().role === "SUPERADMIN" || adminDoc.data().isSuperAdmin === true))
+    ) {
+      isSuperAdmin = true;
+      if (adminDoc.exists && adminDoc.data().fullName) {
+        adminName = adminDoc.data().fullName;
+      }
+    }
+
+    if (!isSuperAdmin) {
+      throw new HttpsError(
+        "permission-denied",
+        "Acceso denegado: Se requieren privilegios canónicos de SuperAdmin para iniciar operativamente un ciclo."
+      );
+    }
+
+    const { cycleId, clientRequestId } = request.data || {};
+    if (!cycleId || typeof cycleId !== "string" || !cycleId.trim()) {
+      throw new HttpsError("invalid-argument", "El parámetro 'cycleId' es obligatorio.");
+    }
+
+    const targetCycleId = cycleId.trim();
+    const cycleRef = db.collection("monthlyCycles").doc(targetCycleId);
+    const nowIso = new Date().toISOString();
+    const startAttemptId = crypto.randomUUID();
+
+    // 1. Verificación preliminar y adquisición de Lock de Inicio (isStarting)
+    const initialCycleSnap = await cycleRef.get();
+    if (!initialCycleSnap.exists) {
+      throw new HttpsError("not-found", `El ciclo ${targetCycleId} no existe.`);
+    }
+
+    const initialCycleData = initialCycleSnap.data() || {};
+
+    if (initialCycleData.status !== "OPEN" && initialCycleData.status !== "REOPENED") {
+      throw new HttpsError(
+        "failed-precondition",
+        `El ciclo ${targetCycleId} está en estado '${initialCycleData.status}' (solo ciclos OPEN o REOPENED pueden iniciarse).`
+      );
+    }
+
+    if (initialCycleData.operationalStatus === "STARTED") {
+      // Idempotencia: si ya está STARTED con el mismo clientRequestId, retornar éxito
+      if (clientRequestId && initialCycleData.lastStartRequestId === clientRequestId) {
+        return {
+          success: true,
+          cycleId: targetCycleId,
+          alreadyStarted: true,
+          operationalStatus: "STARTED",
+          startedAt: initialCycleData.startedAt,
+          initialManagedCapitalCop: initialCycleData.initialManagedCapitalCop || 0,
+          initialActiveUsersCount: initialCycleData.initialActiveUsersCount || 0,
+          message: `El ciclo ${targetCycleId} ya fue iniciado operativamente previamente (idempotente).`,
+        };
+      }
+      throw new HttpsError(
+        "failed-precondition",
+        `CYCLE_ALREADY_STARTED: El ciclo ${targetCycleId} ya fue iniciado operativamente en ${initialCycleData.startedAt || "fecha previa"}.`
+      );
+    }
+
+    // Adquisición del Lock de Inicio con protección contra procesos concurrentes
+    await db.runTransaction(async (transaction) => {
+      const cSnap = await transaction.get(cycleRef);
+      if (!cSnap.exists) {
+        throw new HttpsError("not-found", `El ciclo ${targetCycleId} no existe.`);
+      }
+      const cData = cSnap.data() || {};
+      if (cData.operationalStatus === "STARTED") {
+        if (clientRequestId && cData.lastStartRequestId === clientRequestId) return;
+        throw new HttpsError("failed-precondition", "El ciclo ya fue iniciado por otro administrador.");
+      }
+      if (cData.isStarting === true) {
+        const lockAgeMs = cData.startingStartedAt ? Date.now() - new Date(cData.startingStartedAt).getTime() : 0;
+        if (lockAgeMs < 120000) {
+          throw new HttpsError(
+            "failed-precondition",
+            "START_LOCK_ACTIVE: El ciclo ya tiene una inicialización en progreso. Por favor espera a que finalice."
+          );
+        }
+      }
+
+      transaction.update(cycleRef, {
+        isStarting: true,
+        startingStartedAt: nowIso,
+        startingByUid: authUid,
+        startingByName: adminName,
+        startAttemptId,
+      });
+    });
+
+    const safelyReleaseStartLock = async () => {
+      try {
+        await cycleRef.update({
+          isStarting: false,
+          startingStartedAt: null,
+          startingByUid: null,
+          startingByName: null,
+          startAttemptId: null,
+        });
+      } catch (err) {
+        console.error("[adminStartCycleCallable] Error liberando start lock:", err);
+      }
+    };
+
+    try {
+      // 1. Validar ciclo B
+      const cycleBData = initialCycleData;
+      if (cycleBData.operationalStatus !== "PREPARING") {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_PREPARING: El ciclo ${targetCycleId} debe estar en estado PREPARING.`);
+      }
+      if (!cycleBData.previousCycleId) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `CYCLE_LINK_MISMATCH: El ciclo ${targetCycleId} no especifica un ciclo previo.`);
+      }
+
+      // 2. Validar ciclo A (predecesor)
+      const sourceCycleId = cycleBData.previousCycleId;
+      const cycleARef = db.collection("monthlyCycles").doc(sourceCycleId);
+      const cycleASnap = await cycleARef.get();
+      if (!cycleASnap.exists) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("not-found", `CYCLE_LINK_MISMATCH: El ciclo previo ${sourceCycleId} no existe.`);
+      }
+      const cycleAData = cycleASnap.data() || {};
+      if (cycleAData.status !== "CLOSED") {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `PREVIOUS_CYCLE_NOT_CLOSED: El ciclo previo ${sourceCycleId} debe estar CLOSED.`);
+      }
+      if (cycleAData.nextCycleId !== targetCycleId) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `CYCLE_LINK_MISMATCH: A.nextCycleId (${cycleAData.nextCycleId}) debe coincidir con B (${targetCycleId}).`);
+      }
+
+      if (Number(cycleBData.sourceClosureVersion) !== Number(cycleAData.closureVersion)) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `STALE_PREPARATION_STATE: Versión de cierre (${cycleAData.closureVersion}) difiere de B (${cycleBData.sourceClosureVersion}).`);
+      }
+
+      if (cycleBData.preparationNeedsReview === true) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `PREPARATION_NEEDS_REVIEW: El ciclo B requiere revisión por reapertura del ciclo A.`);
+      }
+
+      // TRM Guard
+      const trmAppliedNum = Number(cycleBData.trmApplied);
+      if (!Number.isFinite(trmAppliedNum) || trmAppliedNum <= 0) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `INVALID_CYCLE_TRM: El ciclo ${targetCycleId} requiere una TRM válida mayor a cero.`);
+      }
+
+      // GUARD 1: dailyOperations
+      const existingOpsSnap = await db.collection("dailyOperations")
+        .where("cycleId", "==", targetCycleId)
+        .limit(1)
+        .get();
+
+      if (!existingOpsSnap.empty) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", "CYCLE_HAS_EXISTING_OPERATIONS: El ciclo ya contiene operaciones.");
+      }
+
+      // GUARD 2: cycleUserResults
+      const existingResultsSnap = await db.collection("cycleUserResults")
+        .where("cycleId", "==", targetCycleId)
+        .get();
+
+      if (!existingResultsSnap.empty) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `CYCLE_RESULTS_ALREADY_INITIALIZED: Se detectaron resultados previos para el ciclo ${targetCycleId}.`);
+      }
+
+      // GUARD 3: cycleFinancialSummaries
+      const existingSummarySnap = await db.collection("cycleFinancialSummaries").doc(targetCycleId).get();
+      if (existingSummarySnap.exists && existingSummarySnap.data().isCycleClosed === false && existingSummarySnap.data().startedAt) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `CYCLE_FINANCIAL_SUMMARY_ALREADY_INITIALIZED: El resumen financiero ya existe para ${targetCycleId}.`);
+      }
+
+      // GUARD 4: Funding Reconciliation Guard
+      const reinvSnap = await db.collection("reinvestments").where("targetCycleId", "==", targetCycleId).get();
+      const reinvDocsMap = new Map();
+      let hasUnresolvedRecon = false;
+
+      reinvSnap.forEach((doc) => {
+        const d = doc.data() || {};
+        reinvDocsMap.set(doc.id, { id: doc.id, ref: doc.ref, ...d });
+        if (d.fundingReconciliationStatus === "NEEDS_REVIEW") {
+          hasUnresolvedRecon = true;
+        }
+      });
+
+      if (hasUnresolvedRecon) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `UNRESOLVED_FUNDING_RECONCILIATION: Existen solicitudes con conciliación pendiente (NEEDS_REVIEW).`);
+      }
+
+      // GUARD 5: Pending or Needs Review requests
+      const blockingRequests = [];
+      reinvDocsMap.forEach((req) => {
+        if (req.status === "PENDING" || req.status === "NEEDS_REVIEW") {
+          blockingRequests.push(req.id);
+        }
+      });
+      if (blockingRequests.length > 0) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", `PENDING_REQUESTS_BLOCK_START: Existen ${blockingRequests.length} solicitudes en estado PENDING o NEEDS_REVIEW.`);
+      }
+
+      // Cohort A: cycleUserResults from cycle A
+      const prevResultsSnap = await db.collection("cycleUserResults").where("cycleId", "==", sourceCycleId).get();
+      const prevUserResultsMap = new Map();
+      prevResultsSnap.forEach((dSnap) => {
+        const d = dSnap.data() || {};
+        const uid = d.userId || d.userUid;
+        if (uid) prevUserResultsMap.set(uid, d);
+      });
+
+      // Cohort B: users with entryCycleId == B
+      const newEntriesSnap = await db.collection("users").where("entryCycleId", "==", targetCycleId).get();
+      const newEntriesMap = new Map();
+      newEntriesSnap.forEach((uSnap) => {
+        newEntriesMap.set(uSnap.id, { id: uSnap.id, ref: uSnap.ref, ...uSnap.data() });
+      });
+
+      // Union of unique user UIDs
+      const participantUids = new Set([...prevUserResultsMap.keys(), ...newEntriesMap.keys()]);
+
+      if (participantUids.size === 0) {
+        await safelyReleaseStartLock();
+        throw new HttpsError("failed-precondition", "ZERO_PARTICIPANTS_DETECTED: No se detectaron participantes elegibles.");
+      }
+
+      // Fetch profiles
+      const userProfilesMap = new Map();
+      for (const uid of participantUids) {
+        if (newEntriesMap.has(uid)) {
+          userProfilesMap.set(uid, newEntriesMap.get(uid));
+        } else {
+          const uSnap = await db.collection("users").doc(uid).get();
+          if (uSnap.exists) {
+            userProfilesMap.set(uid, { id: uSnap.id, ref: uSnap.ref, ...uSnap.data() });
+          }
+        }
+      }
+
+      const cycleUserResultsToSet = [];
+      const userUpdates = [];
+      const reinvUpdates = [];
+      let totalInitialCapitalCop = 0;
+
+      const reinvByUserUid = {};
+      reinvDocsMap.forEach((req) => {
+        const uUid = req.userId || req.userUid;
+        if (uUid && req.status === "APPROVED") {
+          reinvByUserUid[uUid] = req;
+        }
+      });
+
+      for (const uid of participantUids) {
+        const uProfile = userProfilesMap.get(uid);
+        if (!uProfile) continue;
+        if (uProfile.status && uProfile.status !== "ACTIVE") continue;
+
+        const req = reinvByUserUid[uid];
+        const prevRes = prevUserResultsMap.get(uid);
+
+        let finalCapitalCop = 0;
+        let finalIncreaseAppliedCop = 0;
+        let excludedCashAmountCop = 0;
+        let finalFundingStatus = "NOT_REQUIRED";
+
+        if (req) {
+          const cashInjectionCop = Math.round(Number(req.cashInjectionCop || 0));
+          const isCashConfirmed = req.externalFundingStatus === "CONFIRMED" && req.fundingReconciliationStatus !== "NEEDS_REVIEW";
+
+          let cashToAdd = 0;
+          if (cashInjectionCop > 0) {
+            if (isCashConfirmed) {
+              cashToAdd = cashInjectionCop;
+              finalFundingStatus = "CONFIRMED";
+              excludedCashAmountCop = 0;
+            } else {
+              cashToAdd = 0;
+              finalFundingStatus = "NOT_RECEIVED";
+              excludedCashAmountCop = cashInjectionCop;
+            }
+          }
+
+          const securedNextCapitalCop = Math.round(Number(req.securedNextCapitalCop || (prevRes ? prevRes.cycleCapitalCop : uProfile.currentCapital) || 0));
+          finalCapitalCop = securedNextCapitalCop + cashToAdd;
+          const profitAppliedCop = Math.round(Number(req.profitAppliedCop || 0));
+          finalIncreaseAppliedCop = profitAppliedCop + cashToAdd;
+
+          reinvUpdates.push({
+            ref: req.ref,
+            data: {
+              status: "APPLIED",
+              appliedAtCycleStart: true,
+              appliedAt: nowIso,
+              appliedInCycleId: targetCycleId,
+              finalCapitalCop,
+              finalIncreaseAppliedCop,
+              externalFundingStatus: finalFundingStatus,
+              excludedCashAmountCop,
+              appliedByUid: authUid,
+              appliedByName: adminName,
+              updatedAt: nowIso,
+            },
+          });
+        } else if (prevRes) {
+          finalCapitalCop = Number(prevRes.cycleCapitalCop || 0);
+        } else {
+          finalCapitalCop = Number(uProfile.currentCapital || 0);
+        }
+
+        if (finalCapitalCop <= 0) {
+          await safelyReleaseStartLock();
+          throw new HttpsError(
+            "failed-precondition",
+            `INVALID_ZERO_CAPITAL_DETECTED: El usuario ${uProfile.userCode || uid} resultó con capital $${finalCapitalCop} COP.`
+          );
+        }
+
+        const finalCategory = getCategoryForCapitalLocal(finalCapitalCop);
+        totalInitialCapitalCop += finalCapitalCop;
+
+        const cycleResRef = db.collection("cycleUserResults").doc(`${targetCycleId}_${uid}`);
+        cycleUserResultsToSet.push({
+          ref: cycleResRef,
+          data: {
+            id: `${targetCycleId}_${uid}`,
+            cycleId: targetCycleId,
+            userId: uid,
+            userUid: uid,
+            userCode: uProfile.userCode || "",
+            userName: uProfile.fullName || "",
+            email: uProfile.email || "",
+            cycleCapitalCop: finalCapitalCop,
+            cycleCategory: finalCategory,
+            groupCapitalCop: finalCapitalCop,
+            totalUsdOperated: 0,
+            trmUsed: trmAppliedNum,
+            totalGrossCop: 0,
+            userPercentage: uProfile.userPercentage !== undefined ? uProfile.userPercentage : 75,
+            adminPercentage: uProfile.adminPercentage !== undefined ? uProfile.adminPercentage : 25,
+            userProfitCop: 0,
+            adminCommissionCop: 0,
+            userProfitUsd: 0,
+            adminCommissionUsd: 0,
+            notificationStatus: "PENDING",
+            notificationSentAt: null,
+            calculatedAt: nowIso,
+            calculatedBy: adminName,
+            isCycleClosed: false,
+            isFrozen: true,
+            updatedAt: nowIso,
+          },
+        });
+
+        if (Number(uProfile.currentCapital) !== finalCapitalCop || uProfile.category !== finalCategory) {
+          userUpdates.push({
+            ref: uProfile.ref,
+            data: {
+              currentCapital: finalCapitalCop,
+              category: finalCategory,
+              updatedAt: nowIso,
+              updatedBy: adminName,
+            },
+          });
+        }
+      }
+
+      // requiredStartWrites = 3 + P + U + R
+      const requiredStartWrites = 3 + cycleUserResultsToSet.length + userUpdates.length + reinvUpdates.length;
+      const MAX_START_WRITES = 450;
+
+      if (requiredStartWrites > MAX_START_WRITES) {
+        await safelyReleaseStartLock();
+        throw new HttpsError(
+          "resource-exhausted",
+          `START_TOO_LARGE_FOR_ATOMIC_COMMIT: Se requieren ${requiredStartWrites} escrituras atómicas, superando el límite de ${MAX_START_WRITES}.`
+        );
+      }
+
+      // 6. Transacción Atómica de Inicialización Operativa
+      await db.runTransaction(async (transaction) => {
+        const cSnap = await transaction.get(cycleRef);
+        if (!cSnap.exists) throw new Error("Ciclo no encontrado durante commit.");
+        const cData = cSnap.data() || {};
+        if (cData.startAttemptId !== startAttemptId) {
+          throw new Error("Concurrencia: el intento de inicio ya no es válido.");
+        }
+
+        // ESCRITURA 1: Actualizar ciclo a STARTED
+        transaction.update(cycleRef, {
+          operationalStatus: "STARTED",
+          startedAt: nowIso,
+          startedByUid: authUid,
+          startedByName: adminName,
+          isStarting: false,
+          startingStartedAt: null,
+          startingByUid: null,
+          startingByName: null,
+          startAttemptId: null,
+          lastStartRequestId: clientRequestId || null,
+          initialManagedCapitalCop: totalInitialCapitalCop,
+          initialActiveUsersCount: cycleUserResultsToSet.length,
+          updatedAt: nowIso,
+        });
+
+        // ESCRITURA 2: Punteros globales en settings/global_config
+        const globalConfigRef = db.collection("settings").doc("global_config");
+        transaction.set(
+          globalConfigRef,
+          {
+            operationalCycleId: targetCycleId,
+            preparingCycleId: null,
+            activeCycleId: targetCycleId,
+            updatedAt: nowIso,
+          },
+          { merge: true }
+        );
+
+        // ESCRITURA 3: Crear resumen financiero inicial
+        const summaryRef = db.collection("cycleFinancialSummaries").doc(targetCycleId);
+        transaction.set(summaryRef, {
+          cycleId: targetCycleId,
+          initialManagedCapitalCop: totalInitialCapitalCop,
+          initialActiveUsersCount: cycleUserResultsToSet.length,
+          totalGroupsCount: 0,
+          calculatedGroupsCount: 0,
+          totalGrossCop: 0,
+          totalUsersProfitCop: 0,
+          totalAdminCommissionCop: 0,
+          isCycleClosed: false,
+          startedAt: nowIso,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+
+        // ESCRITURAS 4: cycleUserResults congelados
+        for (const cur of cycleUserResultsToSet) {
+          transaction.set(cur.ref, cur.data);
+        }
+
+        // ESCRITURAS 5: usuarios actualizados
+        for (const uu of userUpdates) {
+          transaction.update(uu.ref, uu.data);
+        }
+
+        // ESCRITURAS 6: solicitudes de reinversión marcadas como APPLIED
+        for (const ru of reinvUpdates) {
+          transaction.update(ru.ref, ru.data);
+        }
+      });
+
+      // 7. Auditoría autoritativa
+      await db.collection("auditLogs").add({
+        action: "CYCLE_OPERATIONALLY_STARTED",
+        performedBy: authUid,
+        performedByName: adminName,
+        cycleId: targetCycleId,
+        targetEntity: targetCycleId,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        details: {
+          operationalStatus: "STARTED",
+          initialManagedCapitalCop: totalInitialCapitalCop,
+          initialActiveUsersCount: activeUsers.length,
+          reinvestmentsAppliedCount: reinvUpdates.length,
+          usersCapitalUpdatedCount: userUpdates.length,
+          requiredStartWrites,
+        },
+      }).catch(() => {});
+
+      // 8. Notificaciones determinísticas a usuarios
+      for (const cur of cycleUserResultsToSet) {
+        const uid = cur.data.userId;
+        const notifId = `notif_cycle_start_${targetCycleId}_${uid}`;
+        const cap = Number(cur.data.cycleCapitalCop || 0);
+        const cat = cur.data.cycleCategory || "AZUL";
+
+        await db.collection("notifications").doc(notifId).set({
+          id: notifId,
+          userId: uid,
+          userUid: uid,
+          userCode: cur.data.userCode || "",
+          userName: cur.data.userName || "",
+          cycleId: targetCycleId,
+          type: "CYCLE_CLOSED",
+          title: `🚀 ¡Ciclo Operativo ${targetCycleId} Iniciado!`,
+          message: `El ciclo ha iniciado formalmente operaciones. Tu capital operativo congelado para este ciclo es de $${cap.toLocaleString("es-CO")} COP (Categoría ${cat}).`,
+          read: false,
+          sentAt: nowIso,
+          createdAt: nowIso,
+          payload: {
+            cycleId: targetCycleId,
+            cycleCapitalCop: cap,
+            cycleCategory: cat,
+          },
+        }, { merge: true }).catch(() => {});
+      }
+
+      return {
+        success: true,
+        cycleId: targetCycleId,
+        operationalStatus: "STARTED",
+        startedAt: nowIso,
+        initialManagedCapitalCop: totalInitialCapitalCop,
+        initialActiveUsersCount: activeUsers.length,
+        reinvestmentsAppliedCount: reinvUpdates.length,
+        usersCapitalUpdatedCount: userUpdates.length,
+        requiredStartWrites,
+        message: `Ciclo ${targetCycleId} iniciado operativamente con éxito. Se congelaron los capitales de ${activeUsers.length} inversionistas ($${totalInitialCapitalCop.toLocaleString("es-CO")} COP) y se habilitaron las operaciones de trading.`,
+      };
+    } catch (err) {
+      await safelyReleaseStartLock();
+      console.error("[adminStartCycleCallable] Error iniciando ciclo operativamente:", err);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", `Fallo atómico al iniciar ciclo: ${err.message || String(err)}`);
+    }
   }
 );
 
@@ -5347,6 +7191,12 @@ exports.adminUpdateCycleTrmCallable = onCall(
       if (cycleData.status === "CLOSED") {
         throw new HttpsError("failed-precondition", "No se puede modificar la TRM de un ciclo que ya está CERRADO.");
       }
+      if (cycleData.operationalStatus === "STARTED") {
+        throw new HttpsError(
+          "failed-precondition",
+          "TRM_FROZEN_AFTER_CYCLE_START: La TRM ya no puede ser modificada porque el ciclo operativo se encuentra en estado STARTED."
+        );
+      }
       if (cycleData.status !== "OPEN" && cycleData.status !== "REOPENED") {
         throw new HttpsError(
           "failed-precondition",
@@ -6036,6 +7886,254 @@ exports.adminGetCycleReportDetailsCallable = onCall(
     }
   }
 );
+
+/**
+ * Helper Puro: Generación de identificador canónico para ciclos arbitrarios.
+ * Totalmente desacoplado de fechas, meses o lógica de calendario.
+ * Utiliza crypto.randomUUID() nativo de Node.js.
+ */
+function generateCanonicalCycleId() {
+  return `cyc_${crypto.randomUUID()}`;
+}
+
+const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Cloud Function HTTPS Callable: adminCreateNextCycleCallable
+ * Autoridad única y estricta para crear y enlazar un ciclo sucesor (PREPARING)
+ * a partir de un ciclo operativo activo (STARTED).
+ *
+ * Exclusivo para SuperAdmin.
+ * Idempotencia estricta intra-transaccional (idempotencyKeys).
+ * Genera candidateCycleId una sola vez fuera de la transacción para mantener el mismo ID durante transaction retries.
+ * NO escribe en appConfig/global (0 lectores operativos; settings/global_config es la única autoridad canónica).
+ */
+exports.adminCreateNextCycleCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
+
+    const { sourceCycleId, name, clientRequestId } = request.data || {};
+
+    // 1. Validaciones de entrada estrictas
+    if (!sourceCycleId || typeof sourceCycleId !== "string" || !sourceCycleId.trim()) {
+      throw new HttpsError("invalid-argument", "INVALID_SOURCE_CYCLE_ID: sourceCycleId es obligatorio y debe ser un string no vacío.");
+    }
+    const cleanSourceCycleId = sourceCycleId.trim();
+
+    if (!name || typeof name !== "string") {
+      throw new HttpsError("invalid-argument", "INVALID_NAME: El nombre del ciclo es obligatorio.");
+    }
+    const cleanName = name.trim();
+    if (cleanName.length < 3 || cleanName.length > 60) {
+      throw new HttpsError("invalid-argument", "INVALID_NAME: El nombre del ciclo debe tener entre 3 y 60 caracteres.");
+    }
+
+    if (!clientRequestId || typeof clientRequestId !== "string") {
+      throw new HttpsError("invalid-argument", "INVALID_CLIENT_REQUEST_ID: clientRequestId es obligatorio.");
+    }
+    const cleanClientRequestId = clientRequestId.trim();
+    if (!UUID_V4_REGEX.test(cleanClientRequestId)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_CLIENT_REQUEST_ID: clientRequestId debe ser un UUID v4 válido conforme a RFC 4122."
+      );
+    }
+
+    // 2. Generar candidateCycleId UNA SOLA VEZ fuera de la transacción
+    // (Mantiene el mismo candidateCycleId ante retries internos automáticos de Firestore)
+    const candidateCycleId = generateCanonicalCycleId();
+
+    const idemRef = db.collection("idempotencyKeys").doc(`create_next_${cleanClientRequestId}`);
+    const sourceRef = db.collection("monthlyCycles").doc(cleanSourceCycleId);
+    const candidateRef = db.collection("monthlyCycles").doc(candidateCycleId);
+    const configRef = db.collection("settings").doc("global_config");
+    const auditRef = db.collection("auditLogs").doc(`audit_create_next_${candidateCycleId}`);
+
+    try {
+      const result = await db.runTransaction(async (transaction) => {
+        // === FASE DE LECTURAS (READ PHASE) ===
+        // Todas las lecturas antes de cualquier escritura
+        const [idemSnap, sourceSnap, candidateSnap, configSnap] = await Promise.all([
+          transaction.get(idemRef),
+          transaction.get(sourceRef),
+          transaction.get(candidateRef),
+          transaction.get(configRef),
+        ]);
+
+        // Guard contra colisión de ID generado
+        if (candidateSnap.exists) {
+          throw new HttpsError("already-exists", "CYCLE_ID_COLLISION: Colisión detectada al generar candidateCycleId.");
+        }
+
+        // A. Idempotencia estricta dentro de la transacción
+        if (idemSnap.exists) {
+          const idemData = idemSnap.data() || {};
+          // Verificar payload semántico: action, sourceCycleId, normalizedName
+          if (
+            idemData.action !== "CREATE_NEXT_CYCLE" ||
+            idemData.sourceCycleId !== cleanSourceCycleId ||
+            idemData.normalizedName !== cleanName
+          ) {
+            throw new HttpsError(
+              "already-exists",
+              "IDEMPOTENCY_KEY_CONFLICT: El clientRequestId suministrado ya fue utilizado con parámetros diferentes."
+            );
+          }
+
+          const existingCreatedCycleId = idemData.createdCycleId;
+
+          // Validar coherencia del estado persistido
+          const sourceData = sourceSnap.data() || {};
+          if (sourceData.nextCycleId !== existingCreatedCycleId) {
+            throw new HttpsError(
+              "failed-precondition",
+              `IDEMPOTENCY_STATE_CONFLICT: Incoherencia en el ciclo origen (${cleanSourceCycleId}). Su nextCycleId no coincide con ${existingCreatedCycleId}.`
+            );
+          }
+
+          return {
+            success: true,
+            cycleId: existingCreatedCycleId,
+            idempotentReplay: true,
+          };
+        }
+
+        // B. Validaciones sobre el Ciclo Origen (Source Cycle)
+        if (!sourceSnap.exists) {
+          throw new HttpsError("not-found", `SOURCE_NOT_FOUND: El ciclo origen '${cleanSourceCycleId}' no existe.`);
+        }
+
+        const sourceData = sourceSnap.data() || {};
+        if (sourceData.status !== "OPEN" && sourceData.status !== "REOPENED") {
+          throw new HttpsError(
+            "failed-precondition",
+            `SOURCE_NOT_OPEN: El ciclo origen '${cleanSourceCycleId}' está en estado '${sourceData.status}'. Solo ciclos OPEN o REOPENED admiten crear sucesor.`
+          );
+        }
+
+        if (sourceData.operationalStatus !== "STARTED") {
+          throw new HttpsError(
+            "failed-precondition",
+            `SOURCE_NOT_STARTED: El ciclo origen '${cleanSourceCycleId}' tiene operationalStatus '${sourceData.operationalStatus || "UNDEFINED"}'. Solo ciclos en estado STARTED admiten crear sucesor.`
+          );
+        }
+
+        if (sourceData.nextCycleId) {
+          throw new HttpsError(
+            "already-exists",
+            `NEXT_CYCLE_ALREADY_EXISTS: El ciclo origen '${cleanSourceCycleId}' ya cuenta con un sucesor enlazado (${sourceData.nextCycleId}).`
+          );
+        }
+
+        // C. Validación estricta de TRM (sin fallbacks hardcodeados)
+        const rawTrm = Number(sourceData.trmApplied);
+        if (!Number.isFinite(rawTrm) || rawTrm <= 0) {
+          throw new HttpsError(
+            "failed-precondition",
+            `SOURCE_CYCLE_TRM_INVALID: El ciclo origen '${cleanSourceCycleId}' no cuenta con una TRM válida configurada (${sourceData.trmApplied}).`
+          );
+        }
+        const inheritedTrm = rawTrm;
+
+        // D. Verificación de configuración canónica (settings/global_config)
+        const configData = configSnap.exists ? configSnap.data() || {} : {};
+        if (configData.operationalCycleId && configData.operationalCycleId !== cleanSourceCycleId) {
+          throw new HttpsError(
+            "failed-precondition",
+            `CONFIG_CYCLE_MISMATCH: settings/global_config.operationalCycleId (${configData.operationalCycleId}) no coincide con el ciclo origen indicado (${cleanSourceCycleId}).`
+          );
+        }
+
+        // === FASE DE ESCRITURAS (WRITE PHASE) ===
+        const nowIso = new Date().toISOString();
+
+        // 1. Creación del nuevo ciclo sucesor B en PREPARING
+        const newCyclePayload = {
+          id: candidateCycleId,
+          cycleId: candidateCycleId,
+          name: cleanName,
+          status: "OPEN",
+          operationalStatus: "PREPARING",
+          previousCycleId: cleanSourceCycleId,
+          nextCycleId: null,
+          trmApplied: inheritedTrm,
+          createdAt: nowIso,
+          openedAt: nowIso, // retrocompatibilidad documental legacy
+          startedAt: null,
+          closedAt: null,
+          isStarting: false,
+          startAttemptId: null,
+          isClosing: false,
+          closingStartedAt: null,
+          closingByUid: null,
+          closingByName: null,
+          closureAttemptId: null,
+          notificationsSent: false,
+          notificationsSentAt: null,
+        };
+        transaction.set(candidateRef, newCyclePayload);
+
+        // 2. Enlazar A -> B en el ciclo origen
+        transaction.update(sourceRef, {
+          nextCycleId: candidateCycleId,
+          updatedAt: nowIso,
+        });
+
+        // 3. Actualizar configuración canónica (settings/global_config)
+        // Solo preparingCycleId cambia; operationalCycleId y activeCycleId se mantienen inalterados
+        transaction.set(
+          configRef,
+          {
+            preparingCycleId: candidateCycleId,
+            updatedAt: nowIso,
+          },
+          { merge: true }
+        );
+
+        // 4. Persistir registro atómico de idempotencia
+        transaction.set(idemRef, {
+          action: "CREATE_NEXT_CYCLE",
+          sourceCycleId: cleanSourceCycleId,
+          normalizedName: cleanName,
+          createdCycleId: candidateCycleId,
+          clientRequestId: cleanClientRequestId,
+          createdByUid: authUid,
+          createdByName: createdByName,
+          createdAt: nowIso,
+        });
+
+        // 5. Auditoría administrativa
+        transaction.set(auditRef, {
+          action: "ADMIN_CREATE_NEXT_CYCLE",
+          sourceCycleId: cleanSourceCycleId,
+          createdCycleId: candidateCycleId,
+          name: cleanName,
+          performedBy: authUid,
+          performedByName: createdByName,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          clientRequestId: cleanClientRequestId,
+        });
+
+        return {
+          success: true,
+          cycleId: candidateCycleId,
+          idempotentReplay: false,
+        };
+      });
+
+      return result;
+    } catch (err) {
+      console.error("[adminCreateNextCycleCallable] Error:", err);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", `Error al crear el ciclo sucesor: ${err.message}`);
+    }
+  }
+);
+
 
 
 

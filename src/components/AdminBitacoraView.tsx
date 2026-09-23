@@ -108,6 +108,8 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
 
   const trm = currentCycle.trmApplied || 4028.50;
   const isClosed = currentCycle.status === 'CLOSED';
+  const config = dataStore.getConfig();
+  const hasOperationalCycle = !!config.operationalCycleId;
 
   // Get categorized groups
   const groupsByCategory = dataStore.getCategoryGroups(currentCycle.cycleId);
@@ -273,6 +275,11 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
   };
 
   const handleNotifyGroup = (group: CategoryGroupInfo) => {
+    if (!hasOperationalCycle) {
+      setErrorToast('No hay un ciclo operativo iniciado en este momento.');
+      setTimeout(() => setErrorToast(null), 4000);
+      return;
+    }
     const groupKey = `${group.category}_${group.groupCapitalCop}`;
     setErrorToast(null);
     setSuccessToast(null);
@@ -376,6 +383,11 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
 
   const handleCreateManualGroupOperation = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!hasOperationalCycle) {
+      setErrorToast('No hay un ciclo operativo iniciado en este momento.');
+      setTimeout(() => setErrorToast(null), 4000);
+      return;
+    }
     const capital = parseFloat(newGroupCapitalCop.replace(/[^0-9]/g, ''));
     const usd = parseFloat(newGroupInitialUsd.replace(/[^0-9.]/g, ''));
 
@@ -507,6 +519,15 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
         </div>
       )}
 
+      {!hasOperationalCycle && (
+        <div className="p-4 bg-amber-900/40 border border-amber-500/30 rounded-2xl flex items-center gap-3 text-amber-200 animate-in fade-in slide-in-from-top-2">
+          <AlertCircle className="w-5 h-5 shrink-0 text-amber-400 animate-pulse" />
+          <div className="text-xs sm:text-sm font-medium">
+            No hay un ciclo operativo iniciado en este momento. Las acciones de registro, importación y consolidación de operaciones diarias se encuentran bloqueadas.
+          </div>
+        </div>
+      )}
+
       {/* Main Header Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-slate-900/90 to-blue-950/40 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl relative overflow-hidden">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -539,9 +560,9 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
             <button
               type="button"
               onClick={handleConsolidateAllGlobal}
-              disabled={globalActiveUsdTotal === 0}
+              disabled={!hasOperationalCycle || globalActiveUsdTotal === 0}
               className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white disabled:opacity-40 disabled:cursor-not-allowed text-xs font-bold flex items-center gap-2 transition cursor-pointer shadow-md shadow-emerald-600/20"
-              title={`Cerrar la jornada diaria activa en todas las bitácoras (${formatUSD(globalActiveUsdTotal)}) y consolidar las ganancias en el Cierre Mensual`}
+              title={!hasOperationalCycle ? "No hay un ciclo operativo iniciado" : `Cerrar la jornada diaria activa en todas las bitácoras (${formatUSD(globalActiveUsdTotal)}) y consolidar las ganancias en el Cierre Mensual`}
             >
               <Lock className="w-4 h-4" />
               <span>Cerrar Jornada Global ({formatUSD(globalActiveUsdTotal)})</span>
@@ -550,6 +571,11 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
             <button
               type="button"
               onClick={() => {
+                if (!hasOperationalCycle) {
+                  setErrorToast('No hay un ciclo operativo iniciado en este momento.');
+                  setTimeout(() => setErrorToast(null), 4000);
+                  return;
+                }
                 if (operatedUsersList.length === 0 || globalActiveUsdTotal === 0) {
                   setErrorToast('No hay operaciones activas ni inversionistas pendientes por notificar.');
                   setTimeout(() => setErrorToast(null), 4000);
@@ -566,7 +592,14 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
 
             <button
               type="button"
-              onClick={() => setShowNewGroupModal(true)}
+              onClick={() => {
+                if (!hasOperationalCycle) {
+                  setErrorToast('No hay un ciclo operativo iniciado en este momento.');
+                  setTimeout(() => setErrorToast(null), 4000);
+                  return;
+                }
+                setShowNewGroupModal(true);
+              }}
               className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-2 transition cursor-pointer shadow-md shadow-blue-600/20"
               title="Aperturar un nuevo grupo o registrar un trade directo"
             >
@@ -575,7 +608,14 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
             </button>
 
             <button
-              onClick={() => setShowExcelModal(true)}
+              onClick={() => {
+                if (!hasOperationalCycle) {
+                  setErrorToast('No hay un ciclo operativo iniciado en este momento.');
+                  setTimeout(() => setErrorToast(null), 4000);
+                  return;
+                }
+                setShowExcelModal(true);
+              }}
               className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold flex items-center gap-2 transition cursor-pointer shadow-sm"
               title="Importar operaciones desde archivo Excel"
             >
@@ -883,7 +923,14 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
 
                     <button
                       type="button"
-                      onClick={() => setSelectedGroupForDailyOps(group)}
+                      onClick={() => {
+                        if (!hasOperationalCycle) {
+                          setErrorToast('No hay un ciclo operativo iniciado en este momento.');
+                          setTimeout(() => setErrorToast(null), 4000);
+                          return;
+                        }
+                        setSelectedGroupForDailyOps(group);
+                      }}
                       className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-blue-600/20 transition cursor-pointer"
                     >
                       <Plus className="w-4 h-4" />
@@ -1014,7 +1061,14 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
 
                         <button
                           type="button"
-                          onClick={() => setSelectedGroupForDailyOps(group)}
+                          onClick={() => {
+                            if (!hasOperationalCycle) {
+                              setErrorToast('No hay un ciclo operativo iniciado en este momento.');
+                              setTimeout(() => setErrorToast(null), 4000);
+                              return;
+                            }
+                            setSelectedGroupForDailyOps(group);
+                          }}
                           className="text-[11px] font-bold text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer"
                         >
                           <Plus className="w-3.5 h-3.5" />

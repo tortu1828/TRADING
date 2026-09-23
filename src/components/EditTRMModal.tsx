@@ -36,6 +36,10 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  const isClosed = activeCycle?.status === 'CLOSED';
+  const hasStarted = !!config.operationalCycleId;
+  const isTrmEditable = !isClosed && !hasStarted;
+
   // Sync or fetch live TRM on open
   useEffect(() => {
     if (isOpen) {
@@ -68,6 +72,10 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
 
   // Acción: Activar Modo Automático
   const handleApplyAutomatic = () => {
+    if (!isTrmEditable) {
+      setError('La TRM se encuentra en modo de solo lectura. No se puede modificar.');
+      return;
+    }
     setError(null);
     const rateToUse = liveData?.rate || config.trmMarketRate || config.trmConfigured;
     try {
@@ -94,6 +102,10 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
   // Acción: Guardar TRM Manual
   const handleSaveManual = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isTrmEditable) {
+      setError('La TRM se encuentra en modo de solo lectura. No se puede modificar.');
+      return;
+    }
     setError(null);
     const num = parseFloat(manualInput.replace(/[^0-9.]/g, ''));
 
@@ -164,6 +176,16 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
           <div className="p-4 rounded-xl bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 flex items-center gap-3 mb-4 animate-in fade-in">
             <CheckCircle2 className="w-6 h-6 shrink-0 text-emerald-400" />
             <p className="text-sm font-medium">{successMsg}</p>
+          </div>
+        )}
+
+        {/* Info Alert if not editable */}
+        {!isTrmEditable && (
+          <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 flex items-start gap-3 mb-4 text-xs leading-relaxed animate-in fade-in">
+            <Info className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <strong>TRM en modo de Solo Lectura:</strong> El ciclo actual ya ha sido iniciado (operando) o se encuentra cerrado. El valor final se mantiene estable y protegido para garantizar la coherencia de todos los reportes financieros.
+            </div>
           </div>
         )}
 
@@ -258,9 +280,9 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
                 <button
                   type="button"
                   onClick={handleRefreshLive}
-                  disabled={isFetchingLive}
-                  className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300 bg-emerald-950/60 border border-emerald-500/30 hover:bg-emerald-900/60 px-2.5 py-1 rounded-lg transition cursor-pointer disabled:opacity-50"
-                  title="Consultar cotización de mercado actual"
+                  disabled={isFetchingLive || !isTrmEditable}
+                  className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300 bg-emerald-950/60 border border-emerald-500/30 hover:bg-emerald-900/60 px-2.5 py-1 rounded-lg transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={!isTrmEditable ? "Solo lectura" : "Consultar cotización de mercado actual"}
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isFetchingLive ? 'animate-spin' : ''}`} />
                   <span>{isFetchingLive ? 'Consultando...' : 'Sincronizar'}</span>
@@ -303,7 +325,8 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
               <button
                 type="button"
                 onClick={handleApplyAutomatic}
-                className="flex items-center gap-2 px-5 py-2 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-xl shadow-lg shadow-emerald-500/20 transition cursor-pointer"
+                disabled={!isTrmEditable}
+                className="flex items-center gap-2 px-5 py-2 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 disabled:bg-slate-800 disabled:text-slate-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl shadow-lg shadow-emerald-500/20 transition cursor-pointer"
               >
                 <Zap className="w-3.5 h-3.5" />
                 <span>Aplicar TRM Automática</span>
@@ -322,8 +345,12 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
                 </label>
                 <button
                   type="button"
-                  onClick={() => setManualInput(marketRate.toString())}
-                  className="text-[11px] font-semibold text-amber-400 hover:text-amber-300 transition cursor-pointer flex items-center gap-1"
+                  onClick={() => {
+                    if (!isTrmEditable) return;
+                    setManualInput(marketRate.toString());
+                  }}
+                  disabled={!isTrmEditable}
+                  className="text-[11px] font-semibold text-amber-400 hover:text-amber-300 transition cursor-pointer flex items-center gap-1 disabled:opacity-30 disabled:cursor-not-allowed"
                   title="Copiar valor de mercado actual"
                 >
                   <span>Pegar tasa de mercado (${formatTRM(marketRate)})</span>
@@ -339,7 +366,8 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
                   max="10000"
                   value={manualInput}
                   onChange={(e) => setManualInput(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-8 pr-4 py-2.5 text-slate-100 font-mono text-base font-bold focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition"
+                  disabled={!isTrmEditable}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-8 pr-4 py-2.5 text-slate-100 font-mono text-base font-bold focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
                   placeholder="4028.50"
                   required
                 />
@@ -357,8 +385,12 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
                 <button
                   key={val}
                   type="button"
-                  onClick={() => setManualInput(val.toString())}
-                  className="px-2 py-1 text-[11px] font-mono bg-slate-900 border border-slate-800 hover:border-amber-500/40 text-slate-300 hover:text-amber-300 rounded-lg transition cursor-pointer"
+                  onClick={() => {
+                    if (!isTrmEditable) return;
+                    setManualInput(val.toString());
+                  }}
+                  disabled={!isTrmEditable}
+                  className="px-2 py-1 text-[11px] font-mono bg-slate-900 border border-slate-800 hover:border-amber-500/40 text-slate-300 hover:text-amber-300 rounded-lg transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   ${val}
                 </button>
@@ -382,7 +414,8 @@ export const EditTRMModal: React.FC<EditTRMModalProps> = ({ isOpen, onClose }) =
               </button>
               <button
                 type="submit"
-                className="flex items-center gap-1.5 px-5 py-2 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-xl shadow-lg shadow-amber-500/20 transition cursor-pointer"
+                disabled={!isTrmEditable}
+                className="flex items-center gap-1.5 px-5 py-2 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 disabled:bg-slate-800 disabled:text-slate-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl shadow-lg shadow-amber-500/20 transition cursor-pointer"
               >
                 <Edit3 className="w-3.5 h-3.5" />
                 <span>Guardar TRM Manual</span>

@@ -31,6 +31,7 @@ import {
   FileSpreadsheet,
   RotateCcw,
   SlidersHorizontal,
+  Rocket,
 } from 'lucide-react';
 import { dataStore } from '../lib/dataStore';
 import { firestoreService } from '../lib/firestoreService';
@@ -47,6 +48,7 @@ import { fetchLiveTRM, LiveTRMResult } from '../lib/trmService';
 import { DailyOperationsModal } from './DailyOperationsModal';
 import { ExcelBitacoraImportModal } from './ExcelBitacoraImportModal';
 import { CycleReportViewer } from './CycleReportViewer';
+import { CyclePreparationView } from './CyclePreparationView';
 import confetti from 'canvas-confetti';
 
 interface MonthlyClosureViewProps {
@@ -59,8 +61,8 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   const allCycles = dataStore.getCycles();
   const activeUsers = dataStore.getActiveUsers();
 
-  // Sub-pestañas: Cierre del ciclo vs Informes Oficiales (exclusivo SuperAdmin)
-  const [activeSubTab, setActiveSubTab] = useState<'closure' | 'reports'>('closure');
+  // Sub-pestañas: Cierre del ciclo vs Preparación del Próximo Ciclo vs Informes Oficiales (exclusivo SuperAdmin)
+  const [activeSubTab, setActiveSubTab] = useState<'closure' | 'preparation' | 'reports'>('closure');
 
   const [selectedCycleId, setSelectedCycleId] = useState<string>(activeCycle.cycleId);
   const currentCycle = dataStore.getCycleById(selectedCycleId) || activeCycle;
@@ -676,6 +678,24 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
         {isSuperAdmin && (
           <button
             type="button"
+            onClick={() => setActiveSubTab('preparation')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+              activeSubTab === 'preparation'
+                ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20'
+                : 'text-slate-400 hover:text-white hover:bg-slate-850'
+            }`}
+          >
+            <Rocket className="w-3.5 h-3.5" />
+            Preparación del Próximo Ciclo
+            <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-slate-950 text-blue-300 ml-1 border border-blue-500/20">
+              SuperAdmin
+            </span>
+          </button>
+        )}
+
+        {isSuperAdmin && (
+          <button
+            type="button"
             onClick={() => setActiveSubTab('reports')}
             className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
               activeSubTab === 'reports'
@@ -692,7 +712,15 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
         )}
       </div>
 
-      {activeSubTab === 'reports' ? (
+      {activeSubTab === 'preparation' ? (
+        <CyclePreparationView
+          currentCycle={currentCycle}
+          currentUser={currentUser}
+          onRefresh={() => {
+            if (activeCycle) setSelectedCycleId(activeCycle.cycleId);
+          }}
+        />
+      ) : activeSubTab === 'reports' ? (
         <CycleReportViewer />
       ) : (
         <>

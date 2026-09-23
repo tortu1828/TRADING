@@ -227,9 +227,9 @@ describe('Firestore Rules Security Suite (SEC-01 a SEC-30)', () => {
   });
 
   // SEC-14
-  it('SEC-14: USER_A crea desembolso válido -> PASS', async () => {
+  it('SEC-14: USER_A no puede crear desembolso directo -> DENIED', async () => {
     const userADb = testEnv.authenticatedContext('user_a_uid').firestore();
-    await assertSucceeds(
+    await assertFails(
       userADb.collection('disbursements').doc('disb_valid').set({
         id: 'disb_valid',
         userId: 'user_a_uid',
@@ -579,9 +579,9 @@ describe('Hardening Rules Test Suite: monthlyCycles & reinvestments (RULE-01 a R
   });
 
   // TEST RULE-05
-  it('TEST RULE-05: ADMIN modifica trmApplied sin tocar campos sensibles -> ALLOWED', async () => {
+  it('TEST RULE-05: ADMIN modifica trmApplied sin tocar campos sensibles -> DENIED (monthlyCycles is now backend-only)', async () => {
     const adminDb = testEnv.authenticatedContext('admin_uid', { role: 'admin' }).firestore();
-    await assertSucceeds(
+    await assertFails(
       adminDb.collection('monthlyCycles').doc('cycle_2026_08').update({
         trmApplied: 4150,
       })
@@ -649,6 +649,92 @@ describe('Hardening Rules Test Suite: monthlyCycles & reinvestments (RULE-01 a R
     await assertFails(
       adminDb.collection('monthlyCycles').doc('cycle_2026_08').update({
         status: 'REOPENED',
+      })
+    );
+  });
+});
+
+describe('Phase 2D Hardening Tests: Settings, Users & Deny Total Client Writes', () => {
+  // TEST RULE-12: Write to settings doc with cycle lifecycle fields -> DENIED
+  it('TEST RULE-12: ADMIN intenta modificar activeCycleId en settings -> DENIED', async () => {
+    const adminDb = testEnv.authenticatedContext('admin_uid', { role: 'admin' }).firestore();
+    await assertFails(
+      adminDb.collection('settings').doc('global_config').set({
+        activeCycleId: '2026-10',
+      })
+    );
+  });
+
+  // TEST RULE-13: Write to settings doc with safe fields -> ALLOWED
+  it('TEST RULE-13: ADMIN intenta modificar roundingRule en settings -> PASS', async () => {
+    const adminDb = testEnv.authenticatedContext('admin_uid', { role: 'admin' }).firestore();
+    await assertSucceeds(
+      adminDb.collection('settings').doc('global_config').set({
+        roundingRule: 'NEAREST',
+      })
+    );
+  });
+
+  // TEST RULE-14: User updates profile with allowed fields -> PASS
+  it('TEST RULE-14: USER intenta actualizar su propio fullName en users -> PASS', async () => {
+    const userADb = testEnv.authenticatedContext('user_a_uid').firestore();
+    await assertSucceeds(
+      userADb.collection('users').doc('user_a_uid').update({
+        fullName: 'Nuevo Inversionista A',
+      })
+    );
+  });
+
+  // TEST RULE-15: User updates profile with unauthorized/sensitive fields -> DENIED
+  it('TEST RULE-15: USER intenta actualizar su propio currentCapital en users -> DENIED', async () => {
+    const userADb = testEnv.authenticatedContext('user_a_uid').firestore();
+    await assertFails(
+      userADb.collection('users').doc('user_a_uid').update({
+        currentCapital: 9999999,
+      })
+    );
+  });
+
+  // TEST RULE-16: Admin updates profile with sensitive fields -> DENIED
+  it('TEST RULE-16: ADMIN intenta actualizar currentCapital de usuario en users -> DENIED', async () => {
+    const adminDb = testEnv.authenticatedContext('admin_uid', { role: 'admin' }).firestore();
+    await assertFails(
+      adminDb.collection('users').doc('user_a_uid').update({
+        currentCapital: 9999999,
+      })
+    );
+  });
+
+  // TEST RULE-17: Client write on disbursements -> DENIED
+  it('TEST RULE-17: USER o ADMIN intenta crear o modificar desembolso directo -> DENIED', async () => {
+    const userADb = testEnv.authenticatedContext('user_a_uid').firestore();
+    await assertFails(
+      userADb.collection('disbursements').doc('disb_direct').set({
+        id: 'disb_direct',
+        amountCop: 100000,
+        status: 'PENDING',
+      })
+    );
+  });
+
+  // TEST RULE-18: Client write on cycleGroupCalculations -> DENIED
+  it('TEST RULE-18: ADMIN intenta crear o modificar cycleGroupCalculations directo -> DENIED', async () => {
+    const adminDb = testEnv.authenticatedContext('admin_uid', { role: 'admin' }).firestore();
+    await assertFails(
+      adminDb.collection('cycleGroupCalculations').doc('gc_direct').set({
+        id: 'gc_direct',
+        trmUsed: 4000,
+      })
+    );
+  });
+
+  // TEST RULE-19: Client write on cycleFinancialSummaries -> DENIED
+  it('TEST RULE-19: ADMIN intenta crear o modificar cycleFinancialSummaries directo -> DENIED', async () => {
+    const adminDb = testEnv.authenticatedContext('admin_uid', { role: 'admin' }).firestore();
+    await assertFails(
+      adminDb.collection('cycleFinancialSummaries').doc('fs_direct').set({
+        id: 'fs_direct',
+        totalManagedCapital: 5000000,
       })
     );
   });

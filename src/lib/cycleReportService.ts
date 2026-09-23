@@ -18,7 +18,7 @@ export interface CycleReportItem {
   hasReport: boolean;
   currentVersionId?: string;
   currentVersionNumber?: number;
-  reportStatus?: 'READY' | 'SUPERSEDED' | 'FAILED';
+  reportStatus?: 'GENERATING' | 'READY' | 'SUPERSEDED' | 'FAILED';
   totalUsers?: number;
   totalManagedCapital?: number;
 }
@@ -46,7 +46,7 @@ class CycleReportService {
         let hasReport = false;
         let currentVersionId: string | undefined;
         let currentVersionNumber: number | undefined;
-        let reportStatus: 'READY' | 'SUPERSEDED' | 'FAILED' | undefined;
+        let reportStatus: 'GENERATING' | 'READY' | 'SUPERSEDED' | 'FAILED' | undefined;
         let totalUsers: number | undefined;
         let totalManagedCapital: number | undefined;
 

@@ -20,6 +20,7 @@ import {
   Loader2,
   X,
   Lock,
+  Compass,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -112,8 +113,37 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
     return () => unsub();
   }, []);
 
+  const config = dataStore.getConfig();
+  const operationalCycleId = config.operationalCycleId;
+  const preparingCycleId = config.preparingCycleId;
+
+  const isCloseToStartCase = !operationalCycleId && !!preparingCycleId && (() => {
+    const cycleB = dataStore.getCycleById(preparingCycleId);
+    if (cycleB && cycleB.previousCycleId) {
+      const cycleA = dataStore.getCycleById(cycleB.previousCycleId);
+      return cycleA && cycleA.nextCycleId === cycleB.cycleId;
+    }
+    return false;
+  })();
+
+  const getCloseToStartSourceId = () => {
+    if (!operationalCycleId && preparingCycleId) {
+      const cycleB = dataStore.getCycleById(preparingCycleId);
+      if (cycleB && cycleB.previousCycleId) {
+        const cycleA = dataStore.getCycleById(cycleB.previousCycleId);
+        if (cycleA && cycleA.nextCycleId === cycleB.cycleId) {
+          return cycleA.cycleId;
+        }
+      }
+    }
+    return null;
+  };
+
   const [selectedCycleId, setSelectedCycleId] = useState<string>(() => {
-    return propSelectedCycleId || (activeCycle ? activeCycle.cycleId : (dataStore.getCycles()[0]?.cycleId || '2026-09'));
+    if (propSelectedCycleId) return propSelectedCycleId;
+    const closeToStartSourceId = getCloseToStartSourceId();
+    if (closeToStartSourceId) return closeToStartSourceId;
+    return activeCycle ? activeCycle.cycleId : (dataStore.getCycles()[0]?.cycleId || '2026-09');
   });
 
   // Secure unidimensional propagation to prevent react state update loops
@@ -126,7 +156,8 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
   // Fail-safe initialization to activeCycleId
   useEffect(() => {
     if (activeCycle && (!selectedCycleId || !dataStore.getCycleById(selectedCycleId))) {
-      const targetCycleId = propSelectedCycleId || activeCycle.cycleId;
+      const closeToStartSourceId = getCloseToStartSourceId();
+      const targetCycleId = propSelectedCycleId || closeToStartSourceId || activeCycle.cycleId;
       setSelectedCycleId(targetCycleId);
       if (onSelectCycle) {
         onSelectCycle(targetCycleId);
@@ -271,6 +302,17 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
   // FINANCIAL SNAPSHOTS FOR REINVESTMENT
   const selectedCycleObj = allCycles.find((c) => c.cycleId === selectedCycleId);
   const isCycleClosing = selectedCycleObj?.isClosing === true;
+
+  let preparingCycleObj: any = null;
+  let previousCycleObj: any = null;
+
+  if (isCloseToStartCase && preparingCycleId) {
+    const cycleB = dataStore.getCycleById(preparingCycleId);
+    if (cycleB && cycleB.previousCycleId) {
+      preparingCycleObj = cycleB;
+      previousCycleObj = dataStore.getCycleById(cycleB.previousCycleId);
+    }
+  }
 
   const cycleProfitCop = userResult ? Math.round(Number(userResult.userProfitCop) || 0) : 0;
   // Regla de redondeo obligatoria: múltiplos de $1.000.000 COP siempre hacia abajo.
@@ -1138,6 +1180,21 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
             </div>
           </div>
 
+          {/* Cycle Preparing Alert */}
+          {preparingCycleObj && (
+            <div className="p-4 sm:p-5 rounded-2xl bg-indigo-950/50 border border-indigo-500/50 text-indigo-200 text-xs space-y-2 shadow-lg animate-pulse mb-4">
+              <div className="flex items-center gap-2">
+                <Compass className="w-5 h-5 text-indigo-400 shrink-0" />
+                <h4 className="font-bold text-indigo-300 text-sm">
+                  Ciclo de Preparación Iniciado: {preparingCycleObj.name}
+                </h4>
+              </div>
+              <p className="text-[11px] text-indigo-300/90 leading-relaxed">
+                El ciclo operativo activo anterior se ha cerrado y el nuevo ciclo <strong>{preparingCycleObj.name}</strong> está en fase de preparación. Estás visualizando los resultados finales consolidados del ciclo anterior <strong>{previousCycleObj?.name || 'A'}</strong> y el estado de tu solicitud de reinversión/inyección hacia {preparingCycleObj.name}.
+              </p>
+            </div>
+          )}
+
           {/* Cycle Closing Alert */}
           {isCycleClosing && (
             <div className="p-4 sm:p-5 rounded-2xl bg-amber-950/50 border border-amber-500/50 text-amber-200 text-xs space-y-2 shadow-lg animate-pulse">
@@ -1350,12 +1407,12 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
               <button
                 type="button"
                 onClick={handleOpenCard1Modal}
-                disabled={reinvestableProfitCop < 1_000_000 || !!pendingRequestForCycle || isCycleClosing || selectedCycleId !== activeCycle?.cycleId}
+                disabled={reinvestableProfitCop < 1_000_000 || !!pendingRequestForCycle || isCycleClosing || (selectedCycleId !== activeCycle?.cycleId && !isCloseToStartCase)}
                 className="w-full py-3 bg-teal-600 hover:bg-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-bold text-xs shadow-lg shadow-teal-600/20 transition cursor-pointer flex items-center justify-center gap-2 mt-4"
               >
                 <Coins className="w-4 h-4" />
                 <span>
-                  {selectedCycleId !== activeCycle?.cycleId
+                  {selectedCycleId !== activeCycle?.cycleId && !isCloseToStartCase
                     ? 'Solo Disponible en Ciclo Activo'
                     : isCycleClosing
                     ? 'Cierre en Proceso (Bloqueado)'
@@ -1476,12 +1533,12 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
               <button
                 type="button"
                 onClick={handleOpenCard2Modal}
-                disabled={!!pendingRequestForCycle || isCycleClosing || selectedCycleId !== activeCycle?.cycleId}
+                disabled={!!pendingRequestForCycle || isCycleClosing || (selectedCycleId !== activeCycle?.cycleId && !isCloseToStartCase)}
                 className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-bold text-xs shadow-lg shadow-blue-600/20 transition cursor-pointer flex items-center justify-center gap-2 mt-4"
               >
                 <Wallet className="w-4 h-4" />
                 <span>
-                  {selectedCycleId !== activeCycle?.cycleId
+                  {selectedCycleId !== activeCycle?.cycleId && !isCloseToStartCase
                     ? 'Solo Disponible en Ciclo Activo'
                     : isCycleClosing
                     ? 'Cierre en Proceso (Bloqueado)'

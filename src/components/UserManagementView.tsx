@@ -99,8 +99,20 @@ export const UserManagementView: React.FC = () => {
   const [formUserSplit, setFormUserSplit] = useState('50');
   const [formBank, setFormBank] = useState('Bancolombia');
   const [formAccount, setFormAccount] = useState('');
+  const [formTargetCycleId, setFormTargetCycleId] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const config = dataStore.getConfig();
+  const preparingCycleId = config?.preparingCycleId;
+  const preparingCycle = preparingCycleId ? dataStore.getCycleById(preparingCycleId) : null;
+  const hasValidFutureCycle = (() => {
+    if (preparingCycle && preparingCycle.previousCycleId) {
+      const prevCycle = dataStore.getCycleById(preparingCycle.previousCycleId);
+      return prevCycle && prevCycle.status === 'CLOSED';
+    }
+    return false;
+  })();
 
   const numericCapital = parseFloat(formCapital) || 0;
   const detectedCategory = getCategoryForCapital(numericCapital);
@@ -229,7 +241,7 @@ export const UserManagementView: React.FC = () => {
 
     try {
       if (editingUser) {
-        // Update user in dataStore and Firestore
+        // Update user in dataStore and Firestore (PROTEGIENDO CAMPOS FINANCIEROS DEL SERVIDOR)
         const updatedUser = dataStore.updateUser(
           editingUser.id,
           {
@@ -237,10 +249,10 @@ export const UserManagementView: React.FC = () => {
             tradeNotificationAlias: trimmedAlias,
             email: formEmail,
             phone: formPhone,
-            currentCapital: cap,
+            currentCapital: editingUser.currentCapital, // PROTEGIDO: Solo lectura, administrado por el sistema financiero
             userPercentage: split,
             adminPercentage: 100 - split,
-            category,
+            category: editingUser.category, // PROTEGIDO: Solo lectura, administrado por el sistema financiero
             paymentMethod: formBank,
             paymentDetails: formAccount || 'Cuenta Principal',
           },
@@ -262,6 +274,7 @@ export const UserManagementView: React.FC = () => {
             adminPercentage: 100 - split,
             paymentMethod: formBank,
             paymentDetails: formAccount || 'Cuenta Principal',
+            targetCycleId: formTargetCycleId || null,
           });
 
           if (result && result.user) {
@@ -271,6 +284,7 @@ export const UserManagementView: React.FC = () => {
               await firestoreService.saveUser(userWithAlias);
             }
           }
+          setFormTargetCycleId('');
           setIsAddModalOpen(false);
         } else {
           // MODO ACTIVO DIRECTO: Crea en Firebase Auth y Firestore (status: ACTIVE, isClaimed: true)
@@ -285,6 +299,7 @@ export const UserManagementView: React.FC = () => {
             paymentMethod: formBank,
             paymentDetails: formAccount || 'Cuenta Principal',
             role: 'USER',
+            targetCycleId: formTargetCycleId || null,
           });
 
           if (result && result.user) {
@@ -294,6 +309,7 @@ export const UserManagementView: React.FC = () => {
               await firestoreService.saveUser(userWithAlias);
             }
           }
+          setFormTargetCycleId('');
           setIsAddModalOpen(false);
         }
       }
@@ -1334,38 +1350,106 @@ ${directLink}
               )}
 
               {/* Capital & Dynamic Category Box */}
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-                <label className="block text-xs font-semibold text-slate-300">Capital de Inversión (COP)</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-slate-400">$</span>
-                  <input
-                    type="number"
-                    step="100000"
-                    min="4000000"
-                    max="4000000000"
-                    value={formCapital}
-                    onChange={(e) => setFormCapital(e.target.value)}
-                    placeholder="8000000"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-7 pr-3 py-2 text-slate-100 font-mono font-bold text-sm focus:outline-none focus:border-blue-500"
-                    required
-                  />
-                </div>
+              {editingUser ? (
+                <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-semibold text-slate-300">Capital Operativo (COP)</label>
+                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-500/30">
+                      Solo Lectura
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-slate-500">$</span>
+                    <input
+                      type="text"
+                      disabled
+                      value={Number(editingUser.currentCapital || 0).toLocaleString('es-CO')}
+                      className="w-full bg-slate-900/50 border border-slate-800 rounded-lg pl-7 pr-3 py-2 text-slate-300 font-mono font-bold text-sm cursor-not-allowed opacity-80"
+                    />
+                  </div>
 
-                <div className="flex items-center justify-between text-xs pt-1">
-                  <span className="text-slate-400">Bitácora Asignada Automáticamente:</span>
-                  <span
-                    className={`px-2 py-0.5 rounded font-mono font-bold ${
-                      detectedCategory === 'AZUL'
-                        ? 'bg-blue-950 text-blue-300 border border-blue-500/40'
-                        : detectedCategory === 'VERDE'
-                        ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
-                        : 'bg-slate-800 text-slate-200 border border-slate-600'
-                    }`}
-                  >
-                    {detectedCategory === 'AZUL' ? '🔵 Azul ($4M - <$10M)' : detectedCategory === 'VERDE' ? '🟢 Verde ($10M - <$60M)' : '⚫ Negra ($60M+)'}
-                  </span>
+                  <p className="text-[11px] text-amber-300/90 flex items-center gap-1.5 bg-amber-950/30 border border-amber-500/20 px-2.5 py-1.5 rounded-lg">
+                    <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>Capital operativo administrado por el sistema financiero.</span>
+                  </p>
+
+                  <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-800/60 mt-1">
+                    <span className="text-slate-400">Bitácora Oficial:</span>
+                    <span
+                      className={`px-2 py-0.5 rounded font-mono font-bold ${
+                        editingUser.category === 'AZUL'
+                          ? 'bg-blue-950 text-blue-300 border border-blue-500/40'
+                          : editingUser.category === 'VERDE'
+                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
+                          : 'bg-slate-800 text-slate-200 border border-slate-600'
+                      }`}
+                    >
+                      {editingUser.category === 'AZUL'
+                        ? '🔵 Azul'
+                        : editingUser.category === 'VERDE'
+                        ? '🟢 Verde'
+                        : '⚫ Negra'}
+                    </span>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+                  <label className="block text-xs font-semibold text-slate-300">Capital de Inversión (COP)</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-slate-400">$</span>
+                    <input
+                      type="number"
+                      step="100000"
+                      min="4000000"
+                      max="4000000000"
+                      value={formCapital}
+                      onChange={(e) => setFormCapital(e.target.value)}
+                      placeholder="8000000"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-7 pr-3 py-2 text-slate-100 font-mono font-bold text-sm focus:outline-none focus:border-blue-500"
+                      required
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs pt-1">
+                    <span className="text-slate-400">Bitácora Asignada Automáticamente:</span>
+                    <span
+                      className={`px-2 py-0.5 rounded font-mono font-bold ${
+                        detectedCategory === 'AZUL'
+                          ? 'bg-blue-950 text-blue-300 border border-blue-500/40'
+                          : detectedCategory === 'VERDE'
+                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
+                          : 'bg-slate-800 text-slate-200 border border-slate-600'
+                      }`}
+                    >
+                      {detectedCategory === 'AZUL'
+                        ? '🔵 Azul ($4M - <$10M)'
+                        : detectedCategory === 'VERDE'
+                        ? '🟢 Verde ($10M - <$60M)'
+                        : '⚫ Negra ($60M+)'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Target Cycle Selection */}
+              {!editingUser && hasValidFutureCycle && preparingCycle && (
+                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+                  <label className="block text-xs font-semibold text-slate-300">Ciclo de Ingreso</label>
+                  <select
+                    value={formTargetCycleId}
+                    onChange={(e) => setFormTargetCycleId(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="">Ingresar en Ciclo Activo Actual</option>
+                    <option value={preparingCycle.cycleId}>
+                      Ingresar desde el Ciclo de Preparación: {preparingCycle.name}
+                    </option>
+                  </select>
+                  <p className="text-[10px] text-slate-400">
+                    Si se selecciona el ciclo de preparación, el capital se registrará en el backend con ingreso programado para {preparingCycle.name}.
+                  </p>
+                </div>
+              )}
 
               {/* Split Distribution */}
               <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">

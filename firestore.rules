@@ -59,7 +59,19 @@ service cloud.firestore {
       allow get: if isAdmin() || (isAuthenticated() && request.auth.uid == userId);
       allow list: if isAdmin();
       allow create: if false; // Creación exclusiva por Cloud Functions Callables
-      allow update: if isAdmin(); // Edición administrativa directa de perfil
+      // Edición del usuario restringida a campos de perfil CLIENT_EDITABLE_USER_FIELDS
+      // Edición del administrador prohíbe tocar campos financieros SERVER_AUTHORITATIVE_USER_FIELDS
+      allow update: if (isAuthenticated() && request.auth.uid == userId &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'fullName', 'tradeNotificationAlias', 'email', 'phone', 'paymentMethod', 'paymentDetails', 'documentId'
+        ])
+      ) || (isAdmin() &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'currentCapital', 'category', 'baseCapital', 'entryCycleId', 'role',
+          'status', 'userPercentage', 'adminPercentage', 'userCode', 'createdAt',
+          'entryDate', 'isClaimed', 'claimedAt', 'migrationStatus'
+        ])
+      );
       allow delete: if false; // Requiere migración a Callable que elimine Firebase Auth + Firestore
 
       // Subcolección de Tokens FCM por Dispositivo
@@ -76,7 +88,7 @@ service cloud.firestore {
       allow read: if isAdmin() || (
         isAuthenticated() && resource.data.userUid == request.auth.uid
       );
-      allow write: if isAdmin();
+      allow write: if false; // DENY TOTAL CLIENT-SIDE WRITE
     }
 
     // =========================================================================
@@ -101,42 +113,20 @@ service cloud.firestore {
     // =========================================================================
     match /monthlyCycles/{cycleId} {
       allow read: if isAuthenticated();
-      // Creación permitida para administradores siempre que no inicien con lock de cierre ni estado CLOSED
-      allow create: if isAdmin() &&
-        !('isClosing' in request.resource.data && request.resource.data.isClosing == true) &&
-        (!('status' in request.resource.data) || request.resource.data.status in ['OPEN', 'REOPENED']);
-      
-      // Actualización protegida: Prohíbe a clientes Admin modificar los campos de ciclo de vida / lock / cierre
-      // (status, isClosing, closingStartedAt, closingByUid, closingByName, closureAttemptId, closedAt, closedBy, closedByUid, appliedReinvestmentsCount)
-      // Dichos campos son mutados EXCLUSIVAMENTE por Cloud Functions autoritativas (adminCloseCycleCallable, adminUnlockCycleCallable).
-      allow update: if isAdmin() && (
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'status',
-          'isClosing',
-          'closingStartedAt',
-          'closingByUid',
-          'closingByName',
-          'closureAttemptId',
-          'closedAt',
-          'closedBy',
-          'closedByUid',
-          'appliedReinvestmentsCount'
-        ])
-      );
-
-      // Prohibir eliminación directa desde clientes
-      allow delete: if false;
+      allow write: if false; // DENY TOTAL CLIENT-SIDE WRITE
     }
 
     // =========================================================================
-    // 5. CÁLCULOS DE GRUPO Y RESÚMENES FINANCIEROS (EXCLUSIVO ADMIN)
+    // 5. CÁLCULOS DE GRUPO Y RESÚMENES FINANCIEROS (EXCLUSIVO ADMIN EN LECTURA)
     // =========================================================================
     match /cycleGroupCalculations/{groupId} {
-      allow read, write: if isAdmin();
+      allow read: if isAdmin();
+      allow write: if false; // DENY TOTAL CLIENT-SIDE WRITE
     }
 
     match /cycleFinancialSummaries/{cycleId} {
-      allow read, write: if isAdmin();
+      allow read: if isAdmin();
+      allow write: if false; // DENY TOTAL CLIENT-SIDE WRITE
     }
 
     // =========================================================================
@@ -166,29 +156,16 @@ service cloud.firestore {
     // =========================================================================
     match /disbursements/{reqId} {
       allow read: if isAdmin() || (
-        isAuthenticated() && resource.data.userUid == request.auth.uid
+        isAuthenticated() && (resource.data.userUid == request.auth.uid || resource.data.userId == request.auth.uid)
       );
-      allow create: if isAdmin() || (
-        isAuthenticated() &&
-        isValidUserDataOnCreate() &&
-        request.resource.data.keys().hasOnly([
-          'id', 'userId', 'userUid', 'userCode', 'userName', 'sourceCycleId',
-          'amountCop', 'disbursementSource', 'method', 'bankName', 'accountType',
-          'accountNumber', 'accountHolderName', 'idDocument', 'cashOffice',
-          'receiverId', 'receiverFullName', 'status', 'createdAt', 'resolvedAt',
-          'resolvedBy', 'notes'
-        ]) &&
-        request.resource.data.keys().hasAll([
-          'id', 'userId', 'userUid', 'userCode', 'userName', 'sourceCycleId',
-          'amountCop', 'method', 'status', 'createdAt'
-        ]) &&
-        request.resource.data.status == 'PENDING' &&
-        request.resource.data.amountCop is number &&
-        request.resource.data.amountCop > 0 &&
-        (!('resolvedAt' in request.resource.data) || request.resource.data.resolvedAt == null) &&
-        (!('resolvedBy' in request.resource.data) || request.resource.data.resolvedBy == null)
-      );
-      allow update, delete: if isAdmin();
+      allow write: if false; // DENY TOTAL CLIENT-SIDE WRITE (Exclusivo de Backend)
+    }
+
+    // =========================================================================
+    // 8B. LLAVES DE IDEMPOTENCIA (/idempotencyKeys/{keyId})
+    // =========================================================================
+    match /idempotencyKeys/{keyId} {
+      allow read, write: if false; // DENY TOTAL CLIENT-SIDE
     }
 
     // =========================================================================
@@ -279,7 +256,11 @@ service cloud.firestore {
     // =========================================================================
     match /settings/{docId} {
       allow read: if isAuthenticated();
-      allow write: if isAdmin();
+      allow create: if isAdmin() &&
+        !(request.resource.data.keys().hasAny(['activeCycleId', 'operationalCycleId', 'preparingCycleId']));
+      allow update: if isAdmin() &&
+        !(request.resource.data.diff(resource.data).affectedKeys().hasAny(['activeCycleId', 'operationalCycleId', 'preparingCycleId']));
+      allow delete: if false;
     }
 
     // =========================================================================

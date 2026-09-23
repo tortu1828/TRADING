@@ -85,8 +85,18 @@ export const ReinvestmentsView: React.FC = () => {
   const [orphanConfirmationText, setOrphanConfirmationText] = useState('');
   const [isPurgingOrphans, setIsPurgingOrphans] = useState(false);
 
+  // Reconciliation resolver state
+  const [selectedReconReq, setSelectedReconReq] = useState<any | null>(null);
+  const [reconResolution, setReconResolution] = useState<'RESOLVE_MATCHING' | 'KEEP_REVIEW'>('RESOLVE_MATCHING');
+  const [reconNotes, setReconNotes] = useState('');
+  const [isResolvingRecon, setIsResolvingRecon] = useState(false);
+
   const reinvestments = dataStore.getReinvestments();
   const waitlist = dataStore.getInvestments();
+
+  const reconciliationNeedsReviewRequests = useMemo(() => {
+    return reinvestments.filter((r) => r.fundingReconciliationStatus === 'NEEDS_REVIEW');
+  }, [reinvestments]);
 
   // Stats calculation
   const stats = useMemo(() => {
@@ -238,6 +248,38 @@ export const ReinvestmentsView: React.FC = () => {
       setStatusMessage({ type: 'error', text: `Error al rechazar: ${err.message}` });
     } finally {
       setActionLoadingId(null);
+    }
+  };
+
+  const handleResolveReconciliation = async () => {
+    if (!selectedReconReq) return;
+    try {
+      setIsResolvingRecon(true);
+      setStatusMessage(null);
+
+      const clientRequestId = crypto.randomUUID();
+      await dataStore.resolveFundingReconciliation(
+        selectedReconReq.id,
+        reconResolution,
+        reconNotes,
+        clientRequestId
+      );
+
+      setStatusMessage({
+        type: 'success',
+        text: 'La conciliación ha sido resuelta exitosamente y el estado se ha actualizado.',
+      });
+
+      setSelectedReconReq(null);
+      setReconNotes('');
+    } catch (err: any) {
+      console.error(err);
+      setStatusMessage({
+        type: 'error',
+        text: err.message || 'Error al resolver la conciliación.',
+      });
+    } finally {
+      setIsResolvingRecon(false);
     }
   };
 
@@ -514,6 +556,63 @@ export const ReinvestmentsView: React.FC = () => {
               />
             </div>
           </div>
+
+          {/* Alertas de Conciliación de Inyección (SuperAdmin only) */}
+          {isSuperAdmin && reconciliationNeedsReviewRequests.length > 0 && (
+            <div className="p-4 rounded-xl bg-amber-950/20 border border-amber-500/30 space-y-3">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider">
+                    ⚠️ Alertas de Conciliación Financiera ({reconciliationNeedsReviewRequests.length})
+                  </h4>
+                  <p className="text-[11px] text-slate-300 mt-0.5">
+                    Se han detectado aportes de dinero nuevo en efectivo que difieren del capital de inyección recalculado al cierre de ciclo. Esto bloquea estrictamente la apertura del nuevo ciclo (<strong>NEEDS_REVIEW</strong>).
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                {reconciliationNeedsReviewRequests.map((req) => {
+                  const confirmed = req.confirmedAmountCop || 0;
+                  const required = req.cashInjectionCop || 0;
+                  const diff = confirmed - required;
+                  return (
+                    <div key={req.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                      <div>
+                        <div className="flex items-center gap-1.5 font-bold">
+                          <span className="text-slate-200">{req.userName}</span>
+                          <span className="text-[10px] text-slate-400 bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded">
+                            {req.userCode}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-400 mt-1 space-y-0.5">
+                          <div>
+                            Banco/Ref: <span className="text-slate-300 font-mono">{req.bankReference || 'Sin referencia'}</span>
+                          </div>
+                          <div>
+                            Discrepancia: <span className="text-amber-400 font-bold font-mono">${confirmed.toLocaleString('es-CO')} COP verificado</span> vs <span className="text-blue-400 font-bold font-mono">${required.toLocaleString('es-CO')} COP requerido</span> (Diferencia: <span className={diff > 0 ? 'text-emerald-400 font-bold font-mono' : 'text-rose-400 font-bold font-mono'}>${diff.toLocaleString('es-CO')} COP</span>)
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => {
+                          setReconResolution('RESOLVE_MATCHING');
+                          setReconNotes('');
+                          setSelectedReconReq(req);
+                        }}
+                        className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-slate-950 hover:text-black rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer shadow-md self-start sm:self-center"
+                      >
+                        <ShieldAlert className="w-3.5 h-3.5" />
+                        Resolver Conciliación
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Table View Card */}
           <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
@@ -1393,6 +1492,130 @@ export const ReinvestmentsView: React.FC = () => {
               <p>Presiona "Escanear Solicitudes Huérfanas" para realizar una inspección de solo lectura (Dry Run).</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Modal de Resolución de Conciliación (SuperAdmin only) */}
+      {isSuperAdmin && selectedReconReq && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-amber-500" />
+                <h3 className="text-sm font-bold text-slate-100 uppercase tracking-wider">
+                  Resolución de Conciliación Bancaria
+                </h3>
+              </div>
+              <button
+                onClick={() => setSelectedReconReq(null)}
+                className="text-slate-400 hover:text-slate-100 text-xs font-bold transition"
+              >
+                Cerrar ✕
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Inversionista:</span>
+                <span className="text-slate-200 font-bold">{selectedReconReq.userName} ({selectedReconReq.userCode})</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Referencia Bancaria:</span>
+                <span className="text-slate-200 font-mono">{selectedReconReq.bankReference || 'Sin referencia'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Aporte verificado (A):</span>
+                <span className="text-amber-400 font-bold font-mono">${(selectedReconReq.confirmedAmountCop || 0).toLocaleString('es-CO')} COP</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Requerido recalculado (B):</span>
+                <span className="text-blue-400 font-bold font-mono">${(selectedReconReq.cashInjectionCop || 0).toLocaleString('es-CO')} COP</span>
+              </div>
+              <div className="flex justify-between border-t border-slate-900 pt-1 border-slate-800">
+                <span className="text-slate-400">Diferencia (A - B):</span>
+                <span className={`font-bold font-mono ${
+                  ((selectedReconReq.confirmedAmountCop || 0) - (selectedReconReq.cashInjectionCop || 0)) === 0 
+                    ? 'text-emerald-400' 
+                    : 'text-rose-400'
+                }`}>
+                  ${((selectedReconReq.confirmedAmountCop || 0) - (selectedReconReq.cashInjectionCop || 0)).toLocaleString('es-CO')} COP
+                </span>
+              </div>
+              {selectedReconReq.fundingReconciliationReason && (
+                <div className="text-[10px] text-amber-400 bg-amber-950/20 border border-amber-500/20 p-2 rounded mt-2">
+                  <strong>Causa:</strong> {selectedReconReq.fundingReconciliationReason}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                  Acción de Resolución
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setReconResolution('RESOLVE_MATCHING')}
+                    disabled={((selectedReconReq.confirmedAmountCop || 0) - (selectedReconReq.cashInjectionCop || 0)) !== 0}
+                    className={`p-3 rounded-xl border text-left transition flex flex-col justify-between ${
+                      reconResolution === 'RESOLVE_MATCHING'
+                        ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300 shadow-md'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-300'
+                    } disabled:opacity-40 disabled:cursor-not-allowed`}
+                  >
+                    <span className="font-bold text-[11px] uppercase tracking-wider block">Coincidencia Matemática</span>
+                    <span className="text-[10px] text-slate-400 mt-1">Marcar OK si los montos coinciden exactamente.</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setReconResolution('KEEP_REVIEW')}
+                    className={`p-3 rounded-xl border text-left transition flex flex-col justify-between ${
+                      reconResolution === 'KEEP_REVIEW'
+                        ? 'bg-blue-950/40 border-blue-500/50 text-blue-300 shadow-md'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-300'
+                    }`}
+                  >
+                    <span className="font-bold text-[11px] uppercase tracking-wider block">Nota de Seguimiento</span>
+                    <span className="text-[10px] text-slate-400 mt-1">Mantener en revisión y adjuntar notas administrativas.</span>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1">
+                  Notas / Justificación de Auditoría
+                </label>
+                <textarea
+                  value={reconNotes}
+                  onChange={(e) => setReconNotes(e.target.value)}
+                  placeholder="Detalla los acuerdos, ajustes o el origen de la resolución para trazabilidad pública de auditoría..."
+                  rows={3}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setSelectedReconReq(null)}
+                className="px-4 py-2 text-slate-400 hover:text-slate-200 text-xs font-bold transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleResolveReconciliation}
+                disabled={isResolvingRecon || (reconResolution === 'RESOLVE_MATCHING' && ((selectedReconReq.confirmedAmountCop || 0) - (selectedReconReq.cashInjectionCop || 0)) !== 0)}
+                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-850 text-white disabled:text-slate-500 rounded-xl font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-950"
+              >
+                {isResolvingRecon ? 'Procesando...' : 'Aplicar Resolución'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
