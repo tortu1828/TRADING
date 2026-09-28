@@ -143,7 +143,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
     if (propSelectedCycleId) return propSelectedCycleId;
     const closeToStartSourceId = getCloseToStartSourceId();
     if (closeToStartSourceId) return closeToStartSourceId;
-    return activeCycle ? activeCycle.cycleId : (dataStore.getCycles()[0]?.cycleId || '2026-09');
+    return activeCycle ? activeCycle.cycleId : (dataStore.getCycles()[0]?.cycleId || '');
   });
 
   // Secure unidimensional propagation to prevent react state update loops
@@ -664,7 +664,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
       {/* VIEW 1: SUMMARY (Inicio & Resumen) */}
       {/* ========================================================================= */}
       {currentTab === 'summary' && (() => {
-        const targetCycleId = selectedCycleId || activeCycle?.cycleId || currentCycle?.cycleId || '2026-09';
+        const targetCycleId = selectedCycleId || activeCycle?.cycleId || currentCycle?.cycleId || '';
         const userCategory = currentUser.category || getCategoryForCapital(currentUser.currentCapital) || 'AZUL';
 
         // 1. Obtener de forma estricta ÚNICAMENTE las operaciones reales de este usuario (o de su grupo exacto)

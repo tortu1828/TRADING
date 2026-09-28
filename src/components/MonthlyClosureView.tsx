@@ -60,6 +60,9 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   const activeCycle = dataStore.getActiveCycle();
   const allCycles = dataStore.getCycles();
   const activeUsers = dataStore.getActiveUsers();
+  const globalConfig = dataStore.getConfig();
+  const preparingCycleId = globalConfig?.preparingCycleId || null;
+  const preparationCycle = preparingCycleId ? (dataStore.getCycleById(preparingCycleId) || null) : null;
 
   // Sub-pestañas: Cierre del ciclo vs Preparación del Próximo Ciclo vs Informes Oficiales (exclusivo SuperAdmin)
   const [activeSubTab, setActiveSubTab] = useState<'closure' | 'preparation' | 'reports'>('closure');
@@ -714,7 +717,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
       {activeSubTab === 'preparation' ? (
         <CyclePreparationView
-          currentCycle={currentCycle}
+          currentCycle={preparationCycle}
           currentUser={currentUser}
           onRefresh={() => {
             if (activeCycle) setSelectedCycleId(activeCycle.cycleId);

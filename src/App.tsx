@@ -12,6 +12,7 @@ import { AdminFinanceView } from './components/AdminFinanceView';
 import { InvestorApplicationsView } from './components/InvestorApplicationsView';
 import { UserPortalView } from './components/UserPortalView';
 import { AdminStatisticsPanel } from './components/AdminStatisticsPanel';
+import { SupportTicketsView } from './components/SupportTicketsView';
 import { EditTRMModal } from './components/EditTRMModal';
 import { NotificationsModal } from './components/NotificationsModal';
 import { LiveNotificationToast } from './components/LiveNotificationToast';
@@ -30,7 +31,7 @@ const MainLayout: React.FC = () => {
   const [showNotifModal, setShowNotifModal] = useState(false);
   const [selectedCycleId, setSelectedCycleId] = useState<string>(() => {
     const active = dataStore.getActiveCycle();
-    return active ? active.cycleId : (dataStore.getCycles()[0]?.cycleId || '2026-09');
+    return active ? active.cycleId : (dataStore.getCycles()[0]?.cycleId || '');
   });
 
   const handleToggleSidebar = () => {
@@ -119,7 +120,9 @@ const MainLayout: React.FC = () => {
 
         {/* Dynamic View Component */}
         <main className="flex-1 max-w-7xl w-full mx-auto px-2.5 sm:px-6 lg:px-8 py-3.5 sm:py-6 pb-8">
-          {isSuperAdmin && !activeTab.startsWith('portal') ? (
+          {activeTab === 'support' ? (
+            <SupportTicketsView />
+          ) : isSuperAdmin && !activeTab.startsWith('portal') ? (
             <>
               {activeTab === 'dashboard' && <AdminDashboard onNavigate={setActiveTab} />}
               {activeTab === 'finance' && <AdminFinanceView onNavigate={setActiveTab} />}

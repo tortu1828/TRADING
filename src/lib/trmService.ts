@@ -12,8 +12,6 @@ export interface LiveTRMResult {
   dateStr: string;
 }
 
-const FALLBACK_DEFAULT_TRM = 4028.50;
-
 /**
  * Consulta la TRM oficial del mercado en tiempo real.
  * Realiza fallback en cascada a múltiples fuentes de alta disponibilidad.
@@ -107,10 +105,10 @@ export async function fetchLiveTRM(): Promise<LiveTRMResult> {
     // Continuar al fallback seguro
   }
 
-  // Fallback con valor financiero de mercado razonable
+// Proveedores fallaron: devolver estado no disponible (prohibido fallback 4028.5)
   return {
-    rate: FALLBACK_DEFAULT_TRM,
-    source: 'Tasa Referencial del Sistema (Conexión offline)',
+    rate: 0,
+    source: 'TRM en vivo no disponible',
     timestamp: new Date().toISOString(),
     isLive: false,
     dateStr,

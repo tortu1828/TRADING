@@ -22,6 +22,15 @@ export type NotificationType =
   | 'SYSTEM'
   | 'ADMIN_BROADCAST';
 
+export interface UserPermissions {
+  supportAgent?: boolean;
+  supportReadUserContext?: boolean;
+  supportReadOperationalContext?: boolean;
+  updatedAt?: any;
+  updatedByUid?: string;
+  updatedByName?: string;
+}
+
 /**
  * Perfil de usuario / inversionista.
  * Identidad principal de autorización: uid (Firebase Auth UID).
@@ -36,6 +45,7 @@ export interface UserProfile {
   phone: string;
   role: UserRole;
   status: UserStatus;
+  permissions?: UserPermissions;
   currentCapital: number; // Capital operativo COP
   baseCapital?: number; // Capital aportado inicial
   currency: 'COP';
@@ -76,7 +86,14 @@ export interface MonthlyCycle {
   cycleId: string; // "2026-09" o "cyc_..."
   name: string; // "Septiembre 2026", "Ciclo 2 - Septiembre"
   status: CycleStatus;
-  trmApplied: number;
+  trmApplied?: number;
+  // Modelo TRM Dinámica y Cierre Manual Definitivo
+  closingTrm?: number | null;
+  closingTrmSetAt?: string | null;
+  closingTrmSetByUid?: string | null;
+  closingTrmSetByName?: string | null;
+  observedMarketTrmAtClose?: number | null;
+  isLegacy?: boolean;
   openedAt?: string;
   closedAt: string | null;
   closedBy: string | null;
@@ -149,6 +166,8 @@ export interface CycleFinancialSummary {
   totalGrossCop: number;
   totalUsersProfitCop: number;
   totalAdminCommissionCop: number;
+  closingTrm?: number | null;
+  trmApplied?: number;
   updatedAt: string;
   updatedBy: string;
   reopenAudit?: {
@@ -172,6 +191,10 @@ export interface DailyGroupOperation {
   groupCapitalCop: number;
   date: string; // YYYY-MM-DD (Timezone: America/Bogota)
   amountUsd: number;
+  trmUsed?: number;
+  trmSource?: string;
+  trmCapturedAt?: string;
+  grossCop?: number;
   notes?: string;
   status?: 'ACTIVE' | 'CONSOLIDATED';
   consolidatedAt?: string;
@@ -799,5 +822,100 @@ export interface CycleReportHeaderDoc {
   currentVersionNumber: number;
   status: 'GENERATING' | 'READY' | 'SUPERSEDED' | 'FAILED';
   updatedAt: string;
+}
+
+// =========================================================================
+// MÓDULO DE SOPORTE TÉCNICO (FASES S1, S2, S3)
+// =========================================================================
+
+export type SupportTicketCategory =
+  | 'ACCOUNT_ACCESS'
+  | 'CAPITAL'
+  | 'CYCLE'
+  | 'OPERATIONS'
+  | 'PROFITS'
+  | 'REINVESTMENT'
+  | 'WITHDRAWAL'
+  | 'NOTIFICATIONS'
+  | 'TECHNICAL'
+  | 'OTHER';
+
+export type SupportTicketStatus =
+  | 'OPEN'
+  | 'IN_PROGRESS'
+  | 'WAITING_USER'
+  | 'RESOLVED'
+  | 'CLOSED';
+
+export type SupportTicketPriority =
+  | 'LOW'
+  | 'NORMAL'
+  | 'HIGH'
+  | 'URGENT';
+
+export interface SupportTicket {
+  ticketId: string;
+  ticketNumber: string;
+
+  createdByUid: string;
+  createdByUserId: string;
+  createdByUserCode: string;
+  createdByName: string;
+
+  subject: string;
+  category: SupportTicketCategory;
+  description: string;
+
+  status: SupportTicketStatus;
+  priority: SupportTicketPriority;
+
+  assignedToUid: string | null;
+  assignedToName: string | null;
+  assignedAt: string | null;
+
+  lastMessagePreview: string;
+  lastMessageByUid: string;
+  lastMessageByName: string;
+  lastMessageSenderType: 'USER' | 'SUPPORT' | 'SUPERADMIN';
+  lastMessageAt: string;
+
+  messageCount: number;
+
+  unreadByUser: boolean;
+  unreadBySupport: boolean;
+
+  createdAt: string;
+  updatedAt: string;
+
+  resolvedAt: string | null;
+  resolvedByUid: string | null;
+  resolvedByName: string | null;
+
+  closedAt: string | null;
+  closedByUid: string | null;
+  closedByName: string | null;
+  closedReason?: string | null;
+}
+
+export interface SupportTicketMessage {
+  messageId: string;
+  ticketId: string;
+
+  senderUid: string;
+  senderName: string;
+  senderUserCode: string;
+  senderType: 'USER' | 'SUPPORT' | 'SUPERADMIN';
+
+  text: string;
+  createdAt: string;
+}
+
+export interface SupportInternalNote {
+  noteId: string;
+  ticketId: string;
+  authorUid: string;
+  authorName: string;
+  noteText: string;
+  createdAt: string;
 }
 

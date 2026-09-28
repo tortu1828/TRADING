@@ -25,10 +25,12 @@ import {
   Edit3,
   Check,
   Lock,
+  RefreshCw,
 } from 'lucide-react';
 import { BitacoraCategory, CategoryGroupInfo, DailyGroupOperation, MonthlyCycle, UserProfile } from '../types';
 import { dataStore } from '../lib/dataStore';
 import { formatCOP, formatUSD, formatTRM, calculateUserMonthlyResult } from '../lib/financialEngine';
+import { fetchLiveTRM } from '../lib/trmService';
 
 interface DailyOperationsModalProps {
   isOpen: boolean;
@@ -61,6 +63,31 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [investorSearchQuery, setInvestorSearchQuery] = useState<string>('');
 
+  const [liveMarketTrm, setLiveMarketTrm] = useState<number | null>(null);
+  const [liveTrmSource, setLiveTrmSource] = useState<string>('Mercado en Vivo');
+  const [isLoadingTrm, setIsLoadingTrm] = useState<boolean>(false);
+
+  const loadLiveTrm = async () => {
+    setIsLoadingTrm(true);
+    try {
+      const res = await fetchLiveTRM();
+      if (res && res.rate > 0) {
+        setLiveMarketTrm(res.rate);
+        setLiveTrmSource(res.source || 'Mercado en Vivo');
+      }
+    } catch (e) {
+      console.warn('Error loading live TRM:', e);
+    } finally {
+      setIsLoadingTrm(false);
+    }
+  };
+
+  React.useEffect(() => {
+    if (isOpen) {
+      loadLiveTrm();
+    }
+  }, [isOpen]);
+
   React.useEffect(() => {
     if (initialTargetUser) {
       setSelectedUserId(initialTargetUser.id);
@@ -75,7 +102,8 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
 
   if (!isOpen || !group) return null;
 
-  const trm = cycle.trmApplied || 4020;
+  const currentOpTrm = liveMarketTrm || cycle.trmApplied || 4028.5;
+  const trm = currentOpTrm;
   const isClosed = cycle.status === 'CLOSED';
   const operations = dataStore.getDailyOperations(cycle.cycleId, group.category, group.groupCapitalCop);
 
@@ -86,7 +114,10 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
   const consolidatedUsd = consolidatedOps.reduce((sum, op) => sum + op.amountUsd, 0);
 
   const totalUsdAccumulated = operations.reduce((sum, op) => sum + op.amountUsd, 0);
-  const totalGrossCopPerUser = totalUsdAccumulated * trm;
+  const totalGrossCopPerUser = operations.reduce(
+    (sum, op) => sum + (op.grossCop ?? (op.amountUsd * (op.trmUsed || trm))),
+    0
+  );
 
   // Obtener usuarios reales del grupo (quienes tienen este capital exacto en esta categoría)
   const usersInGroup: UserProfile[] = group.users && group.users.length > 0

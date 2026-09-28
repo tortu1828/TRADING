@@ -37,6 +37,7 @@ import {
 import { normalizeName } from './excelMigrationService';
 import { firestoreService } from './firestoreService';
 import { historicalMigrationService, ReconciliationReport } from './historicalMigrationService';
+import { fetchLiveTRM } from './trmService';
 import { auth } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { getAppBaseUrl } from './constants';
@@ -49,7 +50,9 @@ export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
   trmMarketRate: 4028.50,
   trmSource: 'Mercado Oficial Bancario (USD/COP)',
   trmLastSyncedAt: new Date().toISOString(),
-  activeCycleId: '2026-09',
+  activeCycleId: '',
+  operationalCycleId: null,
+  preparingCycleId: null,
   roundingRule: 'none',
   categories: [
     {
@@ -768,12 +771,12 @@ class DataStore {
   }
 
   public getActiveCycle(): MonthlyCycle {
-    const cycle = this.cycles.find((c) => c.cycleId === this.config.activeCycleId);
+    const cycle = this.cycles.find((c) => c.cycleId === this.config.activeCycleId || c.id === this.config.activeCycleId);
     if (cycle) return cycle;
     if (this.cycles && this.cycles.length > 0) return this.cycles[0];
 
     // Fallback seguro cuando la base de datos está vacía o cargando
-    const activeId = this.config?.activeCycleId || '2026-09';
+    const activeId = this.config?.activeCycleId || '';
     return {
       id: activeId,
       cycleId: activeId,
@@ -798,7 +801,7 @@ class DataStore {
   }
 
   public getCycleById(cycleId: string): MonthlyCycle | undefined {
-    return this.cycles.find((c) => c.cycleId === cycleId);
+    return this.cycles.find((c) => c.cycleId === cycleId || c.id === cycleId);
   }
 
   public getConfig(): GlobalConfig {
@@ -1353,7 +1356,10 @@ class DataStore {
     adminName: string = 'Administrador Principal',
     targetUser?: UserProfile | null,
     targetTypeParam?: OperationTargetType,
-    customAuthorizedUids?: string[]
+    customAuthorizedUids?: string[],
+    trmUsedParam?: number,
+    trmSourceParam?: string,
+    trmCapturedAtParam?: string
   ): Promise<{ success: boolean; totalUsd: number; operation: DailyGroupOperation; message: string }> {
     const cycle = this.getCycleById(cycleId);
     if (!cycle || cycle.status === 'CLOSED') {
@@ -1361,6 +1367,31 @@ class DataStore {
     }
     if (isNaN(amountUsd) || amountUsd <= 0) {
       throw new Error('El monto operado en USD debe ser mayor a 0.');
+    }
+
+    let opTrmUsed = trmUsedParam;
+    let opTrmSource = trmSourceParam || 'LIVE_MARKET';
+    let opTrmCapturedAt = trmCapturedAtParam || new Date().toISOString();
+
+    if (!opTrmUsed || opTrmUsed <= 0) {
+      try {
+        const liveTrm = await fetchLiveTRM();
+        if (liveTrm && liveTrm.rate && liveTrm.rate > 0) {
+          opTrmUsed = liveTrm.rate;
+          opTrmSource = liveTrm.source || 'LIVE_MARKET';
+          opTrmCapturedAt = liveTrm.timestamp || new Date().toISOString();
+        }
+      } catch (err) {
+        console.warn('Error fetching live TRM for daily operation, using fallback:', err);
+      }
+    }
+    if (!opTrmUsed || opTrmUsed <= 0) {
+      if (cycle.isLegacy && cycle.trmApplied && cycle.trmApplied > 0) {
+        opTrmUsed = cycle.trmApplied;
+        opTrmSource = 'CYCLE_DEFAULT';
+      } else {
+        throw new Error('LIVE_TRM_UNAVAILABLE: TRM en vivo no disponible para registrar la operación en ciclo moderno.');
+      }
     }
 
     const targetType: OperationTargetType = targetTypeParam || (targetUser ? 'INDIVIDUAL' : 'CUSTOM_GROUP');
@@ -1391,6 +1422,9 @@ class DataStore {
       groupCapitalCop,
       date,
       amountUsd,
+      trmUsed: opTrmUsed,
+      trmSource: opTrmSource,
+      trmCapturedAt: opTrmCapturedAt,
       notes: cleanNotes,
       targetType,
       targetUserId,
@@ -2335,8 +2369,6 @@ class DataStore {
     operation?: DailyGroupOperation
   ): { success: boolean; sentCount: number; message: string } {
     const cycle = this.getCycleById(cycleId) || this.getActiveCycle();
-    const trm = cycle.trmApplied || 4028.5;
-
     const targetOp: DailyGroupOperation =
       operation ||
       (operationId ? this.dailyOperations.find((op) => op.id === operationId) : undefined) ||
@@ -2352,6 +2384,8 @@ class DataStore {
         createdBy: adminName,
         targetType: 'CUSTOM_GROUP',
       } as DailyGroupOperation);
+
+    const trm = targetOp.trmUsed || cycle.closingTrm || (cycle.isLegacy ? (cycle.trmApplied || 0) : 0);
 
     const activeUsers = this.getActiveUsers();
     const recipients = this.resolveOperationRecipients(targetOp, activeUsers);
@@ -2456,14 +2490,18 @@ class DataStore {
   }
 
   /**
-   * CERRAR CICLO (Regla V2.1)
+   * CERRAR CICLO (Regla V2.1 / Modelo TRM Definitiva)
    * Bloquea el ciclo contra modificaciones financieras y prepara histórico.
+   * Recalcula la liquidación definitiva individual: finalGrossCop = totalUsd * closingTrm
    */
   public async closeCycle(
     cycleId: string,
     adminUid: string = 'admin_root_uid',
-    adminName: string = 'Administrador Principal'
-  ): Promise<{ success: boolean; message: string }> {
+    adminName: string = 'Administrador Principal',
+    closingTrmParam?: number,
+    observedMarketTrmAtCloseParam?: number,
+    adminNotes?: string
+  ): Promise<{ success: boolean; message: string; closingTrm?: number }> {
     const cycleIndex = this.cycles.findIndex((c) => c.cycleId === cycleId);
     if (cycleIndex < 0) {
       throw new Error('Ciclo no encontrado.');
@@ -2480,13 +2518,29 @@ class DataStore {
       throw new Error(`No se puede cerrar el ciclo. Aún existen ${activeUsers.length - userResults.length} usuarios sin calcular.`);
     }
 
+    const isModernCycle = !cycle.isLegacy;
+    const parsedClosingTrm = Number(closingTrmParam);
+    if (isModernCycle && (!parsedClosingTrm || !Number.isFinite(parsedClosingTrm) || parsedClosingTrm <= 0)) {
+      throw new Error('INVALID_CLOSING_TRM: La TRM de cierre manual es obligatoria y debe ser un número mayor a cero para ciclos modernos.');
+    }
+
+    const effectiveClosingTrm = parsedClosingTrm > 0
+      ? parsedClosingTrm
+      : (cycle.isLegacy && Number(cycle.trmApplied) > 0 ? Number(cycle.trmApplied) : 0);
+
+    if (!effectiveClosingTrm || effectiveClosingTrm <= 0) {
+      throw new Error('INVALID_CLOSING_TRM: TRM de cierre inválida o menor/igual a cero.');
+    }
+
     const now = new Date().toISOString();
 
     // 1. INVOCAR CLOUD FUNCTION AUTORITATIVA DE SERVIDOR
     // Realiza el cierre en Firestore y aplica cada reinversión aprobada mediante Transacciones Atómicas en el backend
     const callResult = await firestoreService.adminCloseCycleCallable({
       cycleId,
-      adminNotes: `Cierre formal ejecutado por ${adminName}`,
+      closingTrm: effectiveClosingTrm,
+      observedMarketTrmAtClose: observedMarketTrmAtCloseParam,
+      adminNotes: adminNotes || `Cierre formal ejecutado por ${adminName}`,
     });
 
     if (!callResult.success || !callResult.cycleClosed) {
@@ -2517,10 +2571,41 @@ class DataStore {
       throw new Error(conflictMsg);
     }
 
-    // 2. Bloquear cycleUserResults localmente
+    const finalClosingTrm = callResult.closingTrm || effectiveClosingTrm;
+    let totalGrossUsdAtClose = 0;
+    let totalGrossCopAtClose = 0;
+    let totalUsersProfitCopAtClose = 0;
+    let totalAdminCommCopAtClose = 0;
+
+    // 2. Liquidación Definitiva en cycleUserResults localmente
+    // finalGrossCop = totalUsd * finalClosingTrm (Autoritativo y definitivo)
     this.userResults.forEach((r) => {
       if (r.cycleId === cycleId) {
         r.isCycleClosed = true;
+        r.trmUsed = finalClosingTrm;
+
+        const opUsd = Number(r.totalUsdOperated || 0);
+        const finalGrossCop = opUsd * finalClosingTrm;
+        const userPctRaw = r.userPercentage !== undefined ? r.userPercentage : 75;
+        const adminPctRaw = r.adminPercentage !== undefined ? r.adminPercentage : 25;
+        const uRatio = userPctRaw > 1 ? userPctRaw / 100 : userPctRaw;
+        const aRatio = adminPctRaw > 1 ? adminPctRaw / 100 : adminPctRaw;
+
+        const finalUserProfitCop = finalGrossCop * uRatio;
+        const finalAdminCommCop = finalGrossCop * aRatio;
+        const finalUserProfitUsd = opUsd * uRatio;
+        const finalAdminCommUsd = opUsd * aRatio;
+
+        r.totalGrossCop = finalGrossCop;
+        r.userProfitCop = finalUserProfitCop;
+        r.adminCommissionCop = finalAdminCommCop;
+        r.userProfitUsd = finalUserProfitUsd;
+        r.adminCommissionUsd = finalAdminCommUsd;
+
+        totalGrossUsdAtClose += opUsd;
+        totalGrossCopAtClose += finalGrossCop;
+        totalUsersProfitCopAtClose += finalUserProfitCop;
+        totalAdminCommCopAtClose += finalAdminCommCop;
       }
     });
 
@@ -2567,6 +2652,16 @@ class DataStore {
       status: 'CLOSED',
       closedAt: now,
       closedBy: adminName,
+      closingTrm: finalClosingTrm,
+      closingTrmSetAt: now,
+      closingTrmSetByUid: adminUid,
+      closingTrmSetByName: adminName,
+      observedMarketTrmAtClose: observedMarketTrmAtCloseParam || null,
+      trmApplied: finalClosingTrm, // legacy
+      totalGrossUsd: callResult.totalGrossUsd !== undefined ? callResult.totalGrossUsd : totalGrossUsdAtClose,
+      totalGrossCop: callResult.totalGrossCop !== undefined ? callResult.totalGrossCop : totalGrossCopAtClose,
+      totalUsersProfitCop: callResult.totalUsersProfitCop !== undefined ? callResult.totalUsersProfitCop : totalUsersProfitCopAtClose,
+      totalAdminCommissionCop: callResult.totalAdminCommissionCop !== undefined ? callResult.totalAdminCommissionCop : totalAdminCommCopAtClose,
       isClosing: false,
       closingStartedAt: null,
       closingByUid: null,
@@ -2581,9 +2676,15 @@ class DataStore {
       cycleId,
       targetEntity: cycleId,
       details: {
-        totalGrossCop: cycle.totalGrossCop,
-        totalUsersProfitCop: cycle.totalUsersProfitCop,
-        totalAdminCommissionCop: cycle.totalAdminCommissionCop,
+        closingTrm: finalClosingTrm,
+        closingTrmSetAt: now,
+        closingTrmSetByUid: adminUid,
+        closingTrmSetByName: adminName,
+        observedMarketTrmAtClose: observedMarketTrmAtCloseParam || null,
+        totalGrossUsd: this.cycles[cycleIndex].totalGrossUsd,
+        totalGrossCop: this.cycles[cycleIndex].totalGrossCop,
+        totalUsersProfitCop: this.cycles[cycleIndex].totalUsersProfitCop,
+        totalAdminCommissionCop: this.cycles[cycleIndex].totalAdminCommissionCop,
       },
     });
 
@@ -2591,7 +2692,8 @@ class DataStore {
 
     return {
       success: true,
-      message: `Ciclo ${cycle.name} cerrado y congelado exitosamente.`,
+      closingTrm: finalClosingTrm,
+      message: `Ciclo ${cycle.name} cerrado exitosamente con TRM definitiva de $${finalClosingTrm.toLocaleString('es-CO')} COP.`,
     };
   }
 

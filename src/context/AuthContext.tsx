@@ -15,6 +15,7 @@ interface AuthContextType {
   currentUser: UserProfile | null;
   currentRole: UserRole;
   isSuperAdmin: boolean;
+  isSupportAgent: boolean;
   isAuthLoading: boolean;
   switchUser: (userId: string) => void;
   switchToAdmin: () => void;
@@ -442,6 +443,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const isSuperAdmin =
     currentUser?.role === 'ADMIN' ||
     (currentUser?.email ? isSuperAdminEmail(currentUser.email) : false);
+  const isSupportAgent =
+    isSuperAdmin ||
+    (currentUser?.permissions?.supportAgent === true && currentUser?.status === 'ACTIVE');
   const currentRole: UserRole = currentUser?.role || 'USER';
 
   return (
@@ -450,6 +454,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         currentUser,
         currentRole,
         isSuperAdmin,
+        isSupportAgent,
         isAuthLoading,
         switchUser,
         switchToAdmin,

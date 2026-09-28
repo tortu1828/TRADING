@@ -22,6 +22,7 @@ import {
   UserCheck,
   LogOut,
   BarChart3,
+  LifeBuoy,
 } from 'lucide-react';
 import { EasyTradersLogo } from './EasyTradersLogo';
 import { useAuth } from '../context/AuthContext';
@@ -48,7 +49,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isCollapsed = false,
   onToggleCollapse,
 }) => {
-  const { currentUser, isSuperAdmin, logout } = useAuth();
+  const { currentUser, isSuperAdmin, isSupportAgent, logout } = useAuth();
   const [showSwitchMenu, setShowSwitchMenu] = React.useState(false);
 
   const isAdminUser = isSuperAdmin || currentUser?.role === 'ADMIN';
@@ -326,6 +327,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 {!isCollapsed && <span className="flex-1 tracking-wide truncate">Auditoría</span>}
               </button>
 
+              {/* 9.1 Soporte Técnico */}
+              <button
+                onClick={() => handleNavClick('support')}
+                title="Soporte Técnico"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
+                  activeTab === 'support'
+                    ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
+                }`}
+              >
+                <div className="w-6 h-6 flex items-center justify-center text-blue-400 shrink-0">
+                  <LifeBuoy className="w-4 h-4" />
+                </div>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Soporte Técnico</span>}
+              </button>
+
               {/* 10. Configuración */}
               <button
                 onClick={() => handleNavClick('settings')}
@@ -426,6 +445,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <BarChart3 className="w-4 h-4" />
                 </div>
                 {!isCollapsed && <span className="flex-1 tracking-wide truncate">Estadísticas</span>}
+              </button>
+
+              {/* 3.2 Mesa de Ayuda / Soporte */}
+              <button
+                onClick={() => handleNavClick('support')}
+                title="Mesa de Ayuda"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
+                  activeTab === 'support'
+                    ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
+                }`}
+              >
+                <div className="w-6 h-6 flex items-center justify-center text-blue-400 shrink-0">
+                  <LifeBuoy className="w-4 h-4" />
+                </div>
+                {!isCollapsed && (
+                  <span className="flex-1 tracking-wide truncate">
+                    {isSupportAgent ? 'Panel de Soporte' : 'Mesa de Ayuda'}
+                  </span>
+                )}
               </button>
 
               {/* 4. Notificaciones */}

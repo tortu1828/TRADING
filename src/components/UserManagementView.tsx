@@ -100,6 +100,9 @@ export const UserManagementView: React.FC = () => {
   const [formBank, setFormBank] = useState('Bancolombia');
   const [formAccount, setFormAccount] = useState('');
   const [formTargetCycleId, setFormTargetCycleId] = useState('');
+  const [formSupportAgent, setFormSupportAgent] = useState(false);
+  const [formSupportReadUserContext, setFormSupportReadUserContext] = useState(false);
+  const [formSupportReadOperationalContext, setFormSupportReadOperationalContext] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -151,6 +154,9 @@ export const UserManagementView: React.FC = () => {
     setFormUserSplit('50');
     setFormBank('Bancolombia');
     setFormAccount('');
+    setFormSupportAgent(false);
+    setFormSupportReadUserContext(false);
+    setFormSupportReadOperationalContext(false);
     setFormError(null);
     setIsAddModalOpen(true);
   };
@@ -165,6 +171,9 @@ export const UserManagementView: React.FC = () => {
     setFormUserSplit(user.userPercentage.toString());
     setFormBank(user.paymentMethod);
     setFormAccount(user.paymentDetails);
+    setFormSupportAgent(user.permissions?.supportAgent === true);
+    setFormSupportReadUserContext(user.permissions?.supportReadUserContext === true);
+    setFormSupportReadOperationalContext(user.permissions?.supportReadOperationalContext === true);
     setFormError(null);
   };
 
@@ -261,6 +270,40 @@ export const UserManagementView: React.FC = () => {
         );
 
         await firestoreService.saveUser(updatedUser);
+
+        // Si es SuperAdmin y los permisos de soporte cambiaron, invocar callable autoritativa
+        if (isSuperAdmin) {
+          const currentAgent = editingUser.permissions?.supportAgent === true;
+          const currentReadUser = editingUser.permissions?.supportReadUserContext === true;
+          const currentReadOp = editingUser.permissions?.supportReadOperationalContext === true;
+
+          const hasPermsChanged =
+            formSupportAgent !== currentAgent ||
+            formSupportReadUserContext !== currentReadUser ||
+            formSupportReadOperationalContext !== currentReadOp;
+
+          if (hasPermsChanged) {
+            const permRes = await firestoreService.adminUpdateSupportPermissions({
+              targetUid: editingUser.uid || editingUser.id,
+              permissions: {
+                supportAgent: formSupportAgent,
+                supportReadUserContext: formSupportAgent && formSupportReadUserContext,
+                supportReadOperationalContext: formSupportAgent && formSupportReadOperationalContext,
+              },
+              clientRequestId: crypto.randomUUID(),
+            });
+
+            if (permRes && permRes.permissions) {
+              dataStore.updateUser(
+                editingUser.id,
+                { permissions: permRes.permissions },
+                currentUser?.uid || 'admin_root_uid',
+                currentUser?.fullName || 'Administrador Principal'
+              );
+            }
+          }
+        }
+
         setEditingUser(null);
       } else {
         if (createMode === 'PENDING') {
@@ -977,6 +1020,11 @@ ${directLink}
                           🔔 {user.tradeNotificationAlias}
                         </span>
                       )}
+                      {user.permissions?.supportAgent && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-950/90 border border-blue-500/50 text-blue-300 font-bold" title="Agente de Soporte Técnico Autorizado">
+                          🎧 Soporte
+                        </span>
+                      )}
                     </p>
                     <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
                       <span className="flex items-center gap-1">
@@ -1508,6 +1556,68 @@ ${directLink}
                   />
                 </div>
               </div>
+
+              {/* Support Permissions Configuration (SuperAdmin Only on Edit) */}
+              {editingUser && isSuperAdmin && (
+                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                      <Shield className="w-3.5 h-3.5 text-blue-400" />
+                      Permisos de Soporte Técnico
+                    </label>
+                    <span className="text-[10px] font-bold text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-500/30">
+                      SuperAdmin
+                    </span>
+                  </div>
+
+                  <div className="space-y-2 text-xs">
+                    <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={formSupportAgent}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setFormSupportAgent(checked);
+                          if (!checked) {
+                            setFormSupportReadUserContext(false);
+                            setFormSupportReadOperationalContext(false);
+                          }
+                        }}
+                        className="rounded border-slate-700 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                      />
+                      <span className="font-semibold">Agente de soporte (supportAgent)</span>
+                    </label>
+
+                    {formSupportAgent && (
+                      <div className="pl-6 space-y-2 border-l border-slate-800 ml-2">
+                        <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={formSupportReadUserContext}
+                            onChange={(e) => setFormSupportReadUserContext(e.target.checked)}
+                            className="rounded border-slate-700 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                          />
+                          <span>Ver contexto del usuario (supportReadUserContext)</span>
+                        </label>
+
+                        <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={formSupportReadOperationalContext}
+                            onChange={(e) => setFormSupportReadOperationalContext(e.target.checked)}
+                            className="rounded border-slate-700 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                          />
+                          <span>Ver contexto operacional (supportReadOperationalContext)</span>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 leading-snug bg-slate-900/60 p-2 rounded-lg border border-slate-800">
+                    Este permiso no concede acceso a operaciones financieras, capitales, cierres ni administración.
+                  </p>
+                </div>
+              )}
 
               {formError && (
                 <div className="p-3 rounded-lg bg-red-950/60 border border-red-500/30 text-red-300 text-xs flex items-center gap-2">

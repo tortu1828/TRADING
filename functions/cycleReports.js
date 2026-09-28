@@ -150,7 +150,8 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
   }
   const cycleData = cycleDocSnap.data() || {};
   const cycleName = cycleData.name || cycleData.title || targetCycleId;
-  const trmApplied = Number(cycleData.trmApplied || cycleData.trmFinal || cycleData.trmSnapshot || 0);
+  const closingTrm = Number(cycleData.closingTrm || cycleData.trmApplied || cycleData.trmFinal || cycleData.trmSnapshot || 0);
+  const trmApplied = closingTrm;
 
   // 2. Resolver fechas autoritativas con guardrails estrictos
   const isModern = isModernCycle(cycleData);
@@ -228,6 +229,11 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     closedByName: adminName,
     adminNotes: adminNotes || "",
     trmApplied,
+    closingTrm,
+    closingTrmSetAt: cycleData.closingTrmSetAt || null,
+    closingTrmSetByUid: cycleData.closingTrmSetByUid || null,
+    closingTrmSetByName: cycleData.closingTrmSetByName || null,
+    observedMarketTrmAtClose: cycleData.observedMarketTrmAtClose || null,
     createdAt: vDataExists(versionSnap) ? (versionSnap.data().createdAt || nowIso) : nowIso,
     snapshotGeneratedAt: nowIso,
     isRetrospective: Boolean(isRetrospective),

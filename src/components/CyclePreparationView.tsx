@@ -94,7 +94,7 @@ export const resolvePreparationAmounts = (
 };
 
 interface CyclePreparationViewProps {
-  currentCycle: MonthlyCycle;
+  currentCycle?: MonthlyCycle | null;
   currentUser: UserProfile | null;
   onRefresh?: () => void;
 }
@@ -104,8 +104,10 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
   currentUser,
   onRefresh,
 }) => {
+  const [config, setConfig] = useState(dataStore.getConfig());
   const [cycles, setCycles] = useState<MonthlyCycle[]>([]);
-  const [selectedCycleId, setSelectedCycleId] = useState<string>(currentCycle.id);
+  const preparingCycleId = config?.preparingCycleId || null;
+  const [selectedCycleId, setSelectedCycleId] = useState<string>(preparingCycleId || currentCycle?.id || '');
   const [reinvestments, setReinvestments] = useState<ReinvestmentRequest[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -129,12 +131,23 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
       setCycles(dataStore.getCycles());
       setReinvestments(dataStore.getReinvestments());
       setUsers(dataStore.getUsers());
+      setConfig(dataStore.getConfig());
     });
     setCycles(dataStore.getCycles());
     setReinvestments(dataStore.getReinvestments());
     setUsers(dataStore.getUsers());
+    setConfig(dataStore.getConfig());
     return unsub;
   }, []);
+
+  // Sync selectedCycleId when preparingCycleId changes
+  useEffect(() => {
+    if (preparingCycleId) {
+      setSelectedCycleId(preparingCycleId);
+    } else if (currentCycle?.id) {
+      setSelectedCycleId(currentCycle.id);
+    }
+  }, [preparingCycleId, currentCycle?.id]);
 
   const userMap = useMemo(() => {
     const map: Record<string, UserProfile> = {};
@@ -145,16 +158,28 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
     return map;
   }, [users]);
 
-  const activeTargetCycle = useMemo(() => {
-    return cycles.find((c) => c.id === selectedCycleId) || currentCycle;
-  }, [cycles, selectedCycleId, currentCycle]);
+  const preparingCycle = useMemo(() => {
+    if (!preparingCycleId) return null;
+    return (
+      cycles.find((c) => c.id === preparingCycleId || c.cycleId === preparingCycleId) ||
+      (currentCycle?.id === preparingCycleId ? currentCycle : null)
+    );
+  }, [cycles, preparingCycleId, currentCycle]);
 
-  const isCycleStarted = activeTargetCycle.operationalStatus === 'STARTED';
+  const activeTargetCycle = useMemo(() => {
+    if (selectedCycleId) {
+      const found = cycles.find((c) => c.id === selectedCycleId || c.cycleId === selectedCycleId);
+      if (found) return found;
+    }
+    return preparingCycle || currentCycle || null;
+  }, [cycles, selectedCycleId, preparingCycle, currentCycle]);
+
+  const isCycleStarted = activeTargetCycle?.operationalStatus === 'STARTED';
 
   // Filtrar solicitudes relevantes para el ciclo seleccionado
   const cycleReinvestments = useMemo(() => {
+    if (!selectedCycleId) return [];
     return reinvestments.filter((r) => {
-      // Relevante si el targetCycleId coincide, o si cycleId coincide con el ciclo objetivo o su fuente
       return (
         r.targetCycleId === selectedCycleId ||
         r.cycleId === selectedCycleId ||
@@ -206,6 +231,61 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
       readyUsersCount,
     };
   }, [cycleReinvestments, userMap]);
+
+  // KPIs calculados exclusivamente para el ciclo en preparación (preparingCycleId)
+  const preparingCycleReinvestments = useMemo(() => {
+    if (!preparingCycleId) return [];
+    return reinvestments.filter((r) => {
+      return (
+        r.targetCycleId === preparingCycleId ||
+        r.cycleId === preparingCycleId ||
+        (r.status === 'APPROVED' && (!r.targetCycleId || r.targetCycleId === preparingCycleId))
+      );
+    });
+  }, [reinvestments, preparingCycleId]);
+
+  const preparingKpis = useMemo(() => {
+    let totalProcessed = 0;
+    let pendingCount = 0;
+    let pendingAmountCop = 0;
+    let confirmedCount = 0;
+    let confirmedAmountCop = 0;
+    let totalSecuredCapitalCop = 0;
+    let totalProjectedCapitalCop = 0;
+    let readyUsersCount = 0;
+
+    preparingCycleReinvestments.forEach((r) => {
+      totalProcessed += 1;
+      const user = userMap[r.userId] || userMap[r.userUid || ''];
+      const amounts = resolvePreparationAmounts(r, user);
+
+      totalSecuredCapitalCop += amounts.securedCapitalCop;
+      totalProjectedCapitalCop += amounts.projectedCapitalCop;
+
+      if (r.externalFundingStatus === 'PENDING') {
+        pendingCount += 1;
+        pendingAmountCop += amounts.cashRequiredCop;
+      } else if (r.externalFundingStatus === 'CONFIRMED') {
+        confirmedCount += 1;
+        confirmedAmountCop += amounts.cashConfirmedCop;
+      }
+
+      if (amounts.isReady) {
+        readyUsersCount += 1;
+      }
+    });
+
+    return {
+      totalProcessed,
+      pendingCount,
+      pendingAmountCop,
+      confirmedCount,
+      confirmedAmountCop,
+      totalSecuredCapitalCop,
+      totalProjectedCapitalCop,
+      readyUsersCount,
+    };
+  }, [preparingCycleReinvestments, userMap]);
 
   // Lista filtrada para tabla y tarjetas móviles
   const filteredList = useMemo(() => {
@@ -265,20 +345,30 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
 
   // Manejador Iniciar Ciclo Operativo
   const handleStartCycle = async () => {
+    if (!preparingCycleId) {
+      setStartError('No existe ningún ciclo en preparación configurado en el sistema.');
+      return;
+    }
+
+    if (cycles.length > 0 && !cycles.some((c) => c.id === preparingCycleId || c.cycleId === preparingCycleId)) {
+      setStartError(`El ciclo en preparación (${preparingCycleId}) no se encuentra cargado localmente.`);
+      return;
+    }
+
     setStartError(null);
     setIsStartingCycle(true);
 
     try {
       const clientRequestId = crypto.randomUUID();
       const res = await firestoreService.adminStartCycleCallable({
-        cycleId: selectedCycleId,
+        cycleId: preparingCycleId,
         clientRequestId,
       });
 
       setShowStartModal(false);
       setNotification({
         type: 'success',
-        message: `¡Ciclo ${selectedCycleId} iniciado operativamente! Capital administrado: ${formatCOP(
+        message: `¡Ciclo ${preparingCycle?.name || preparingCycleId} iniciado operativamente! Capital administrado: ${formatCOP(
           res.initialManagedCapitalCop
         )} con ${res.initialActiveUsersCount} inversionistas activos.`,
       });
@@ -441,26 +531,39 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
 
         <div className="flex flex-wrap items-center gap-3">
           {/* Selector de Ciclo */}
-          <div className="flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 shadow-sm">
-            <span className="text-xs text-slate-400 font-semibold">Ciclo:</span>
-            <select
-              value={selectedCycleId}
-              onChange={(e) => setSelectedCycleId(e.target.value)}
-              className="bg-transparent text-slate-100 text-xs font-bold font-mono focus:outline-none cursor-pointer"
-            >
-              {cycles.map((c) => (
-                <option key={c.id} value={c.id} className="bg-slate-900 text-slate-100">
-                  {c.name} ({c.operationalStatus === 'STARTED' ? 'INICIADO' : 'PREPARANDO'})
-                </option>
-              ))}
-            </select>
-          </div>
+          {cycles.length > 0 && (
+            <div className="flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 shadow-sm">
+              <span className="text-xs text-slate-400 font-semibold">Ciclo:</span>
+              <select
+                value={selectedCycleId}
+                onChange={(e) => setSelectedCycleId(e.target.value)}
+                className="bg-transparent text-slate-100 text-xs font-bold font-mono focus:outline-none cursor-pointer"
+              >
+                {cycles.map((c) => (
+                  <option key={c.id} value={c.id} className="bg-slate-900 text-slate-100">
+                    {c.name} ({c.operationalStatus === 'STARTED' ? 'INICIADO' : 'PREPARANDO'})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* BOTÓN: Iniciar Ciclo Operativo (Section 22) */}
-          {!isCycleStarted && (
+          {!preparingCycleId ? (
+            <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-900/80 border border-slate-800 text-slate-400 text-xs font-medium">
+              <AlertCircle className="w-4 h-4 text-slate-500 shrink-0" />
+              <span>No hay ningún ciclo en preparación disponible para iniciar.</span>
+            </div>
+          ) : preparingCycle?.operationalStatus === 'STARTED' ? (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-bold">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>Ciclo Iniciado ({preparingCycle.name})</span>
+            </div>
+          ) : (
             <button
               type="button"
               onClick={() => {
+                if (!preparingCycleId) return;
                 setStartError(null);
                 setShowStartModal(true);
               }}
@@ -981,7 +1084,7 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
               </div>
               <div>
                 <h3 className="text-base font-black text-slate-100">
-                  INICIAR CICLO OPERATIVO: {activeTargetCycle.name}
+                  INICIAR CICLO OPERATIVO: {preparingCycle?.name || preparingCycleId || 'Ciclo en Preparación'}
                 </h3>
                 <p className="text-xs text-slate-400">
                   Congelamiento transaccional de capitales y habilitación de trading.
@@ -996,87 +1099,104 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
               </div>
             )}
 
-            <div className="space-y-4 text-xs">
-              {/* Resumen del Capital a Congelar */}
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 grid grid-cols-2 gap-3">
-                <div>
-                  <span className="text-[11px] text-slate-400 block font-semibold">Capital a Congelar</span>
-                  <span className="text-lg font-black text-emerald-400 font-mono">
-                    {formatCOP(kpis.totalSecuredCapitalCop)}
-                  </span>
+            {!preparingCycleId ? (
+              <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs space-y-2">
+                <div className="flex items-center gap-2 font-bold text-amber-300">
+                  <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
+                  <span>No hay ciclo en preparación disponible</span>
                 </div>
-                <div>
-                  <span className="text-[11px] text-slate-400 block font-semibold">Inversionistas Listos</span>
-                  <span className="text-lg font-black text-blue-300 font-mono">
-                    {kpis.readyUsersCount} usuarios
-                  </span>
-                </div>
-              </div>
-
-              {/* ADVERTENCIA DE APORTES PENDIENTES (Section 23) */}
-              {kpis.pendingCount > 0 ? (
-                <div className="p-4 rounded-xl bg-amber-950/50 border border-amber-500/50 text-amber-200 space-y-2">
-                  <div className="flex items-center gap-2 font-bold text-amber-300">
-                    <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
-                    <span>⚠️ Advertencia de Aportes No Confirmados</span>
-                  </div>
-                  <p className="text-xs text-amber-200/90 leading-relaxed">
-                    Existen <strong>{kpis.pendingCount} aporte(s) externo(s) sin confirmar</strong> por un total de{' '}
-                    <strong className="font-mono">{formatCOP(kpis.pendingAmountCop)}</strong>. Si continúa, esos montos{' '}
-                    <strong>NO serán incluidos</strong> en el capital operativo de este ciclo y quedarán registrados como{' '}
-                    <strong className="underline">NO RECIBIDOS</strong>. Los inversionistas iniciarán únicamente con su capital asegurado.
-                  </p>
-                </div>
-              ) : (
-                <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-200 text-xs">
-                  <p className="font-bold flex items-center gap-1.5 text-emerald-300">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" /> Todos los aportes están confirmados o no requeridos
-                  </p>
-                  <p className="mt-1 text-emerald-300/80">
-                    Se congelarán los capitales definitivos y, a partir de este momento, el ciclo podrá registrar operaciones operativas.
-                  </p>
-                </div>
-              )}
-
-              {/* MENSAJE DE IRREVERSIBILIDAD (Section 24) */}
-              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400 flex items-start gap-2">
-                <Lock className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
                 <p>
-                  <strong className="text-slate-300">Irreversibilidad Operativa:</strong> Una vez iniciado el ciclo y registrada actividad financiera, los capitales congelados en <code className="text-blue-400">cycleUserResults</code> no pueden modificarse retroactivamente.
+                  No existe ningún ciclo en preparación configurado en el sistema (<code>settings/global_config.preparingCycleId</code>).
                 </p>
               </div>
-
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowStartModal(false)}
-                  disabled={isStartingCycle}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
-                >
-                  Volver a revisar
-                </button>
-                <button
-                  type="button"
-                  onClick={handleStartCycle}
-                  disabled={isStartingCycle}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-black shadow-lg shadow-blue-600/30 transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
-                >
-                  {isStartingCycle ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                      Iniciando ciclo...
-                    </>
-                  ) : (
-                    <>
-                      <Rocket className="w-4 h-4" />
-                      {kpis.pendingCount > 0
-                        ? 'Iniciar con capital confirmado'
-                        : 'Iniciar Ciclo Operativo'}
-                    </>
-                  )}
-                </button>
+            ) : cycles.length === 0 ? (
+              <div className="p-6 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-center gap-3 text-xs text-slate-400">
+                <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
+                <span>Cargando datos del ciclo en preparación...</span>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-4 text-xs">
+                {/* Resumen del Capital a Congelar */}
+                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 grid grid-cols-2 gap-3">
+                  <div>
+                    <span className="text-[11px] text-slate-400 block font-semibold">Capital a Congelar</span>
+                    <span className="text-lg font-black text-emerald-400 font-mono">
+                      {formatCOP(preparingKpis.totalSecuredCapitalCop)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[11px] text-slate-400 block font-semibold">Inversionistas Listos</span>
+                    <span className="text-lg font-black text-blue-300 font-mono">
+                      {preparingKpis.readyUsersCount} usuarios
+                    </span>
+                  </div>
+                </div>
+
+                {/* ADVERTENCIA DE APORTES PENDIENTES (Section 23) */}
+                {preparingKpis.pendingCount > 0 ? (
+                  <div className="p-4 rounded-xl bg-amber-950/50 border border-amber-500/50 text-amber-200 space-y-2">
+                    <div className="flex items-center gap-2 font-bold text-amber-300">
+                      <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
+                      <span>⚠️ Advertencia de Aportes No Confirmados</span>
+                    </div>
+                    <p className="text-xs text-amber-200/90 leading-relaxed">
+                      Existen <strong>{preparingKpis.pendingCount} aporte(s) externo(s) sin confirmar</strong> por un total de{' '}
+                      <strong className="font-mono">{formatCOP(preparingKpis.pendingAmountCop)}</strong>. Si continúa, esos montos{' '}
+                      <strong>NO serán incluidos</strong> en el capital operativo de este ciclo y quedarán registrados como{' '}
+                      <strong className="underline">NO RECIBIDOS</strong>. Los inversionistas iniciarán únicamente con su capital asegurado.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-200 text-xs">
+                    <p className="font-bold flex items-center gap-1.5 text-emerald-300">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" /> Todos los aportes están confirmados o no requeridos
+                    </p>
+                    <p className="mt-1 text-emerald-300/80">
+                      Se congelarán los capitales definitivos y, a partir de este momento, el ciclo podrá registrar operaciones operativas.
+                    </p>
+                  </div>
+                )}
+
+                {/* MENSAJE DE IRREVERSIBILIDAD (Section 24) */}
+                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400 flex items-start gap-2">
+                  <Lock className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+                  <p>
+                    <strong className="text-slate-300">Irreversibilidad Operativa:</strong> Una vez iniciado el ciclo y registrada actividad financiera, los capitales congelados en <code className="text-blue-400">cycleUserResults</code> no pueden modificarse retroactivamente.
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowStartModal(false)}
+                    disabled={isStartingCycle}
+                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    Volver a revisar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleStartCycle}
+                    disabled={isStartingCycle || !preparingCycleId}
+                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-black shadow-lg shadow-blue-600/30 transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {isStartingCycle ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Iniciando ciclo...
+                      </>
+                    ) : (
+                      <>
+                        <Rocket className="w-4 h-4" />
+                        {preparingKpis.pendingCount > 0
+                          ? 'Iniciar con capital confirmado'
+                          : 'Iniciar Ciclo Operativo'}
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

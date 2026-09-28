@@ -7,6 +7,14 @@ const {
   supersedeCurrentCycleReport,
   generateCycleReportPdfBuffer,
 } = require("./cycleReports");
+const {
+  validateGenesisNoHistoryPreCheck,
+  validateGenesisNoHistoryTransactional,
+  createGenesisCycleCore,
+  validateTargetCycleForUserEntry,
+  validateStartCycleGenesisAndPendingGuard,
+  claimAccountCore,
+} = require("./genesisCycleCore");
 
 if (!admin.apps.length) {
   admin.initializeApp();
@@ -133,6 +141,9 @@ exports.adminExecuteDailyOperation = onCall(
       targetType = "CUSTOM_GROUP",
       targetUserId,
       customAuthorizedUids,
+      trmUsed: reqTrmUsed,
+      trmSource: reqTrmSource,
+      trmCapturedAt: reqTrmCapturedAt,
     } = data;
 
     if (action !== "CREATE") {
@@ -303,11 +314,29 @@ exports.adminExecuteDailyOperation = onCall(
         }
       }
 
-      const trm = Number(cycleData.trmApplied);
-      if (!trm || isNaN(trm) || trm <= 0) {
+      // Resolución de TRM operativa para el trade:
+      // Para ciclo moderno STARTED es obligatorio suministrar una TRM en vivo válida (trmUsed > 0, trmSource, trmCapturedAt).
+      // Prohibido SYSTEM_FALLBACK, 4028.5 y cycleData.trmApplied para ciclos modernos.
+      const isModernCycle = opStatus === "STARTED" || opStatus === "PREPARING";
+      let trm = null;
+      let trmSource = null;
+      let trmCapturedAt = new Date().toISOString();
+
+      const candidateTrm = Number(reqTrmUsed);
+      if (Number.isFinite(candidateTrm) && candidateTrm > 0) {
+        trm = candidateTrm;
+        trmSource = (typeof reqTrmSource === "string" && reqTrmSource.trim()) ? reqTrmSource.trim() : "LIVE_MARKET";
+        if (typeof reqTrmCapturedAt === "string" && reqTrmCapturedAt.trim()) {
+          trmCapturedAt = reqTrmCapturedAt.trim();
+        }
+      } else if (!isModernCycle && Number.isFinite(Number(cycleData.trmApplied)) && Number(cycleData.trmApplied) > 0) {
+        // Compatibilidad ÚNICAMENTE para ciclos identificados inequívocamente como legacy
+        trm = Number(cycleData.trmApplied);
+        trmSource = "CYCLE_DEFAULT";
+      } else {
         throw new HttpsError(
           "failed-precondition",
-          `El ciclo (${cycleData.name || cycleId}) no tiene una TRM válida configurada.`
+          "LIVE_TRM_UNAVAILABLE: Para ciclos modernos iniciados (STARTED), es obligatorio suministrar una TRM en vivo válida (trmUsed > 0, trmSource y trmCapturedAt)."
         );
       }
 
@@ -635,6 +664,10 @@ exports.adminExecuteDailyOperation = onCall(
         groupCapitalCop: Number(groupCapitalCop),
         date: opDate,
         amountUsd: Number(amountUsd),
+        trmUsed: trm,
+        trmSource,
+        trmCapturedAt,
+        grossCop: Number(amountUsd) * trm,
         notes: cleanNotes,
         createdAt: new Date().toISOString(),
         createdBy: createdByName,
@@ -866,30 +899,14 @@ exports.adminCreateUser = onCall(
 
     let entryCycleId = null;
     if (targetCycleId && typeof targetCycleId === "string" && targetCycleId.trim()) {
-      const cleanTargetCycleId = targetCycleId.trim();
-      const targetCycleSnap = await db.collection("monthlyCycles").doc(cleanTargetCycleId).get();
-      if (!targetCycleSnap.exists) {
-        throw new HttpsError("not-found", `El ciclo especificado (${cleanTargetCycleId}) no existe.`);
+      try {
+        entryCycleId = await validateTargetCycleForUserEntry({ db, targetCycleId });
+      } catch (err) {
+        if (err.code === "not-found") {
+          throw new HttpsError("not-found", err.message);
+        }
+        throw new HttpsError("failed-precondition", err.message);
       }
-      const targetCycleData = targetCycleSnap.data() || {};
-      if (targetCycleData.status !== "OPEN") {
-        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_OPEN: El ciclo objetivo (${cleanTargetCycleId}) no se encuentra abierto.`);
-      }
-      if (targetCycleData.operationalStatus !== "PREPARING") {
-        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_PREPARING: El ciclo objetivo (${cleanTargetCycleId}) debe estar en estado de preparación (PREPARING).`);
-      }
-      if (!targetCycleData.previousCycleId) {
-        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NO_PREVIOUS: El ciclo objetivo (${cleanTargetCycleId}) no tiene ciclo previo registrado.`);
-      }
-
-      const prevCycleSnap = await db.collection("monthlyCycles").doc(targetCycleData.previousCycleId).get();
-      if (!prevCycleSnap.exists || prevCycleSnap.data().status !== "CLOSED") {
-        throw new HttpsError(
-          "failed-precondition",
-          `PREDECESSOR_CYCLE_NOT_CLOSED_FOR_NEW_ENTRY: El ciclo predecesor (${targetCycleData.previousCycleId}) debe estar en estado CLOSED para autorizar el ingreso de un nuevo inversionista en ${cleanTargetCycleId}.`
-        );
-      }
-      entryCycleId = cleanTargetCycleId;
     }
 
     const category = getCanonicalCategoryForCapital(capNum);
@@ -1046,30 +1063,14 @@ exports.adminCreatePendingInvestor = onCall(
 
     let entryCycleId = null;
     if (targetCycleId && typeof targetCycleId === "string" && targetCycleId.trim()) {
-      const cleanTargetCycleId = targetCycleId.trim();
-      const targetCycleSnap = await db.collection("monthlyCycles").doc(cleanTargetCycleId).get();
-      if (!targetCycleSnap.exists) {
-        throw new HttpsError("not-found", `El ciclo especificado (${cleanTargetCycleId}) no existe.`);
+      try {
+        entryCycleId = await validateTargetCycleForUserEntry({ db, targetCycleId });
+      } catch (err) {
+        if (err.code === "not-found") {
+          throw new HttpsError("not-found", err.message);
+        }
+        throw new HttpsError("failed-precondition", err.message);
       }
-      const targetCycleData = targetCycleSnap.data() || {};
-      if (targetCycleData.status !== "OPEN") {
-        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_OPEN: El ciclo objetivo (${cleanTargetCycleId}) no se encuentra abierto.`);
-      }
-      if (targetCycleData.operationalStatus !== "PREPARING") {
-        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_PREPARING: El ciclo objetivo (${cleanTargetCycleId}) debe estar en estado de preparación (PREPARING).`);
-      }
-      if (!targetCycleData.previousCycleId) {
-        throw new HttpsError("failed-precondition", `TARGET_CYCLE_NO_PREVIOUS: El ciclo objetivo (${cleanTargetCycleId}) no tiene ciclo previo registrado.`);
-      }
-
-      const prevCycleSnap = await db.collection("monthlyCycles").doc(targetCycleData.previousCycleId).get();
-      if (!prevCycleSnap.exists || prevCycleSnap.data().status !== "CLOSED") {
-        throw new HttpsError(
-          "failed-precondition",
-          `PREDECESSOR_CYCLE_NOT_CLOSED_FOR_NEW_ENTRY: El ciclo predecesor (${targetCycleData.previousCycleId}) debe estar en estado CLOSED para autorizar el ingreso de un nuevo inversionista en ${cleanTargetCycleId}.`
-        );
-      }
-      entryCycleId = cleanTargetCycleId;
     }
 
     const category = getCanonicalCategoryForCapital(capNum);
@@ -1746,6 +1747,8 @@ exports.claimAccountCallable = onCall(
       }
     }
 
+    let authUserCreatedThisAttempt = false;
+
     // 9. Creación de Auth User (solo si no fue recuperado un huérfano explícito)
     if (!firebaseAuthUid) {
       await claimOpRef.set({
@@ -1766,6 +1769,7 @@ exports.claimAccountCallable = onCall(
           displayName: legacyData.fullName || "Inversionista EasyTraders",
         });
         firebaseAuthUid = createdAuthUser.uid;
+        authUserCreatedThisAttempt = true;
       } catch (authError) {
         await claimOpRef.update({
           status: "FAILED",
@@ -1807,6 +1811,24 @@ exports.claimAccountCallable = onCall(
         const freshLegacyData = freshLegacySnap.data() || {};
         if (freshLegacyData.isClaimed === true || freshLegacyData.status === "MIGRATED") {
           throw new Error("ALREADY_CLAIMED");
+        }
+
+        // Validación estricta del ciclo de ingreso y bloqueo si ya inició operaciones
+        if (freshLegacyData.entryCycleId) {
+          const entryCycleRef = db.collection("monthlyCycles").doc(freshLegacyData.entryCycleId);
+          const entryCycleSnap = await transaction.get(entryCycleRef);
+          if (!entryCycleSnap.exists) {
+            throw new Error("TARGET_CYCLE_NOT_FOUND");
+          }
+          const entryCycleData = entryCycleSnap.data() || {};
+          if (entryCycleData.status !== "OPEN" || entryCycleData.operationalStatus !== "PREPARING") {
+            throw new Error("TARGET_CYCLE_ALREADY_STARTED");
+          }
+          // Incrementar cohortVersion de forma atómica dentro de la misma transacción
+          transaction.update(entryCycleRef, {
+            cohortVersion: admin.firestore.FieldValue.increment(1),
+            updatedAt: new Date().toISOString(),
+          });
         }
 
         const canonicalUserRef = db.collection("users").doc(firebaseAuthUid);
@@ -1871,8 +1893,8 @@ exports.claimAccountCallable = onCall(
     } catch (firestoreError) {
       console.error(`[claimAccountCallable] Fallo Firestore para UID ${firebaseAuthUid}. Evaluando compensación...`, firestoreError);
 
-      if (!isRecoveredOrphan) {
-        // COMPENSACIÓN ATÓMICA para usuario recién creado
+      if (authUserCreatedThisAttempt === true) {
+        // COMPENSACIÓN ATÓMICA para usuario recién creado en esta invocación
         try {
           await admin.auth().deleteUser(firebaseAuthUid);
           console.log(`[claimAccountCallable COMPENSADO] Usuario Auth ${firebaseAuthUid} eliminado exitosamente.`);
@@ -1894,6 +1916,7 @@ exports.claimAccountCallable = onCall(
             orphanedAuthUid: firebaseAuthUid,
             email: canonicalEmail,
             failureReason: deleteError.message || String(deleteError),
+            compensated: false,
             failedAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
@@ -1939,6 +1962,13 @@ exports.claimAccountCallable = onCall(
 
       if (firestoreError.message === "ALREADY_CLAIMED") {
         throw new HttpsError("already-exists", "Esta cuenta ya ha sido activada concurrentemente por otra sesión.");
+      }
+
+      if (firestoreError.message === "TARGET_CYCLE_ALREADY_STARTED") {
+        throw new HttpsError(
+          "failed-precondition",
+          "TARGET_CYCLE_ALREADY_STARTED: El ciclo de ingreso asignado ya inició operaciones o no se encuentra en estado de preparación. Contacta al administrador."
+        );
       }
 
       throw new HttpsError(
@@ -3955,9 +3985,17 @@ exports.adminCloseCycleCallable = onCall(
       throw new HttpsError("permission-denied", "Solo administradores autorizados pueden cerrar ciclos y aplicar reinversiones.");
     }
 
-    const { cycleId, adminNotes } = request.data || {};
+    const { cycleId, adminNotes, closingTrm, observedMarketTrmAtClose, clientRequestId } = request.data || {};
     if (!cycleId || typeof cycleId !== "string" || !cycleId.trim()) {
       throw new HttpsError("invalid-argument", "cycleId es obligatorio.");
+    }
+
+    const parsedClosingTrm = Number(closingTrm);
+    if (!parsedClosingTrm || !Number.isFinite(parsedClosingTrm) || parsedClosingTrm <= 0) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_CLOSING_TRM: closingTrm es obligatorio y debe ser un número positivo mayor a cero para liquidación definitiva al cierre."
+      );
     }
 
     const targetCycleId = cycleId.trim();
@@ -4165,86 +4203,60 @@ exports.adminCloseCycleCallable = onCall(
     };
 
     // =========================================================================
-    // GATE 2 — PRE-FLIGHT FINANCIERO GLOBAL (VALIDACIÓN ESTRICTA SIN ESCRITURAS)
+    // GATE 2 — PRE-FLIGHT FINANCIERO GLOBAL (LIQUIDACIÓN DEFINITIVA CON CLOSING TRM)
     // =========================================================================
+    const conflicts = [];
+    const pendingItemsToApply = [];
 
-    // Nivel 1 & Nivel 2: Verificación estricta de TRM y consistencia matemática en cycleUserResults
-    const cycleDocSnap = await cycleRef.get();
-    const cycleAppliedTrm = Number(cycleDocSnap.data().trmApplied);
-    if (isNaN(cycleAppliedTrm) || cycleAppliedTrm <= 0) {
-      conflicts.push({
-        type: "CONFLICT",
-        code: "INVALID_CYCLE_TRM",
-        message: `La TRM oficial del ciclo (${cycleDocSnap.data().trmApplied}) no es válida.`,
-      });
-    }
-
+    // Nivel 1: Lectura de cycleUserResults y cálculo definitivo con closingTrm
+    // finalGrossCop = totalUsd * closingTrm
     const allUserResultsSnap = await db
       .collection("cycleUserResults")
       .where("cycleId", "==", targetCycleId)
       .get();
 
+    const definitiveUserResults = [];
+    const definitiveUserProfitMap = new Map();
+    let totalGrossUsdAtClose = 0;
+    let totalGrossCopAtClose = 0;
+    let totalUsersProfitCopAtClose = 0;
+    let totalAdminCommCopAtClose = 0;
+
     for (const urDoc of allUserResultsSnap.docs) {
       const ur = urDoc.data() || {};
-      const urTrm = Number(ur.trmUsed);
+      const uUid = (ur.userUid || ur.userId || urDoc.id).trim();
+      const opUsd = Number(ur.totalUsdOperated || 0);
 
-      // Guardrail Nivel 1: TRM Equality
-      if (urTrm !== cycleAppliedTrm) {
-        conflicts.push({
-          type: "CONFLICT",
-          code: "TRM_RESULT_MISMATCH",
-          userResultId: urDoc.id,
-          userUid: ur.userUid || ur.userId,
-          userCode: ur.userCode || "",
-          trmUsed: urTrm,
-          cycleTrmApplied: cycleAppliedTrm,
-          message: `Divergencia de TRM: El resultado del inversionista (${ur.userCode || urDoc.id}) fue calculado con TRM $${urTrm}, pero el ciclo requiere TRM $${cycleAppliedTrm}. Requiere recálculo formal antes de cerrar.`,
-        });
-        continue;
-      }
+      // Conversión autoritativa definitiva: finalGrossCop = totalUsd * parsedClosingTrm
+      const finalGrossCop = opUsd * parsedClosingTrm;
 
-      // Guardrail Nivel 2: Mathematical Consistency
-      try {
-        const expected = calculateUserFinancialResult({
-          totalUsdOperated: ur.totalUsdOperated,
-          trm: cycleAppliedTrm,
-          userPercentage: ur.userPercentage,
-          adminPercentage: ur.adminPercentage,
-        });
+      const userPctRaw = ur.userPercentage !== undefined ? ur.userPercentage : 75;
+      const adminPctRaw = ur.adminPercentage !== undefined ? ur.adminPercentage : 25;
+      const uRatio = userPctRaw > 1 ? userPctRaw / 100 : userPctRaw;
+      const aRatio = adminPctRaw > 1 ? adminPctRaw / 100 : adminPctRaw;
 
-        const grossDiff = Math.abs(Number(ur.totalGrossCop || 0) - expected.totalGrossCop);
-        const userProfitDiff = Math.abs(Number(ur.userProfitCop || 0) - expected.userProfitCop);
-        const adminCommDiff = Math.abs(Number(ur.adminCommissionCop || 0) - expected.adminCommissionCop);
+      const finalUserProfitCop = finalGrossCop * uRatio;
+      const finalAdminCommCop = finalGrossCop * aRatio;
+      const finalUserProfitUsd = opUsd * uRatio;
+      const finalAdminCommUsd = opUsd * aRatio;
 
-        if (grossDiff > 0.01 || userProfitDiff > 0.01 || adminCommDiff > 0.01) {
-          conflicts.push({
-            type: "CONFLICT",
-            code: "FINANCIAL_RESULT_MISMATCH",
-            userResultId: urDoc.id,
-            userUid: ur.userUid || ur.userId,
-            userCode: ur.userCode || "",
-            recorded: {
-              grossCop: ur.totalGrossCop,
-              userProfitCop: ur.userProfitCop,
-              adminCommissionCop: ur.adminCommissionCop,
-            },
-            expected: {
-              grossCop: expected.totalGrossCop,
-              userProfitCop: expected.userProfitCop,
-              adminCommissionCop: expected.adminCommissionCop,
-            },
-            message: `Inconsistencia matemática en liquidación de ${ur.userCode || urDoc.id}. Ganancia registrada ($${ur.userProfitCop}) difiere del cálculo canónico ($${expected.userProfitCop}).`,
-          });
-        }
-      } catch (mathErr) {
-        conflicts.push({
-          type: "CONFLICT",
-          code: "FINANCIAL_RESULT_MISMATCH",
-          userResultId: urDoc.id,
-          userUid: ur.userUid || ur.userId,
-          message: `Error al verificar la consistencia matemática de ${ur.userCode || urDoc.id}: ${mathErr.message}`,
-        });
-      }
+      definitiveUserProfitMap.set(uUid, finalUserProfitCop);
+
+      totalGrossUsdAtClose += opUsd;
+      totalGrossCopAtClose += finalGrossCop;
+      totalUsersProfitCopAtClose += finalUserProfitCop;
+      totalAdminCommCopAtClose += finalAdminCommCop;
+
+      definitiveUserResults.push({
+        ref: urDoc.ref,
+        id: urDoc.id,
+        uUid,
+        finalGrossCop,
+        finalUserProfitCop,
+        finalAdminCommCop,
+        finalUserProfitUsd,
+        finalAdminCommUsd,
+      });
     }
 
     const approvedReinvSnap = await db
@@ -4255,8 +4267,6 @@ exports.adminCloseCycleCallable = onCall(
 
     let processedCount = 0;
     let alreadyAppliedCount = gate1Result.alreadyAppliedCount;
-    const conflicts = [];
-    const pendingItemsToApply = [];
 
     for (const docSnap of approvedReinvSnap.docs) {
       processedCount++;
@@ -4400,8 +4410,9 @@ exports.adminCloseCycleCallable = onCall(
       const cycleResSnap = await db.collection("cycleUserResults").doc(cycleResDocId).get();
 
       if (profitAppliedCop > 0) {
-        // Si se aplicaron utilidades, el resultado financiero es OBLIGATORIO
-        if (!cycleResSnap.exists) {
+        // Validar si existe resultado contable para este usuario
+        const definitiveProfit = definitiveUserProfitMap.get(targetUid);
+        if (definitiveProfit === undefined) {
           conflicts.push({
             type: "CONFLICT",
             code: "CYCLE_RESULT_NOT_FOUND",
@@ -4409,53 +4420,37 @@ exports.adminCloseCycleCallable = onCall(
             userUid: targetUid,
             userCode,
             profitAppliedCop,
-            message: `No se encontró el registro contable cycleUserResults/${cycleResDocId} para respaldar la ganancia de $${profitAppliedCop.toLocaleString("es-CO")} COP.`,
+            message: `No se encontró el registro contable cycleUserResults para respaldar la ganancia de $${profitAppliedCop.toLocaleString("es-CO")} COP del inversionista ${userCode}.`,
           });
           continue;
         }
 
-        const currentCycleProfitCop = Number(cycleResSnap.data().userProfitCop || 0);
-        if (currentCycleProfitCop !== cycleProfitSnapshotCop) {
+        // Si la ganancia definitiva liquidada con la TRM de cierre no cubre el monto a reinvertir:
+        if (profitAppliedCop > definitiveProfit) {
           conflicts.push({
             type: "CONFLICT",
             code: "PROFIT_SNAPSHOT_MISMATCH",
             reinvestmentId: reinvId,
             userUid: targetUid,
             userCode,
-            snapshotProfitCop: cycleProfitSnapshotCop,
-            currentProfitCop: currentCycleProfitCop,
-            differenceCop: currentCycleProfitCop - cycleProfitSnapshotCop,
-            message: "Las ganancias de este inversionista cambiaron después de la solicitud. La solicitud debe revisarse nuevamente antes de cerrar el ciclo.",
+            snapshotProfitCop: Number(reinvData.cycleProfitSnapshotCop || 0),
+            currentProfitCop: definitiveProfit,
+            profitAppliedCop,
+            differenceCop: definitiveProfit - profitAppliedCop,
+            message: `La ganancia definitiva liquidada ($${Math.round(definitiveProfit).toLocaleString("es-CO")} COP con TRM de cierre $${parsedClosingTrm.toLocaleString("es-CO")}) es menor al monto solicitado para reinversión ($${profitAppliedCop.toLocaleString("es-CO")} COP). Requiere revisión administrativa antes de cerrar el ciclo.`,
           });
           continue;
         }
-      } else {
-        // profitAppliedCop === 0 (Inyección de capital 100% externa)
-        if (cycleResSnap.exists && cycleProfitSnapshotCop > 0) {
-          const currentCycleProfitCop = Number(cycleResSnap.data().userProfitCop || 0);
-          if (currentCycleProfitCop !== cycleProfitSnapshotCop) {
-            conflicts.push({
-              type: "CONFLICT",
-              code: "PROFIT_SNAPSHOT_MISMATCH",
-              reinvestmentId: reinvId,
-              userUid: targetUid,
-              userCode,
-              snapshotProfitCop: cycleProfitSnapshotCop,
-              currentProfitCop: currentCycleProfitCop,
-              differenceCop: currentCycleProfitCop - cycleProfitSnapshotCop,
-              message: "Las ganancias de este inversionista cambiaron después de la solicitud. La solicitud debe revisarse nuevamente antes de cerrar el ciclo.",
-            });
-            continue;
-          }
-        }
       }
 
+      const definitiveProfit = definitiveUserProfitMap.get(targetUid) || 0;
       const cashInjectionCop = Number(reinvData.cashInjectionCop || 0);
       const securedNextCapitalCop = currentCapitalSnapshotCop + profitAppliedCop;
       const projectedNextCapitalCop = securedNextCapitalCop + cashInjectionCop;
       const securedCategory = getCategoryForCapitalLocal(securedNextCapitalCop);
       const projectedCategory = getCategoryForCapitalLocal(projectedNextCapitalCop);
       const externalFundingStatus = cashInjectionCop > 0 ? (reinvData.externalFundingStatus === "CONFIRMED" ? "CONFIRMED" : "PENDING") : "NOT_REQUIRED";
+      const finalProfitToDisburseCop = Math.max(Math.round(definitiveProfit) - profitAppliedCop, 0);
 
       // Toda la validación fue exitosa para este ítem: encolar para aplicación atómica
       pendingItemsToApply.push({
@@ -4477,6 +4472,8 @@ exports.adminCloseCycleCallable = onCall(
         hasCash: cashInjectionCop > 0,
         externalFundingStatus,
         requestVersion: Number(reinvData.requestVersion || 1),
+        finalProfitToDisburseCop,
+        definitiveProfit: Math.round(definitiveProfit),
       });
     }
 
@@ -4530,7 +4527,8 @@ exports.adminCloseCycleCallable = onCall(
     // Cálculo exacto de escrituras requeridas en la transacción financiera atómica:
     // 4 fijos: monthlyCycles/A, monthlyCycles/B, cycleFinancialSummaries/A, settings/global_config
     // + (2 * N): N users/{uid} + N reinvestments/{reinvId}
-    const requiredFinancialWrites = 4 + (pendingItemsToApply.length * 2);
+    // + M: M cycleUserResults (liquidación definitiva)
+    const requiredFinancialWrites = 4 + (pendingItemsToApply.length * 2) + definitiveUserResults.length;
 
     if (requiredFinancialWrites > MAX_FINANCIAL_CLOSE_WRITES) {
       console.warn(
@@ -4586,6 +4584,22 @@ exports.adminCloseCycleCallable = onCall(
         const newClosureVersion = Number(freshCycleData.closureVersion || 0) + 1;
         const successorCycleId = freshCycleData.nextCycleId ? String(freshCycleData.nextCycleId).trim() : null;
 
+        // ESCRITURA ATÓMICA 0: Resultados definitivos individuales en cycleUserResults
+        for (const resItem of definitiveUserResults) {
+          transaction.update(resItem.ref, {
+            trmUsed: parsedClosingTrm,
+            closingTrmUsed: parsedClosingTrm,
+            totalGrossCop: resItem.finalGrossCop,
+            userProfitCop: resItem.finalUserProfitCop,
+            adminCommissionCop: resItem.finalAdminCommCop,
+            userProfitUsd: resItem.finalUserProfitUsd,
+            adminCommissionUsd: resItem.finalAdminCommUsd,
+            isCycleClosed: true,
+            closedAt: nowIso,
+            updatedAt: nowIso,
+          });
+        }
+
         // 2. Re-verificar cada usuario y solicitud dentro de la transacción
         for (const item of pendingItemsToApply) {
           const txUserSnap = await transaction.get(item.userDocRef);
@@ -4638,6 +4652,8 @@ exports.adminCloseCycleCallable = onCall(
             fundingReconciliationReason: reconReason,
             previousCapitalAtClosureCop: item.actualCurrentCapital,
             capitalAfterClosureCop: item.securedNextCapitalCop,
+            profitToDisburseCop: item.finalProfitToDisburseCop,
+            cycleProfitSnapshotCop: item.definitiveProfit,
             updatedAt: nowIso,
           });
 
@@ -4671,6 +4687,16 @@ exports.adminCloseCycleCallable = onCall(
           closureVersion: newClosureVersion,
           lastCloseRequestId: clientRequestId || null,
           appliedReinvestmentsCount: pendingItemsToApply.length + alreadyAppliedCount,
+          closingTrm: parsedClosingTrm,
+          closingTrmSetAt: nowIso,
+          closingTrmSetByUid: authUid,
+          closingTrmSetByName: adminName,
+          observedMarketTrmAtClose: observedMarketTrmAtClose ? Number(observedMarketTrmAtClose) : null,
+          trmApplied: parsedClosingTrm,
+          totalGrossUsd: totalGrossUsdAtClose,
+          totalGrossCop: totalGrossCopAtClose,
+          totalUsersProfitCop: totalUsersProfitCopAtClose,
+          totalAdminCommissionCop: totalAdminCommCopAtClose,
           isClosing: false,
           closingStartedAt: null,
           closingByUid: null,
@@ -4698,6 +4724,12 @@ exports.adminCloseCycleCallable = onCall(
           summaryRef,
           {
             cycleId: targetCycleId,
+            closingTrm: parsedClosingTrm,
+            trmApplied: parsedClosingTrm,
+            totalGrossUsd: totalGrossUsdAtClose,
+            totalGrossCop: totalGrossCopAtClose,
+            totalUsersProfitCop: totalUsersProfitCopAtClose,
+            totalAdminCommissionCop: totalAdminCommCopAtClose,
             isCycleClosed: true,
             closedAt: nowIso,
             closedBy: adminName,
@@ -4812,6 +4844,15 @@ exports.adminCloseCycleCallable = onCall(
         appliedCount: appliedReinvestments.length,
         alreadyAppliedCount,
         adminNotes: adminNotes || "",
+        closingTrm: parsedClosingTrm,
+        closingTrmSetAt: nowIso,
+        closingTrmSetByUid: authUid,
+        closingTrmSetByName: adminName,
+        observedMarketTrmAtClose: observedMarketTrmAtClose ? Number(observedMarketTrmAtClose) : null,
+        totalGrossUsd: totalGrossUsdAtClose,
+        totalGrossCop: totalGrossCopAtClose,
+        totalUsersProfitCop: totalUsersProfitCopAtClose,
+        totalAdminCommissionCop: totalAdminCommCopAtClose,
       },
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
     }).catch(() => {});
@@ -4841,6 +4882,11 @@ exports.adminCloseCycleCallable = onCall(
       cycleId: targetCycleId,
       cycleClosed: true,
       closedAt: nowIso,
+      closingTrm: parsedClosingTrm,
+      closingTrmSetAt: nowIso,
+      closingTrmSetByUid: authUid,
+      closingTrmSetByName: adminName,
+      observedMarketTrmAtClose: observedMarketTrmAtClose ? Number(observedMarketTrmAtClose) : null,
       reportVersionId,
       processedCount,
       appliedCount: appliedReinvestments.length,
@@ -4850,7 +4896,7 @@ exports.adminCloseCycleCallable = onCall(
       conflicts: [],
       failures: [],
       appliedReinvestments,
-      message: `Ciclo ${targetCycleId} cerrado exitosamente. Se aplicaron ${appliedReinvestments.length} reinversiones aprobadas y se generó el snapshot oficial inmutable ${reportVersionId || ""}.`,
+      message: `Ciclo ${targetCycleId} cerrado exitosamente con TRM definitiva de $${parsedClosingTrm.toLocaleString("es-CO")}. Se aplicaron ${appliedReinvestments.length} reinversiones aprobadas y se generó el snapshot oficial inmutable ${reportVersionId || ""}.`,
     };
   }
 );
@@ -6035,44 +6081,116 @@ exports.adminStartCycleCallable = onCall(
         await safelyReleaseStartLock();
         throw new HttpsError("failed-precondition", `TARGET_CYCLE_NOT_PREPARING: El ciclo ${targetCycleId} debe estar en estado PREPARING.`);
       }
+
+      const expectedCohortVersion = Number(cycleBData.cohortVersion || 1);
+      let sourceCycleId = null;
+      let prevUserResultsMap = new Map();
+
       if (!cycleBData.previousCycleId) {
-        await safelyReleaseStartLock();
-        throw new HttpsError("failed-precondition", `CYCLE_LINK_MISMATCH: El ciclo ${targetCycleId} no especifica un ciclo previo.`);
-      }
+        // === RAMA GÉNESIS: GUARD NO-HISTORY ESTRICTO (FAIL-CLOSED) ===
+        if (cycleBData.isGenesis !== true) {
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", `CYCLE_LINK_MISMATCH: El ciclo ${targetCycleId} no especifica un ciclo previo ni es un ciclo génesis válido.`);
+        }
 
-      // 2. Validar ciclo A (predecesor)
-      const sourceCycleId = cycleBData.previousCycleId;
-      const cycleARef = db.collection("monthlyCycles").doc(sourceCycleId);
-      const cycleASnap = await cycleARef.get();
-      if (!cycleASnap.exists) {
-        await safelyReleaseStartLock();
-        throw new HttpsError("not-found", `CYCLE_LINK_MISMATCH: El ciclo previo ${sourceCycleId} no existe.`);
-      }
-      const cycleAData = cycleASnap.data() || {};
-      if (cycleAData.status !== "CLOSED") {
-        await safelyReleaseStartLock();
-        throw new HttpsError("failed-precondition", `PREVIOUS_CYCLE_NOT_CLOSED: El ciclo previo ${sourceCycleId} debe estar CLOSED.`);
-      }
-      if (cycleAData.nextCycleId !== targetCycleId) {
-        await safelyReleaseStartLock();
-        throw new HttpsError("failed-precondition", `CYCLE_LINK_MISMATCH: A.nextCycleId (${cycleAData.nextCycleId}) debe coincidir con B (${targetCycleId}).`);
-      }
+        const globalConfigSnap = await db.collection("settings").doc("global_config").get();
+        const globalConfig = globalConfigSnap.exists ? globalConfigSnap.data() || {} : {};
 
-      if (Number(cycleBData.sourceClosureVersion) !== Number(cycleAData.closureVersion)) {
-        await safelyReleaseStartLock();
-        throw new HttpsError("failed-precondition", `STALE_PREPARATION_STATE: Versión de cierre (${cycleAData.closureVersion}) difiere de B (${cycleBData.sourceClosureVersion}).`);
-      }
+        if (globalConfig.operationalCycleId !== null && globalConfig.operationalCycleId !== undefined) {
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", "NO_HISTORY_VIOLATION: Ya existe un ciclo operativo activo en settings/global_config.");
+        }
+        if (globalConfig.activeCycleId !== null && globalConfig.activeCycleId !== undefined) {
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", "NO_HISTORY_VIOLATION: Ya existe un ciclo activo configurado en settings/global_config.");
+        }
+        if (globalConfig.preparingCycleId !== targetCycleId) {
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", "NO_HISTORY_VIOLATION: settings/global_config.preparingCycleId no coincide con el ciclo génesis.");
+        }
+        if (globalConfig.lastClosedCycleId !== null && globalConfig.lastClosedCycleId !== undefined) {
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", "NO_HISTORY_VIOLATION: settings/global_config registra un ciclo previo cerrado.");
+        }
 
-      if (cycleBData.preparationNeedsReview === true) {
-        await safelyReleaseStartLock();
-        throw new HttpsError("failed-precondition", `PREPARATION_NEEDS_REVIEW: El ciclo B requiere revisión por reapertura del ciclo A.`);
-      }
+        try {
+          const [
+            cyclesSnap,
+            opsSnap,
+            summariesSnap,
+            resSnap,
+            groupsSnap,
+            reinvAllSnap,
+            disbAllSnap,
+            invAllSnap,
+          ] = await Promise.all([
+            db.collection("monthlyCycles").get(),
+            db.collection("dailyOperations").limit(1).get(),
+            db.collection("cycleFinancialSummaries").limit(1).get(),
+            db.collection("cycleUserResults").limit(1).get(),
+            db.collection("cycleGroupCalculations").limit(1).get(),
+            db.collection("reinvestments").limit(1).get(),
+            db.collection("disbursements").limit(1).get(),
+            db.collection("investments").limit(1).get(),
+          ]);
 
-      // TRM Guard
-      const trmAppliedNum = Number(cycleBData.trmApplied);
-      if (!Number.isFinite(trmAppliedNum) || trmAppliedNum <= 0) {
-        await safelyReleaseStartLock();
-        throw new HttpsError("failed-precondition", `INVALID_CYCLE_TRM: El ciclo ${targetCycleId} requiere una TRM válida mayor a cero.`);
+          if (
+            cyclesSnap.size !== 1 ||
+            !opsSnap.empty ||
+            !summariesSnap.empty ||
+            !resSnap.empty ||
+            !groupsSnap.empty ||
+            !reinvAllSnap.empty ||
+            !disbAllSnap.empty ||
+            !invAllSnap.empty
+          ) {
+            await safelyReleaseStartLock();
+            throw new HttpsError(
+              "failed-precondition",
+              "NO_HISTORY_VIOLATION: Se detectaron registros operativos o ciclos previos incompatibles con el inicio del ciclo génesis."
+            );
+          }
+        } catch (readErr) {
+          if (readErr instanceof HttpsError) throw readErr;
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", `[FAIL_CLOSED] Error al verificar colecciones para inicio génesis: ${readErr.message}`);
+        }
+      } else {
+        // === RAMA SUCESOR NORMAL: Validar ciclo A (predecesor) ===
+        sourceCycleId = cycleBData.previousCycleId;
+        const cycleARef = db.collection("monthlyCycles").doc(sourceCycleId);
+        const cycleASnap = await cycleARef.get();
+        if (!cycleASnap.exists) {
+          await safelyReleaseStartLock();
+          throw new HttpsError("not-found", `CYCLE_LINK_MISMATCH: El ciclo previo ${sourceCycleId} no existe.`);
+        }
+        const cycleAData = cycleASnap.data() || {};
+        if (cycleAData.status !== "CLOSED") {
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", `PREVIOUS_CYCLE_NOT_CLOSED: El ciclo previo ${sourceCycleId} debe estar CLOSED.`);
+        }
+        if (cycleAData.nextCycleId !== targetCycleId) {
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", `CYCLE_LINK_MISMATCH: A.nextCycleId (${cycleAData.nextCycleId}) debe coincidir con B (${targetCycleId}).`);
+        }
+
+        if (Number(cycleBData.sourceClosureVersion) !== Number(cycleAData.closureVersion)) {
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", `STALE_PREPARATION_STATE: Versión de cierre (${cycleAData.closureVersion}) difiere de B (${cycleBData.sourceClosureVersion}).`);
+        }
+
+        if (cycleBData.preparationNeedsReview === true) {
+          await safelyReleaseStartLock();
+          throw new HttpsError("failed-precondition", `PREPARATION_NEEDS_REVIEW: El ciclo B requiere revisión por reapertura del ciclo A.`);
+        }
+
+        // Cohort A: cycleUserResults from cycle A
+        const prevResultsSnap = await db.collection("cycleUserResults").where("cycleId", "==", sourceCycleId).get();
+        prevResultsSnap.forEach((dSnap) => {
+          const d = dSnap.data() || {};
+          const uid = d.userId || d.userUid;
+          if (uid) prevUserResultsMap.set(uid, d);
+        });
       }
 
       // GUARD 1: dailyOperations
@@ -6133,21 +6251,27 @@ exports.adminStartCycleCallable = onCall(
         throw new HttpsError("failed-precondition", `PENDING_REQUESTS_BLOCK_START: Existen ${blockingRequests.length} solicitudes en estado PENDING o NEEDS_REVIEW.`);
       }
 
-      // Cohort A: cycleUserResults from cycle A
-      const prevResultsSnap = await db.collection("cycleUserResults").where("cycleId", "==", sourceCycleId).get();
-      const prevUserResultsMap = new Map();
-      prevResultsSnap.forEach((dSnap) => {
-        const d = dSnap.data() || {};
-        const uid = d.userId || d.userUid;
-        if (uid) prevUserResultsMap.set(uid, d);
+      // GUARD 6: Participantes pendientes en /users (PENDING_ACTIVATION o PENDING_CLAIM)
+      const allEntriesSnap = await db.collection("users").where("entryCycleId", "==", targetCycleId).get();
+      const pendingParticipants = [];
+      const newEntriesMap = new Map();
+
+      allEntriesSnap.forEach((uSnap) => {
+        const u = uSnap.data() || {};
+        if (u.status === "PENDING_ACTIVATION" || u.status === "PENDING_CLAIM") {
+          pendingParticipants.push(uSnap.id);
+        } else {
+          newEntriesMap.set(uSnap.id, { id: uSnap.id, ref: uSnap.ref, ...u });
+        }
       });
 
-      // Cohort B: users with entryCycleId == B
-      const newEntriesSnap = await db.collection("users").where("entryCycleId", "==", targetCycleId).get();
-      const newEntriesMap = new Map();
-      newEntriesSnap.forEach((uSnap) => {
-        newEntriesMap.set(uSnap.id, { id: uSnap.id, ref: uSnap.ref, ...uSnap.data() });
-      });
+      if (pendingParticipants.length > 0) {
+        await safelyReleaseStartLock();
+        throw new HttpsError(
+          "failed-precondition",
+          `PENDING_PARTICIPANTS_REQUIRE_ACTIVATION: Existen ${pendingParticipants.length} inversionistas con activación o claim pendiente para este ciclo. Todos los participantes registrados deben completar su activación antes del inicio operativo.`
+        );
+      }
 
       // Union of unique user UIDs
       const participantUids = new Set([...prevUserResultsMap.keys(), ...newEntriesMap.keys()]);
@@ -6266,7 +6390,7 @@ exports.adminStartCycleCallable = onCall(
             cycleCategory: finalCategory,
             groupCapitalCop: finalCapitalCop,
             totalUsdOperated: 0,
-            trmUsed: trmAppliedNum,
+            trmUsed: null,
             totalGrossCop: 0,
             userPercentage: uProfile.userPercentage !== undefined ? uProfile.userPercentage : 75,
             adminPercentage: uProfile.adminPercentage !== undefined ? uProfile.adminPercentage : 25,
@@ -6316,6 +6440,9 @@ exports.adminStartCycleCallable = onCall(
         const cData = cSnap.data() || {};
         if (cData.startAttemptId !== startAttemptId) {
           throw new Error("Concurrencia: el intento de inicio ya no es válido.");
+        }
+        if (Number(cData.cohortVersion || 1) !== expectedCohortVersion) {
+          throw new Error("COHORT_CHANGED_RETRY_START");
         }
 
         // ESCRITURA 1: Actualizar ciclo a STARTED
@@ -6443,6 +6570,12 @@ exports.adminStartCycleCallable = onCall(
       await safelyReleaseStartLock();
       console.error("[adminStartCycleCallable] Error iniciando ciclo operativamente:", err);
       if (err instanceof HttpsError) throw err;
+      if (err.message === "COHORT_CHANGED_RETRY_START") {
+        throw new HttpsError(
+          "aborted",
+          "COHORT_CHANGED_RETRY_START: La cohorte de participantes fue modificada concurrentemente durante el proceso de inicio. Por favor reintenta la operación."
+        );
+      }
       throw new HttpsError("internal", `Fallo atómico al iniciar ciclo: ${err.message || String(err)}`);
     }
   }
@@ -7899,6 +8032,53 @@ function generateCanonicalCycleId() {
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
+ * Cloud Function HTTPS Callable: adminCreateGenesisCycleCallable
+ * Autoridad única y estricta para crear el primer ciclo del sistema (Ciclo Génesis en PREPARING)
+ * a partir de una instalación limpia post-reset / sin historial operativo.
+ *
+ * Exclusivo para SuperAdmin.
+ * Idempotencia estricta intra-transaccional (idempotencyKeys).
+ * Genera candidateCycleId una sola vez fuera de la transacción.
+ * Verifica FAIL-CLOSED ausencia total de historial operativo previo (Guard NO-HISTORY).
+ */
+exports.adminCreateGenesisCycleCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
+    const { name, trmApplied, clientRequestId } = request.data || {};
+
+    try {
+      return await createGenesisCycleCore({
+        db,
+        authUid,
+        createdByName,
+        name,
+        trmApplied,
+        clientRequestId,
+        isSuperAdmin: true,
+      });
+    } catch (err) {
+      if (err.code === "permission-denied") {
+        throw new HttpsError("permission-denied", err.message);
+      }
+      if (err.code === "invalid-argument") {
+        throw new HttpsError("invalid-argument", err.message);
+      }
+      if (err.code === "already-exists") {
+        throw new HttpsError("already-exists", err.message);
+      }
+      if (err.code === "failed-precondition") {
+        throw new HttpsError("failed-precondition", err.message);
+      }
+      throw new HttpsError("internal", `Error transaccional al crear ciclo génesis: ${err.message || String(err)}`);
+    }
+  }
+);
+
+/**
  * Cloud Function HTTPS Callable: adminCreateNextCycleCallable
  * Autoridad única y estricta para crear y enlazar un ciclo sucesor (PREPARING)
  * a partir de un ciclo operativo activo (STARTED).
@@ -8029,16 +8209,6 @@ exports.adminCreateNextCycleCallable = onCall(
           );
         }
 
-        // C. Validación estricta de TRM (sin fallbacks hardcodeados)
-        const rawTrm = Number(sourceData.trmApplied);
-        if (!Number.isFinite(rawTrm) || rawTrm <= 0) {
-          throw new HttpsError(
-            "failed-precondition",
-            `SOURCE_CYCLE_TRM_INVALID: El ciclo origen '${cleanSourceCycleId}' no cuenta con una TRM válida configurada (${sourceData.trmApplied}).`
-          );
-        }
-        const inheritedTrm = rawTrm;
-
         // D. Verificación de configuración canónica (settings/global_config)
         const configData = configSnap.exists ? configSnap.data() || {} : {};
         if (configData.operationalCycleId && configData.operationalCycleId !== cleanSourceCycleId) {
@@ -8051,7 +8221,7 @@ exports.adminCreateNextCycleCallable = onCall(
         // === FASE DE ESCRITURAS (WRITE PHASE) ===
         const nowIso = new Date().toISOString();
 
-        // 1. Creación del nuevo ciclo sucesor B en PREPARING
+        // 1. Creación del nuevo ciclo sucesor B en PREPARING (Desacoplado de TRM estática previa)
         const newCyclePayload = {
           id: candidateCycleId,
           cycleId: candidateCycleId,
@@ -8060,7 +8230,13 @@ exports.adminCreateNextCycleCallable = onCall(
           operationalStatus: "PREPARING",
           previousCycleId: cleanSourceCycleId,
           nextCycleId: null,
-          trmApplied: inheritedTrm,
+          cohortVersion: 1,
+          trmApplied: null,
+          closingTrm: null,
+          closingTrmSetAt: null,
+          closingTrmSetByUid: null,
+          closingTrmSetByName: null,
+          observedMarketTrmAtClose: null,
           createdAt: nowIso,
           openedAt: nowIso, // retrocompatibilidad documental legacy
           startedAt: null,
@@ -8134,8 +8310,441 @@ exports.adminCreateNextCycleCallable = onCall(
   }
 );
 
+const {
+  getProtectedAccounts,
+  computeResetPlanHash,
+  buildTestEnvironmentResetPlan,
+  auditUserActiveFinancialDependencies,
+  executeTestEnvironmentResetCore,
+  deleteIndividualUserCore,
+} = require("./testEnvironmentResetCore");
 
+/**
+ * =========================================================================
+ * FASE 1: RESET TOTAL DE ENTORNO DE PRUEBA Y BORRADO INDIVIDUAL SEGURO
+ * =========================================================================
+ */
 
+/**
+ * Helper: Serialización segura para JSON / HTTPS Callable.
+ * Elimina recursivamente referencias circulares (Firestore DocumentReference en 'ref')
+ * y valores no serializables (funciones, undefined) antes de devolver el plan al cliente.
+ */
+function serializeResetPlanForCallable(value) {
+  if (Array.isArray(value)) {
+    return value.map(serializeResetPlanForCallable);
+  }
 
+  if (value && typeof value === "object") {
+    const out = {};
 
+    for (const [key, val] of Object.entries(value)) {
+      if (key === "ref") continue;
+      if (typeof val === "function" || typeof val === "undefined") continue;
 
+      out[key] = serializeResetPlanForCallable(val);
+    }
+
+    return out;
+  }
+
+  return value;
+}
+
+exports.serializeResetPlanForCallable = serializeResetPlanForCallable;
+
+/**
+ * OBJETIVO A: PREVIEW DEL RESET TOTAL DE ENTORNO DE PRUEBA
+ * READ-ONLY: Cero escrituras, cero borrados, no muta Auth ni Firestore.
+ * Construye el plan detallado y el hash criptográfico SHA-256 determinístico.
+ */
+exports.adminPreviewTestEnvironmentResetCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    // 1. Verificación estricta de SuperAdmin
+    const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
+
+    // 2. Construir plan único determinístico - FAIL CLOSED
+    try {
+      const { plan, previewHash } = await buildTestEnvironmentResetPlan(authUid, authEmail, db, admin.auth());
+
+      // Serialización segura sin mutar ni recalcular el previewHash autoritativo
+      const serializablePlan = serializeResetPlanForCallable(plan);
+
+      return {
+        success: true,
+        dryRun: true,
+        mode: "READ_ONLY_PLAN",
+        executedAt: new Date().toISOString(),
+        requestedBy: { uid: authUid, email: authEmail, name: createdByName },
+        previewHash,
+        plan: serializablePlan,
+        summary: {
+          totalAuthUsersToDelete: plan.authUsersToDelete.length,
+          totalFirestoreUsersToDelete: plan.firestoreUsersToDelete.length,
+          totalCyclesToDelete: plan.monthlyCyclesToDelete.length,
+          idempotencyKeysToDeleteCount: plan.idempotencyKeysToDelete.length,
+          unclassifiedIdempotencyKeysPreservedCount: plan.unclassifiedIdempotencyKeys.length,
+          notificationsToDeleteCount: plan.notificationsToDelete.length,
+          preservedNotificationsCount: plan.preservedNotifications.length,
+          investorApplicationsToDeleteCount: plan.investorApplicationsToDelete.length,
+          preservedApplicationsCount: plan.preservedApplications.length,
+          claimOperationsToDeleteCount: plan.claimOperationsToDelete.length,
+          preservedClaimOperationsCount: plan.preservedClaimOperations.length,
+          bitacorasToDeleteCount: plan.bitacorasToDelete.length,
+          preservedBitacorasCount: plan.preservedBitacoras.length,
+          requiredConfirmationPhrase: "REINICIAR ENTORNO DE PRUEBA",
+        },
+      };
+    } catch (err) {
+      console.error("[adminPreviewTestEnvironmentResetCallable] Error:", err);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);
+
+/**
+ * OBJETIVO B: RESET TOTAL DE ENTORNO DE PRUEBA (EJECUCIÓN ATÓMICA POR LOTES)
+ * Nombre canónico obligatorio: adminResetTestEnvironmentCallable.
+ * Exige frase exacta: REINICIAR ENTORNO DE PRUEBA.
+ * Exige expectedPreviewHash y valida que no haya cambiado (RESET_PREVIEW_STALE). CERO mutaciones antes.
+ */
+exports.adminResetTestEnvironmentCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    // 1. Verificación estricta de SuperAdmin
+    const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
+
+    const data = request.data || {};
+
+    try {
+      return await executeTestEnvironmentResetCore({
+        authUid,
+        authEmail,
+        createdByName,
+        confirmation: data.confirmation,
+        expectedPreviewHash: data.expectedPreviewHash,
+        db,
+        auth: admin.auth(),
+        FieldValue: admin.firestore.FieldValue,
+      });
+    } catch (err) {
+      console.error("[adminResetTestEnvironmentCallable] Error:", err);
+      if (err.code === "invalid-argument") throw new HttpsError("invalid-argument", err.message);
+      if (err.code === "failed-precondition") throw new HttpsError("failed-precondition", err.message);
+      if (err.code === "permission-denied") throw new HttpsError("permission-denied", err.message);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);
+
+/**
+ * OBJETIVO C: BORRADO INDIVIDUAL SEGURO DE USUARIO
+ * Nombre canónico: adminDeleteUserCallable.
+ * Exige confirmación exacta: "ELIMINAR {userCode}" o "ELIMINAR {email}".
+ * Bloquea con failed-precondition USER_HAS_ACTIVE_FINANCIAL_DEPENDENCIES si el usuario tiene flujos activos.
+ * Si el usuario solo tiene histórico CLOSED, PRESERVA cycleUserResults, reinvestments, disbursements, investments y dailyOperations.
+ * Si falla auth.deleteUser(), ABORTA antes de tocar Firestore.
+ * Acción de auditoría: ADMIN_USER_DELETED.
+ */
+exports.adminDeleteUserCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    // 1. Verificación estricta de SuperAdmin
+    const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
+
+    const data = request.data || {};
+    const targetInput = data.userId || data.uid || data.targetUserId || data.id;
+
+    try {
+      return await deleteIndividualUserCore({
+        authUid,
+        authEmail,
+        createdByName,
+        targetId: targetInput,
+        confirmation: data.confirmation,
+        db,
+        auth: admin.auth(),
+        FieldValue: admin.firestore.FieldValue,
+      });
+    } catch (err) {
+      console.error("[adminDeleteUserCallable] Error:", err);
+      if (err.code === "invalid-argument") throw new HttpsError("invalid-argument", err.message);
+      if (err.code === "failed-precondition") throw new HttpsError("failed-precondition", err.message);
+      if (err.code === "permission-denied") throw new HttpsError("permission-denied", err.message);
+      if (err.code === "not-found") throw new HttpsError("not-found", err.message);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);
+
+// =========================================================================
+// MÓDULO DE SOPORTE TÉCNICO Y PERMISOS GRANULARES (FASES S1, S2, S3)
+// =========================================================================
+const {
+  getAuthoritativeActorContext,
+  verifySupportPrivileges,
+  updateSupportPermissionsCore,
+  createSupportTicketCore,
+  replySupportTicketCore,
+  addInternalNoteCore,
+  assignSupportTicketCore,
+  updateSupportTicketStatusCore,
+  getSupportUserContextCore,
+} = require("./supportCore");
+
+/**
+ * Cloud Function Callable: Conceder o revocar permisos de soporte.
+ * EXCLUSIVAMENTE SUPERADMIN.
+ */
+exports.adminUpdateSupportPermissionsCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
+    const data = request.data || {};
+
+    try {
+      return await updateSupportPermissionsCore({
+        db,
+        admin,
+        authUid,
+        authEmail,
+        callerName: createdByName,
+        targetUid: data.targetUid,
+        permissions: data.permissions,
+        clientRequestId: data.clientRequestId,
+      });
+    } catch (err) {
+      console.error("[adminUpdateSupportPermissionsCallable] Error:", err);
+      if (err.code === "invalid-argument") throw new HttpsError("invalid-argument", err.message);
+      if (err.code === "failed-precondition") throw new HttpsError("failed-precondition", err.message);
+      if (err.code === "permission-denied") throw new HttpsError("permission-denied", err.message);
+      if (err.code === "not-found") throw new HttpsError("not-found", err.message);
+      if (err.code === "already-exists") throw new HttpsError("already-exists", err.message);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);
+
+/**
+ * Cloud Function Callable: Crear ticket de soporte con correlativo SUP-XXXXXX transaccional.
+ */
+exports.supportCreateTicketCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    if (!request.auth || !request.auth.uid) {
+      throw new HttpsError("unauthenticated", "Debes iniciar sesión para crear un ticket de soporte.");
+    }
+    const data = request.data || {};
+
+    try {
+      return await createSupportTicketCore({
+        db,
+        admin,
+        authUid: request.auth.uid,
+        subject: data.subject,
+        category: data.category,
+        description: data.description,
+        clientRequestId: data.clientRequestId,
+      });
+    } catch (err) {
+      console.error("[supportCreateTicketCallable] Error:", err);
+      if (err.code === "invalid-argument") throw new HttpsError("invalid-argument", err.message);
+      if (err.code === "failed-precondition") throw new HttpsError("failed-precondition", err.message);
+      if (err.code === "not-found") throw new HttpsError("not-found", err.message);
+      if (err.code === "already-exists") throw new HttpsError("already-exists", err.message);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);
+
+/**
+ * Cloud Function Callable: Responder a un ticket de soporte.
+ */
+exports.supportReplyTicketCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    if (!request.auth || !request.auth.uid) {
+      throw new HttpsError("unauthenticated", "Debes iniciar sesión para responder al ticket.");
+    }
+    const data = request.data || {};
+
+    try {
+      const actorContext = await getAuthoritativeActorContext({ request, db });
+      return await replySupportTicketCore({
+        db,
+        admin,
+        authUid: request.auth.uid,
+        ticketId: data.ticketId,
+        text: data.text,
+        clientRequestId: data.clientRequestId,
+        actorContext,
+      });
+    } catch (err) {
+      console.error("[supportReplyTicketCallable] Error:", err);
+      if (err.code === "invalid-argument") throw new HttpsError("invalid-argument", err.message);
+      if (err.code === "failed-precondition") throw new HttpsError("failed-precondition", err.message);
+      if (err.code === "permission-denied") throw new HttpsError("permission-denied", err.message);
+      if (err.code === "not-found") throw new HttpsError("not-found", err.message);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);
+
+/**
+ * Cloud Function Callable: Agregar nota interna en ticket (Soporte / SuperAdmin).
+ */
+exports.supportAddInternalNoteCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const authResult = await verifySupportPrivileges({ request, db, admin });
+    const data = request.data || {};
+
+    try {
+      return await addInternalNoteCore({
+        db,
+        admin,
+        authUid: authResult.authUid,
+        ticketId: data.ticketId,
+        noteText: data.noteText,
+        clientRequestId: data.clientRequestId,
+      });
+    } catch (err) {
+      console.error("[supportAddInternalNoteCallable] Error:", err);
+      if (err.code === "invalid-argument") throw new HttpsError("invalid-argument", err.message);
+      if (err.code === "not-found") throw new HttpsError("not-found", err.message);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);
+
+/**
+ * Cloud Function Callable: Asignar o tomar ticket de soporte.
+ */
+exports.supportAssignTicketCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const authResult = await verifySupportPrivileges({ request, db, admin });
+    const data = request.data || {};
+
+    try {
+      return await assignSupportTicketCore({
+        db,
+        admin,
+        authUid: authResult.authUid,
+        callerName: authResult.callerName,
+        isSuperAdmin: authResult.isSuperAdmin,
+        ticketId: data.ticketId,
+        assignedToUid: data.assignedToUid,
+        clientRequestId: data.clientRequestId,
+      });
+    } catch (err) {
+      console.error("[supportAssignTicketCallable] Error:", err);
+      if (err.code === "invalid-argument") throw new HttpsError("invalid-argument", err.message);
+      if (err.code === "failed-precondition") throw new HttpsError("failed-precondition", err.message);
+      if (err.code === "permission-denied") throw new HttpsError("permission-denied", err.message);
+      if (err.code === "not-found") throw new HttpsError("not-found", err.message);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);
+
+/**
+ * Cloud Function Callable: Actualizar estado de ticket de soporte.
+ */
+exports.supportUpdateTicketStatusCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const authResult = await verifySupportPrivileges({ request, db, admin });
+    const data = request.data || {};
+
+    try {
+      return await updateSupportTicketStatusCore({
+        db,
+        admin,
+        authUid: authResult.authUid,
+        callerName: authResult.callerName,
+        isSuperAdmin: authResult.isSuperAdmin,
+        ticketId: data.ticketId,
+        status: data.status,
+        reason: data.reason,
+        clientRequestId: data.clientRequestId,
+      });
+    } catch (err) {
+      console.error("[supportUpdateTicketStatusCallable] Error:", err);
+      if (err.code === "invalid-argument") throw new HttpsError("invalid-argument", err.message);
+      if (err.code === "failed-precondition") throw new HttpsError("failed-precondition", err.message);
+      if (err.code === "not-found") throw new HttpsError("not-found", err.message);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);
+
+/**
+ * Cloud Function Callable: Obtener contexto de diagnóstico del usuario (Solo Lectura).
+ */
+exports.supportGetUserContextCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const authResult = await verifySupportPrivileges({ request, db, admin });
+    const data = request.data || {};
+
+    try {
+      return await getSupportUserContextCore({
+        db,
+        admin,
+        authUid: authResult.authUid,
+        callerName: authResult.callerName,
+        permissions: authResult.permissions,
+        isSuperAdmin: authResult.isSuperAdmin,
+        ticketId: data.ticketId,
+      });
+    } catch (err) {
+      console.error("[supportGetUserContextCallable] Error:", err);
+      if (err.code === "invalid-argument") throw new HttpsError("invalid-argument", err.message);
+      if (err.code === "failed-precondition") throw new HttpsError("failed-precondition", err.message);
+      if (err.code === "not-found") throw new HttpsError("not-found", err.message);
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError("internal", err.message);
+    }
+  }
+);

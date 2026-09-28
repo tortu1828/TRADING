@@ -38,6 +38,16 @@ service cloud.firestore {
         isDbAdmin();
     }
 
+    function isSupportAgent() {
+      return isAuthenticated() && (
+        isSuperAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         getUserData().get('status', '') == 'ACTIVE' &&
+         getUserData().get('permissions', null) != null &&
+         getUserData().permissions.get('supportAgent', false) == true)
+      );
+    }
+
     function isUserActive() {
       return isAuthenticated() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
@@ -69,7 +79,7 @@ service cloud.firestore {
         !request.resource.data.diff(resource.data).affectedKeys().hasAny([
           'currentCapital', 'category', 'baseCapital', 'entryCycleId', 'role',
           'status', 'userPercentage', 'adminPercentage', 'userCode', 'createdAt',
-          'entryDate', 'isClaimed', 'claimedAt', 'migrationStatus'
+          'entryDate', 'isClaimed', 'claimedAt', 'migrationStatus', 'permissions'
         ])
       );
       allow delete: if false; // Requiere migración a Callable que elimine Firebase Auth + Firestore
@@ -294,7 +304,36 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 16. DEFAULT DENY PARA CUALQUIER OTRA COLECCIÓN O RUTA NO ESPECIFICADA
+    // 16. MÓDULO DE SOPORTE TÉCNICO (FASES S1, S2, S3)
+    // Mutaciones 100% exclusivas por Cloud Functions autoritativas.
+    // =========================================================================
+    match /supportTickets/{ticketId} {
+      allow get: if isAuthenticated() && (
+        resource.data.createdByUid == request.auth.uid || isSupportAgent()
+      );
+      allow list: if isAuthenticated() && (
+        resource.data.createdByUid == request.auth.uid || isSupportAgent()
+      );
+      allow create, update, delete: if false;
+
+      // Subcolección de mensajes públicos
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && (
+          get(/databases/$(database)/documents/supportTickets/$(ticketId)).data.createdByUid == request.auth.uid ||
+          isSupportAgent()
+        );
+        allow create, update, delete: if false;
+      }
+
+      // Subcolección de notas internas (Exclusivo Soporte / SuperAdmin - DENY TOTAL USUARIO)
+      match /internalNotes/{noteId} {
+        allow read: if isSupportAgent();
+        allow create, update, delete: if false;
+      }
+    }
+
+    // =========================================================================
+    // 17. DEFAULT DENY PARA CUALQUIER OTRA COLECCIÓN O RUTA NO ESPECIFICADA
     // =========================================================================
     match /{document=**} {
       allow read, write: if false;

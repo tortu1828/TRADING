@@ -32,6 +32,9 @@ import {
   UserPushToken,
   AuditLog,
   GlobalConfig,
+  SupportTicket,
+  SupportTicketMessage,
+  SupportInternalNote,
 } from '../types';
 
 export const firestoreService = {
@@ -309,6 +312,9 @@ export const firestoreService = {
     groupCapitalCop: number;
     date: string;
     amountUsd: number;
+    trmUsed?: number;
+    trmSource?: string;
+    trmCapturedAt?: string;
     notes?: string;
     targetType?: OperationTargetType;
     targetUserId?: string;
@@ -323,6 +329,9 @@ export const firestoreService = {
       groupCapitalCop,
       date,
       amountUsd,
+      trmUsed: paramTrmUsed,
+      trmSource: paramTrmSource,
+      trmCapturedAt: paramTrmCapturedAt,
       notes = '',
       targetType = 'CUSTOM_GROUP',
       targetUserId,
@@ -340,6 +349,9 @@ export const firestoreService = {
         groupCapitalCop,
         date,
         amountUsd,
+        trmUsed: paramTrmUsed,
+        trmSource: paramTrmSource,
+        trmCapturedAt: paramTrmCapturedAt,
         notes,
         targetType,
         targetUserId,
@@ -376,7 +388,14 @@ export const firestoreService = {
         throw new Error(`El ciclo (${cycleData.name || cycleId}) está en estado '${cycleData.status}'. No se permiten operaciones.`);
       }
 
-      const trm = cycleData.trmApplied || 4028.5;
+      let trm = Number(paramTrmUsed);
+      let trmSource = paramTrmSource || (paramTrmUsed ? 'LIVE_MARKET' : 'CYCLE_DEFAULT');
+      let trmCapturedAt = paramTrmCapturedAt || new Date().toISOString();
+
+      if (!Number.isFinite(trm) || trm <= 0) {
+        trm = cycleData.trmApplied || 4028.5;
+        trmSource = cycleData.trmApplied ? 'CYCLE_DEFAULT' : 'SYSTEM_FALLBACK';
+      }
 
       // Verificación de Idempotencia
       const existingOpSnap = await getDoc(doc(db, 'dailyOperations', operationIntentId));
@@ -452,6 +471,10 @@ export const firestoreService = {
         groupCapitalCop: Number(groupCapitalCop),
         date: date || new Date().toISOString().split('T')[0],
         amountUsd: Number(amountUsd),
+        trmUsed: trm,
+        trmSource,
+        trmCapturedAt,
+        grossCop: Number(amountUsd) * trm,
         notes: notes.trim(),
         createdAt: new Date().toISOString(),
         createdBy: createdByName,
@@ -777,11 +800,23 @@ export const firestoreService = {
    */
   async adminCloseCycleCallable(payload: {
     cycleId: string;
+    closingTrm: number;
+    observedMarketTrmAtClose?: number;
     adminNotes?: string;
+    clientRequestId?: string;
   }): Promise<{
     success: boolean;
     cycleId: string;
     cycleClosed: boolean;
+    closingTrm?: number;
+    closingTrmSetAt?: string;
+    closingTrmSetByUid?: string;
+    closingTrmSetByName?: string;
+    observedMarketTrmAtClose?: number | null;
+    totalGrossUsd?: number;
+    totalGrossCop?: number;
+    totalUsersProfitCop?: number;
+    totalAdminCommissionCop?: number;
     code?: string;
     pendingCount?: number;
     needsReviewCount?: number;
@@ -800,26 +835,7 @@ export const firestoreService = {
   }> {
     const callable = httpsCallable(functions, 'adminCloseCycleCallable');
     const response = await callable(payload);
-    return response.data as {
-      success: boolean;
-      cycleId: string;
-      cycleClosed: boolean;
-      code?: string;
-      pendingCount?: number;
-      needsReviewCount?: number;
-      approvedCount?: number;
-      rejectedCount?: number;
-      alreadyAppliedCount?: number;
-      closedAt?: string;
-      processedCount: number;
-      appliedCount: number;
-      failedCount: number;
-      conflictCount: number;
-      conflicts?: any[];
-      failures?: any[];
-      appliedReinvestments?: any[];
-      message: string;
-    };
+    return response.data as any;
   },
 
   /**
@@ -1804,5 +1820,211 @@ export const firestoreService = {
 
     const result = await callable(params);
     return result.data;
+  },
+
+  // ==========================================
+  // --- MÓDULO DE SOPORTE TÉCNICO Y PERMISOS ---
+  // ==========================================
+
+  async adminUpdateSupportPermissions(params: {
+    targetUid: string;
+    permissions: {
+      supportAgent: boolean;
+      supportReadUserContext?: boolean;
+      supportReadOperationalContext?: boolean;
+    };
+    clientRequestId: string;
+  }) {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      targetUid: string;
+      permissions: any;
+      idempotentReplay?: boolean;
+    }>(functions, 'adminUpdateSupportPermissionsCallable');
+    const result = await callable(params);
+    return result.data;
+  },
+
+  async supportCreateTicket(params: {
+    subject: string;
+    category: string;
+    description: string;
+    clientRequestId?: string;
+  }) {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      ticketId: string;
+      ticketNumber: string;
+      idempotentReplay?: boolean;
+    }>(functions, 'supportCreateTicketCallable');
+    const result = await callable(params);
+    return result.data;
+  },
+
+  async supportReplyTicket(params: {
+    ticketId: string;
+    text: string;
+    clientRequestId?: string;
+  }) {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      messageId: string;
+      status: string;
+    }>(functions, 'supportReplyTicketCallable');
+    const result = await callable(params);
+    return result.data;
+  },
+
+  async supportAddInternalNote(params: {
+    ticketId: string;
+    noteText: string;
+    clientRequestId?: string;
+  }) {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      noteId: string;
+    }>(functions, 'supportAddInternalNoteCallable');
+    const result = await callable(params);
+    return result.data;
+  },
+
+  async supportAssignTicket(params: {
+    ticketId: string;
+    assignedToUid?: string;
+    clientRequestId?: string;
+  }) {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      ticketId: string;
+      assignedToUid: string;
+      assignedToName: string;
+      status: string;
+    }>(functions, 'supportAssignTicketCallable');
+    const result = await callable(params);
+    return result.data;
+  },
+
+  async supportUpdateTicketStatus(params: {
+    ticketId: string;
+    status: string;
+    reason?: string;
+    clientRequestId?: string;
+  }) {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      ticketId: string;
+      previousStatus: string;
+      newStatus: string;
+    }>(functions, 'supportUpdateTicketStatusCallable');
+    const result = await callable(params);
+    return result.data;
+  },
+
+  async supportGetUserContext(params: {
+    ticketId: string;
+  }) {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      hasUserContext: boolean;
+      hasOperationalContext: boolean;
+      user?: any;
+      operationalContext?: any;
+      message?: string;
+    }>(functions, 'supportGetUserContextCallable');
+    const result = await callable(params);
+    return result.data;
+  },
+
+  listenSupportTickets(onUpdate: (tickets: SupportTicket[]) => void): () => void {
+    try {
+      const q = query(collection(db, 'supportTickets'), orderBy('updatedAt', 'desc'));
+      return onSnapshot(
+        q,
+        (snapshot) => {
+          const tickets = snapshot.docs.map((d) => ({
+            ticketId: d.id,
+            ...(d.data() as SupportTicket),
+          }));
+          onUpdate(tickets);
+        },
+        (error) => console.error('[FirestoreService] Error en snapshot de tickets de soporte:', error)
+      );
+    } catch (err) {
+      console.error('[FirestoreService] Listener de tickets no disponible:', err);
+      return () => {};
+    }
+  },
+
+  listenUserSupportTickets(userUid: string, onUpdate: (tickets: SupportTicket[]) => void): () => void {
+    if (!userUid) return () => {};
+    try {
+      const q = query(
+        collection(db, 'supportTickets'),
+        where('createdByUid', '==', userUid),
+        orderBy('updatedAt', 'desc')
+      );
+      return onSnapshot(
+        q,
+        (snapshot) => {
+          const tickets = snapshot.docs.map((d) => ({
+            ticketId: d.id,
+            ...(d.data() as SupportTicket),
+          }));
+          onUpdate(tickets);
+        },
+        (error) => console.error('[FirestoreService] Error en snapshot de tickets de usuario:', error)
+      );
+    } catch (err) {
+      console.error('[FirestoreService] Listener de tickets de usuario no disponible:', err);
+      return () => {};
+    }
+  },
+
+  listenTicketMessages(ticketId: string, onUpdate: (messages: SupportTicketMessage[]) => void): () => void {
+    if (!ticketId) return () => {};
+    try {
+      const q = query(
+        collection(db, 'supportTickets', ticketId, 'messages'),
+        orderBy('createdAt', 'asc')
+      );
+      return onSnapshot(
+        q,
+        (snapshot) => {
+          const msgs = snapshot.docs.map((d) => ({
+            messageId: d.id,
+            ...(d.data() as SupportTicketMessage),
+          }));
+          onUpdate(msgs);
+        },
+        (error) => console.error('[FirestoreService] Error en snapshot de mensajes del ticket:', error)
+      );
+    } catch (err) {
+      console.error('[FirestoreService] Listener de mensajes de ticket no disponible:', err);
+      return () => {};
+    }
+  },
+
+  listenTicketInternalNotes(ticketId: string, onUpdate: (notes: SupportInternalNote[]) => void): () => void {
+    if (!ticketId) return () => {};
+    try {
+      const q = query(
+        collection(db, 'supportTickets', ticketId, 'internalNotes'),
+        orderBy('createdAt', 'asc')
+      );
+      return onSnapshot(
+        q,
+        (snapshot) => {
+          const notes = snapshot.docs.map((d) => ({
+            noteId: d.id,
+            ...(d.data() as SupportInternalNote),
+          }));
+          onUpdate(notes);
+        },
+        (error) => console.error('[FirestoreService] Error en snapshot de notas internas:', error)
+      );
+    } catch (err) {
+      console.error('[FirestoreService] Listener de notas internas no disponible:', err);
+      return () => {};
+    }
   },
 };

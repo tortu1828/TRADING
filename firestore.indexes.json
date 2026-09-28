@@ -1,0 +1,89 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "cycleUserResults",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cycleId", "order": "ASCENDING" },
+        { "fieldPath": "groupCapitalCop", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "cycleUserResults",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cycleId", "order": "ASCENDING" },
+        { "fieldPath": "cycleCategory", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "cycleUserResults",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cycleId", "order": "ASCENDING" },
+        { "fieldPath": "cycleCategory", "order": "ASCENDING" },
+        { "fieldPath": "groupCapitalCop", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "reinvestments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "targetCycleId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "reinvestments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cycleId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "dailyOperations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cycleId", "order": "ASCENDING" },
+        { "fieldPath": "category", "order": "ASCENDING" },
+        { "fieldPath": "groupCapitalCop", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "supportTickets",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "createdByUid", "order": "ASCENDING" },
+        { "fieldPath": "lastMessageAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "supportTickets",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "lastMessageAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "supportTickets",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assignedToUid", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "lastMessageAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "supportTickets",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "category", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "lastMessageAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
