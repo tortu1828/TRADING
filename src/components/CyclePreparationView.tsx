@@ -18,9 +18,12 @@ import {
   Coins,
   ShieldAlert,
   Check,
+  Sparkles,
+  Plus,
 } from 'lucide-react';
 import { dataStore } from '../lib/dataStore';
 import { firestoreService } from '../lib/firestoreService';
+import { useAuth } from '../context/AuthContext';
 import { MonthlyCycle, ReinvestmentRequest, UserProfile } from '../types';
 
 export interface ResolvedPreparationAmounts {
@@ -104,6 +107,9 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
   currentUser,
   onRefresh,
 }) => {
+  const { isSuperAdmin: authIsSuperAdmin } = useAuth();
+  const isSuperAdmin = authIsSuperAdmin || currentUser?.role === 'SUPERADMIN' || currentUser?.role === 'ADMIN';
+
   const [config, setConfig] = useState(dataStore.getConfig());
   const [cycles, setCycles] = useState<MonthlyCycle[]>([]);
   const preparingCycleId = config?.preparingCycleId || null;
@@ -124,6 +130,19 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
   const [isStartingCycle, setIsStartingCycle] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+
+  // Genesis creation modal state
+  const [showGenesisModal, setShowGenesisModal] = useState(false);
+  const [genesisName, setGenesisName] = useState('Ciclo Génesis');
+  const [isCreatingGenesis, setIsCreatingGenesis] = useState(false);
+  const [genesisError, setGenesisError] = useState<string | null>(null);
+
+  const hasAnyRealCycle = cycles && cycles.length > 0;
+  const canCreateGenesis =
+    isSuperAdmin &&
+    !hasAnyRealCycle &&
+    !config?.preparingCycleId &&
+    !config?.operationalCycleId;
 
   // Sync dataStore state
   useEffect(() => {
@@ -343,6 +362,41 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
     }
   };
 
+  // Manejador Crear Ciclo Inicial (Génesis)
+  const handleCreateGenesisCycle = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = genesisName.trim();
+    if (cleanName.length < 3 || cleanName.length > 60) {
+      setGenesisError('El nombre del ciclo debe tener entre 3 y 60 caracteres.');
+      return;
+    }
+
+    setGenesisError(null);
+    setIsCreatingGenesis(true);
+
+    try {
+      const clientRequestId = crypto.randomUUID();
+      const res = await firestoreService.adminCreateGenesisCycleCallable({
+        name: cleanName,
+        clientRequestId,
+      });
+
+      setShowGenesisModal(false);
+      setGenesisName('Ciclo Génesis');
+      setNotification({
+        type: 'success',
+        message: `Ciclo inicial creado correctamente. ID: ${res.cycleId}`,
+      });
+
+      if (onRefresh) onRefresh();
+    } catch (err: any) {
+      console.error('Error creando ciclo génesis:', err);
+      setGenesisError(err.message || 'Error al crear ciclo inicial en el servidor.');
+    } finally {
+      setIsCreatingGenesis(false);
+    }
+  };
+
   // Manejador Iniciar Ciclo Operativo
   const handleStartCycle = async () => {
     if (!preparingCycleId) {
@@ -548,8 +602,21 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
             </div>
           )}
 
-          {/* BOTÓN: Iniciar Ciclo Operativo (Section 22) */}
-          {!preparingCycleId ? (
+          {/* BOTÓN: Iniciar Ciclo Operativo / Crear Ciclo Inicial */}
+          {canCreateGenesis ? (
+            <button
+              type="button"
+              onClick={() => {
+                setGenesisName('Ciclo Génesis');
+                setGenesisError(null);
+                setShowGenesisModal(true);
+              }}
+              className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black shadow-lg shadow-emerald-600/30 transition flex items-center gap-2 cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              Crear Ciclo Inicial
+            </button>
+          ) : !preparingCycleId ? (
             <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-900/80 border border-slate-800 text-slate-400 text-xs font-medium">
               <AlertCircle className="w-4 h-4 text-slate-500 shrink-0" />
               <span>No hay ningún ciclo en preparación disponible para iniciar.</span>
@@ -575,6 +642,39 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* BLOQUE INICIALIZACIÓN GÉNESIS (Si no existe ciclo inicial) */}
+      {!hasAnyRealCycle && !preparingCycleId && (
+        <div className="p-8 rounded-2xl bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border border-slate-800 text-center space-y-4 shadow-xl">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mx-auto">
+            <Sparkles className="w-7 h-7" />
+          </div>
+          <div className="max-w-md mx-auto space-y-1">
+            <h3 className="text-lg font-black text-slate-100">
+              Todavía no existe un ciclo inicial.
+            </h3>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Cree el ciclo inicial (Génesis) para comenzar las operaciones del fondo, habilitar la configuración de inversionistas y preparar el primer ciclo operativo.
+            </p>
+          </div>
+          {isSuperAdmin && (
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setGenesisName('Ciclo Génesis');
+                  setGenesisError(null);
+                  setShowGenesisModal(true);
+                }}
+                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black shadow-lg shadow-emerald-600/30 transition inline-flex items-center gap-2 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                Crear Ciclo Inicial
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* TARJETAS DE KPIS DE PREPARACIÓN (Section 17) */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
@@ -1197,6 +1297,99 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 3: CREAR CICLO INICIAL GÉNESIS (SuperAdmin) */}
+      {/* ========================================================================= */}
+      {showGenesisModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative text-slate-100 space-y-5">
+            <button
+              onClick={() => !isCreatingGenesis && setShowGenesisModal(false)}
+              disabled={isCreatingGenesis}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-800 transition disabled:opacity-50"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 border-b border-slate-800 pb-4">
+              <div className="w-10 h-10 rounded-xl bg-emerald-600/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                <Sparkles className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-100">
+                  Crear Ciclo Inicial (Génesis)
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Inicialización del primer ciclo en estado de preparación.
+                </p>
+              </div>
+            </div>
+
+            {genesisError && (
+              <div className="p-3 rounded-xl bg-rose-950/70 border border-rose-500/50 text-rose-300 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{genesisError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleCreateGenesisCycle} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-300 font-bold mb-1.5">
+                  Nombre del Ciclo <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={genesisName}
+                  onChange={(e) => setGenesisName(e.target.value)}
+                  placeholder="Ej: Ciclo Génesis"
+                  disabled={isCreatingGenesis}
+                  maxLength={60}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 text-xs font-semibold disabled:opacity-50"
+                  autoFocus
+                />
+                <span className="text-[11px] text-slate-500 mt-1 block">
+                  Entre 3 y 60 caracteres. El identificador canónico será generado por el servidor.
+                </span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400 space-y-1">
+                <p className="font-semibold text-slate-300">Información del Ciclo Génesis:</p>
+                <p>• Estado inicial: <strong>PREPARING</strong> (en preparación).</p>
+                <p>• La TRM no se congela al inicio; se aplicará la liquidación al momento del cierre.</p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowGenesisModal(false)}
+                  disabled={isCreatingGenesis}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition cursor-pointer disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isCreatingGenesis || !genesisName.trim() || genesisName.trim().length < 3}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black shadow-lg shadow-emerald-600/30 transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isCreatingGenesis ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      Creando ciclo inicial...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4" />
+                      Crear Ciclo Inicial
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

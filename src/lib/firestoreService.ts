@@ -978,6 +978,29 @@ export const firestoreService = {
     };
   },
 
+  async adminCreateGenesisCycleCallable(payload: {
+    name: string;
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    cycleId: string;
+    operationalStatus?: 'PREPARING';
+    message?: string;
+    idempotentReplay?: boolean;
+    cycle?: any;
+  }> {
+    const callable = httpsCallable(functions, 'adminCreateGenesisCycleCallable');
+    const response = await callable(payload);
+    return response.data as {
+      success: boolean;
+      cycleId: string;
+      operationalStatus?: 'PREPARING';
+      message?: string;
+      idempotentReplay?: boolean;
+      cycle?: any;
+    };
+  },
+
   async saveReinvestment(reinv: ReinvestmentRequest) {
     // Reglas de seguridad endurecidas: toda mutación debe realizarse por Cloud Functions autoritativas.
     // Se mantiene soporte en memoria y advertencia si se invoca directamente.
@@ -2028,3 +2051,4 @@ export const firestoreService = {
     }
   },
 };
+
