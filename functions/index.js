@@ -898,6 +898,19 @@ exports.adminCreateUser = onCall(
     const adminPctNum = Number(adminPercentage) !== undefined ? Number(adminPercentage) : 25;
 
     let entryCycleId = null;
+
+    const isInvestorUser = role !== "ADMIN";
+
+    if (
+      isInvestorUser &&
+      (!targetCycleId || typeof targetCycleId !== "string" || !targetCycleId.trim())
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "INVESTOR_TARGET_CYCLE_REQUIRED: No existe un ciclo de ingreso válido para este inversionista."
+      );
+    }
+
     if (targetCycleId && typeof targetCycleId === "string" && targetCycleId.trim()) {
       try {
         entryCycleId = await validateTargetCycleForUserEntry({ db, targetCycleId });
@@ -1062,15 +1075,24 @@ exports.adminCreatePendingInvestor = onCall(
     const adminPctNum = Number(adminPercentage) !== undefined ? Number(adminPercentage) : 25;
 
     let entryCycleId = null;
-    if (targetCycleId && typeof targetCycleId === "string" && targetCycleId.trim()) {
-      try {
-        entryCycleId = await validateTargetCycleForUserEntry({ db, targetCycleId });
-      } catch (err) {
-        if (err.code === "not-found") {
-          throw new HttpsError("not-found", err.message);
-        }
-        throw new HttpsError("failed-precondition", err.message);
+
+    if (!targetCycleId || typeof targetCycleId !== "string" || !targetCycleId.trim()) {
+      throw new HttpsError(
+        "failed-precondition",
+        "INVESTOR_TARGET_CYCLE_REQUIRED: No existe un ciclo de ingreso válido para este inversionista."
+      );
+    }
+
+    try {
+      entryCycleId = await validateTargetCycleForUserEntry({
+        db,
+        targetCycleId: targetCycleId.trim(),
+      });
+    } catch (err) {
+      if (err.code === "not-found") {
+        throw new HttpsError("not-found", err.message);
       }
+      throw new HttpsError("failed-precondition", err.message);
     }
 
     const category = getCanonicalCategoryForCapital(capNum);

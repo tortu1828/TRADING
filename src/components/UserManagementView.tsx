@@ -351,12 +351,14 @@ export const UserManagementView: React.FC = () => {
         setEditingUser(null);
       } else {
         const effectiveTargetCycleId =
-          !config?.operationalCycleId && hasValidFutureCycle && preparingCycle
+          hasValidFutureCycle && preparingCycle
             ? (formTargetCycleId || preparingCycle.cycleId || preparingCycle.id)
-            : (formTargetCycleId || null);
+            : null;
 
-        if (!config?.operationalCycleId && hasValidFutureCycle && !effectiveTargetCycleId) {
-          setFormError('No se permite guardar el usuario sin especificar el ciclo de ingreso en preparación.');
+        if (!effectiveTargetCycleId) {
+          setFormError(
+            'No hay un ciclo de ingreso válido en preparación. Crea o habilita el próximo ciclo antes de registrar este inversionista.'
+          );
           setIsSubmitting(false);
           return;
         }
