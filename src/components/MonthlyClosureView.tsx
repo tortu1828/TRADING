@@ -101,6 +101,12 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   // General Notification alert banner
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
+  // TRM definitiva de cierre: obligatoria para ciclos modernos.
+  const [closingTrmInput, setClosingTrmInput] = useState<string>('');
+  const parsedClosingTrmInput = Number(closingTrmInput.replace(',', '.'));
+  const hasValidClosingTrm =
+    Number.isFinite(parsedClosingTrmInput) && parsedClosingTrmInput > 0;
+
   // TRM Adjustment Modal
   const [showTrmModal, setShowTrmModal] = useState<boolean>(false);
   const [newTrmInput, setNewTrmInput] = useState<string>(
@@ -485,6 +491,24 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
   // Handle Close Cycle
   const handleCloseCycle = async () => {
+    const parsedClosingTrm = Number(closingTrmInput.replace(',', '.'));
+    const canonicalCycleId = currentCycle?.cycleId;
+
+    if (!canonicalCycleId) {
+      setStatusMessage({
+        type: 'error',
+        text: 'No se pudo resolver el identificador canónico del ciclo a cerrar.',
+      });
+      return;
+    }
+
+    if (!Number.isFinite(parsedClosingTrm) || parsedClosingTrm <= 0) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Ingresa una TRM definitiva de cierre válida y mayor a cero antes de cerrar el ciclo.',
+      });
+      return;
+    }
     if (isClosing) {
       alert('El ciclo ya se encuentra en proceso de cierre transaccional.');
       return;
@@ -498,9 +522,10 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     if (window.confirm(`¿Estás seguro de congelar y CERRAR formalmente el ciclo ${currentCycle.name}?\n\n• Solicitudes Aprobadas que se aplicarán a capital: ${approvedRequestsCount}\n• Solicitudes Rechazadas: ${rejectedRequestsCount}\n\nEsta acción ejecutará el Pre-Flight financiero y bloqueará cualquier edición posterior.`)) {
       try {
         const res = await dataStore.closeCycle(
-          selectedCycleId,
+          canonicalCycleId,
           currentUser?.uid || 'admin_root_uid',
-          currentUser?.fullName || 'Administrador Principal'
+          currentUser?.fullName || 'Administrador Principal',
+          parsedClosingTrm
         );
         setStatusMessage({
           type: 'success',
@@ -2104,12 +2129,35 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
               <span>🔔 ENVIAR NOTIFICACIONES</span>
             </button>
 
+            {/* TRM definitiva de cierre */}
+            {!isClosed && (
+              <div className="w-full sm:w-auto min-w-[250px] rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                <label className="block text-[10px] font-black uppercase tracking-wide text-amber-400 mb-1">
+                  TRM definitiva de cierre (COP/USD)
+                </label>
+
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={closingTrmInput}
+                  onChange={(e) => setClosingTrmInput(e.target.value)}
+                  disabled={isClosing}
+                  placeholder="Ej. 3850.25"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-white outline-none focus:border-amber-500 disabled:opacity-50"
+                />
+
+                <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                  Esta tasa será usada para la liquidación definitiva del ciclo.
+                </p>
+              </div>
+            )}
+
             {/* Close Cycle Button (Amber in mockup) */}
             <button
               onClick={handleCloseCycle}
-              disabled={!is100Percent || isClosed || isClosing || hasUnresolvedRequests}
+              disabled={!is100Percent || isClosed || isClosing || hasUnresolvedRequests || !hasValidClosingTrm}
               className={`min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg transition cursor-pointer w-full sm:w-auto active:scale-95 ${
-                is100Percent && !isClosed && !isClosing && !hasUnresolvedRequests
+                is100Percent && !isClosed && !isClosing && !hasUnresolvedRequests && hasValidClosingTrm
                   ? 'bg-amber-600 hover:bg-amber-500 text-slate-950 shadow-amber-600/30 font-black'
                   : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
               }`}

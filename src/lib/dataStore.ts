@@ -984,6 +984,7 @@ class DataStore {
     const targetCycleId = cycleId || this.config.activeCycleId;
     const targetCycle = this.cycles.find((c) => c.cycleId === targetCycleId);
     const isClosedCycle = targetCycle?.status === 'CLOSED';
+    const isStartedCycle = targetCycle?.operationalStatus === 'STARTED';
     const groupCalculations = this.getGroupCalculations(targetCycleId);
     const cycleUserResults = this.getUserResults(targetCycleId);
 
@@ -996,7 +997,7 @@ class DataStore {
     // Agrupar usuarios por categoría y capital exacto
     const map = new Map<string, { category: BitacoraCategory; groupCapitalCop: number; users: UserProfile[] }>();
 
-    if (isClosedCycle) {
+    if (isClosedCycle || isStartedCycle) {
       // CICLO CERRADO: Snapshot histórico inmutable.
       // Reconstruir grupos desde los cálculos guardados de dicho ciclo cerrado
       groupCalculations.forEach((calc) => {

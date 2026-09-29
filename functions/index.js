@@ -6541,7 +6541,7 @@ exports.adminStartCycleCallable = onCall(
         details: {
           operationalStatus: "STARTED",
           initialManagedCapitalCop: totalInitialCapitalCop,
-          initialActiveUsersCount: activeUsers.length,
+          initialActiveUsersCount: cycleUserResultsToSet.length,
           reinvestmentsAppliedCount: reinvUpdates.length,
           usersCapitalUpdatedCount: userUpdates.length,
           requiredStartWrites,
@@ -6582,11 +6582,11 @@ exports.adminStartCycleCallable = onCall(
         operationalStatus: "STARTED",
         startedAt: nowIso,
         initialManagedCapitalCop: totalInitialCapitalCop,
-        initialActiveUsersCount: activeUsers.length,
+        initialActiveUsersCount: cycleUserResultsToSet.length,
         reinvestmentsAppliedCount: reinvUpdates.length,
         usersCapitalUpdatedCount: userUpdates.length,
         requiredStartWrites,
-        message: `Ciclo ${targetCycleId} iniciado operativamente con éxito. Se congelaron los capitales de ${activeUsers.length} inversionistas ($${totalInitialCapitalCop.toLocaleString("es-CO")} COP) y se habilitaron las operaciones de trading.`,
+        message: `Ciclo ${targetCycleId} iniciado operativamente con éxito. Se congelaron los capitales de ${cycleUserResultsToSet.length} inversionistas ($${totalInitialCapitalCop.toLocaleString("es-CO")} COP) y se habilitaron las operaciones de trading.`,
       };
     } catch (err) {
       await safelyReleaseStartLock();
