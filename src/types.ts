@@ -94,6 +94,7 @@ export interface MonthlyCycle {
   closingTrmSetByName?: string | null;
   observedMarketTrmAtClose?: number | null;
   isLegacy?: boolean;
+  isGenesis?: boolean;
   openedAt?: string;
   closedAt: string | null;
   closedBy: string | null;

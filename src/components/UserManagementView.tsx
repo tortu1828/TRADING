@@ -33,6 +33,46 @@ import { ExcelBitacoraImportModal } from './ExcelBitacoraImportModal';
 import { InvestorApplicationsView } from './InvestorApplicationsView';
 import { createFirebaseAuthUser } from '../lib/firebase';
 import { firestoreService } from '../lib/firestoreService';
+import { MonthlyCycle } from '../types';
+
+export function isCycleValidForFutureEnrollment(
+  preparingCycle: MonthlyCycle | null | undefined,
+  getCycleById: (id: string) => MonthlyCycle | undefined
+): boolean {
+  if (!preparingCycle) return false;
+
+  // Validar estados base obligatorios del ciclo en preparación
+  if (preparingCycle.status !== 'OPEN' || preparingCycle.operationalStatus !== 'PREPARING') {
+    return false;
+  }
+
+  // CASO A — GÉNESIS:
+  if (
+    (preparingCycle.isGenesis === true || !preparingCycle.previousCycleId) &&
+    preparingCycle.previousCycleId == null
+  ) {
+    return true;
+  }
+
+  // CASO B — SUCESOR NORMAL:
+  if (preparingCycle.previousCycleId) {
+    const prevCycle = getCycleById(preparingCycle.previousCycleId);
+    return !!prevCycle && prevCycle.status === 'CLOSED';
+  }
+
+  return false;
+}
+
+export function resolveDefaultTargetCycleId(params: {
+  operationalCycleId?: string | null;
+  preparingCycle?: MonthlyCycle | null;
+  hasValidFutureCycle: boolean;
+}): string {
+  if (!params.operationalCycleId && params.hasValidFutureCycle && params.preparingCycle) {
+    return params.preparingCycle.cycleId || params.preparingCycle.id;
+  }
+  return '';
+}
 
 export const UserManagementView: React.FC = () => {
   const { allUsers, currentUser, isSuperAdmin } = useAuth();
@@ -109,13 +149,10 @@ export const UserManagementView: React.FC = () => {
   const config = dataStore.getConfig();
   const preparingCycleId = config?.preparingCycleId;
   const preparingCycle = preparingCycleId ? dataStore.getCycleById(preparingCycleId) : null;
-  const hasValidFutureCycle = (() => {
-    if (preparingCycle && preparingCycle.previousCycleId) {
-      const prevCycle = dataStore.getCycleById(preparingCycle.previousCycleId);
-      return prevCycle && prevCycle.status === 'CLOSED';
-    }
-    return false;
-  })();
+  const hasValidFutureCycle = isCycleValidForFutureEnrollment(
+    preparingCycle,
+    (id) => dataStore.getCycleById(id)
+  );
 
   const numericCapital = parseFloat(formCapital) || 0;
   const detectedCategory = getCategoryForCapital(numericCapital);
@@ -157,6 +194,13 @@ export const UserManagementView: React.FC = () => {
     setFormSupportAgent(false);
     setFormSupportReadUserContext(false);
     setFormSupportReadOperationalContext(false);
+    setFormTargetCycleId(
+      resolveDefaultTargetCycleId({
+        operationalCycleId: config?.operationalCycleId,
+        preparingCycle,
+        hasValidFutureCycle,
+      })
+    );
     setFormError(null);
     setIsAddModalOpen(true);
   };
@@ -306,6 +350,17 @@ export const UserManagementView: React.FC = () => {
 
         setEditingUser(null);
       } else {
+        const effectiveTargetCycleId =
+          !config?.operationalCycleId && hasValidFutureCycle && preparingCycle
+            ? (formTargetCycleId || preparingCycle.cycleId || preparingCycle.id)
+            : (formTargetCycleId || null);
+
+        if (!config?.operationalCycleId && hasValidFutureCycle && !effectiveTargetCycleId) {
+          setFormError('No se permite guardar el usuario sin especificar el ciclo de ingreso en preparación.');
+          setIsSubmitting(false);
+          return;
+        }
+
         if (createMode === 'PENDING') {
           // MODO PENDIENTE: Crea perfil en Firestore (status: PENDING_CLAIM, uid: null) sin cuenta Auth
           const result = await firestoreService.adminCreatePendingInvestor({
@@ -317,7 +372,7 @@ export const UserManagementView: React.FC = () => {
             adminPercentage: 100 - split,
             paymentMethod: formBank,
             paymentDetails: formAccount || 'Cuenta Principal',
-            targetCycleId: formTargetCycleId || null,
+            targetCycleId: effectiveTargetCycleId,
           });
 
           if (result && result.user) {
@@ -342,7 +397,7 @@ export const UserManagementView: React.FC = () => {
             paymentMethod: formBank,
             paymentDetails: formAccount || 'Cuenta Principal',
             role: 'USER',
-            targetCycleId: formTargetCycleId || null,
+            targetCycleId: effectiveTargetCycleId,
           });
 
           if (result && result.user) {
@@ -1483,19 +1538,35 @@ ${directLink}
               {!editingUser && hasValidFutureCycle && preparingCycle && (
                 <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
                   <label className="block text-xs font-semibold text-slate-300">Ciclo de Ingreso</label>
-                  <select
-                    value={formTargetCycleId}
-                    onChange={(e) => setFormTargetCycleId(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
-                  >
-                    <option value="">Ingresar en Ciclo Activo Actual</option>
-                    <option value={preparingCycle.cycleId}>
-                      Ingresar desde el Ciclo de Preparación: {preparingCycle.name}
-                    </option>
-                  </select>
-                  <p className="text-[10px] text-slate-400">
-                    Si se selecciona el ciclo de preparación, el capital se registrará en el backend con ingreso programado para {preparingCycle.name}.
-                  </p>
+                  {!config?.operationalCycleId ? (
+                    <div className="p-3 rounded-lg bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 text-xs">
+                      <p className="font-semibold">
+                        El nuevo inversionista ingresará al ciclo en preparación:{' '}
+                        <span className="font-bold underline">{preparingCycle.name}</span>
+                      </p>
+                      <p className="text-[10px] text-emerald-400/80 mt-1">
+                        (No existe ciclo operativo actualmente activo; su capital quedará asegurado para el inicio de este ciclo).
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <select
+                        value={formTargetCycleId}
+                        onChange={(e) => setFormTargetCycleId(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="">Ingresar en Ciclo Activo Actual</option>
+                        <option value={preparingCycle.cycleId}>
+                          {preparingCycle.isGenesis
+                            ? `Ingresar al ciclo en preparación: ${preparingCycle.name}`
+                            : `Ingresar desde el Ciclo de Preparación: ${preparingCycle.name}`}
+                        </option>
+                      </select>
+                      <p className="text-[10px] text-slate-400">
+                        Si se selecciona el ciclo de preparación, el capital se registrará en el backend con ingreso programado para {preparingCycle.name}.
+                      </p>
+                    </>
+                  )}
                 </div>
               )}
 
