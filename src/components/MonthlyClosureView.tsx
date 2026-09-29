@@ -64,7 +64,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   const preparingCycleId = globalConfig?.preparingCycleId || null;
   const preparationCycle = preparingCycleId ? (dataStore.getCycleById(preparingCycleId) || null) : null;
 
-  // Sub-pestañas: Cierre del ciclo vs Preparación del Próximo Ciclo vs Informes Oficiales (exclusivo SuperAdmin)
+  // Sub-pestaÃ±as: Cierre del ciclo vs PreparaciÃ³n del PrÃ³ximo Ciclo vs Informes Oficiales (exclusivo SuperAdmin)
   const [activeSubTab, setActiveSubTab] = useState<'closure' | 'preparation' | 'reports'>('closure');
 
   const [selectedCycleId, setSelectedCycleId] = useState<string>(activeCycle.cycleId);
@@ -103,8 +103,8 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
   // TRM Adjustment Modal
   const [showTrmModal, setShowTrmModal] = useState<boolean>(false);
-  const [newTrmInput, setNewTrmInput] = useState<string>(currentCycle.trmApplied.toString());
-  const [trmReason, setTrmReason] = useState<string>('Ajuste oficial de TRM para liquidación del período');
+  const [newTrmInput, setNewTrmInput] = useState<string>((currentCycle.trmApplied != null ? currentCycle.trmApplied.toString() : ''));
+  const [trmReason, setTrmReason] = useState<string>('Ajuste oficial de TRM para liquidaciÃ³n del perÃ­odo');
   const [trmError, setTrmError] = useState<string | null>(null);
   const [liveTrmResult, setLiveTrmResult] = useState<LiveTRMResult | null>(null);
   const [isFetchingTrm, setIsFetchingTrm] = useState<boolean>(false);
@@ -151,9 +151,9 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   const categoryGroups = dataStore.getCategoryGroups(selectedCycleId);
   const rawUserResults = dataStore.getUserResults(selectedCycleId);
 
-  // Separación estricta entre Ciclo Activo y Ciclo Cerrado (Secciones 2, 3 y 4):
-  // Si el ciclo está CERRADO: snapshot histórico inmutable (no filtrar usuarios que hoy no existan).
-  // Si el ciclo está ACTIVO: filtrar estrictamente a usuarios que actualmente forman parte del ciclo activo.
+  // SeparaciÃ³n estricta entre Ciclo Activo y Ciclo Cerrado (Secciones 2, 3 y 4):
+  // Si el ciclo estÃ¡ CERRADO: snapshot histÃ³rico inmutable (no filtrar usuarios que hoy no existan).
+  // Si el ciclo estÃ¡ ACTIVO: filtrar estrictamente a usuarios que actualmente forman parte del ciclo activo.
   // Usuarios elegibles activos para el ciclo operativo actual (USER con status ACTIVE)
   const eligibleActiveUsers = activeUsers.filter((u) => u.status === 'ACTIVE' && u.role === 'USER');
   const eligibleActiveUids = new Set(eligibleActiveUsers.map((u) => u.uid || u.id));
@@ -169,7 +169,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     ? (currentCycle.totalUsersActive || rawUserResults.length)
     : eligibleActiveUsers.length;
 
-  // calculatedEligibleUids: Set de UIDs únicos para evitar que duplicados sumen más de 100%
+  // calculatedEligibleUids: Set de UIDs Ãºnicos para evitar que duplicados sumen mÃ¡s de 100%
   const calculatedEligibleUids = new Set(
     userResults.map((r) => r.userUid || r.userId).filter(Boolean)
   );
@@ -178,7 +178,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     ? (currentCycle.calculatedUsersCount || userResults.length)
     : calculatedEligibleUids.size;
 
-  // Cálculo de progreso exacto sin parches de Math.min(100, ...)
+  // CÃ¡lculo de progreso exacto sin parches de Math.min(100, ...)
   const progressPercentage = totalActiveUsers === 0
     ? 0
     : (calculatedEligibleUids.size / totalActiveUsers) * 100;
@@ -190,8 +190,8 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     : eligibleActiveUsers.filter((u) => !calculatedEligibleUids.has(u.uid || u.id));
 
   // Top KPI calculations:
-  // Si está CERRADO usa los agregados históricos o el consolidado snapshot.
-  // Si está ACTIVO calcula estrictamente sobre los usuarios actualmente elegibles.
+  // Si estÃ¡ CERRADO usa los agregados histÃ³ricos o el consolidado snapshot.
+  // Si estÃ¡ ACTIVO calcula estrictamente sobre los usuarios actualmente elegibles.
   const totalManagedCapital = isClosed
     ? (currentCycle.totalManagedCapital || userResults.reduce((sum, r) => sum + (r.cycleCapitalCop || r.groupCapitalCop || 0), 0))
     : eligibleActiveUsers.reduce((sum, u) => sum + (u.currentCapital || 0), 0);
@@ -208,7 +208,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     ? (currentCycle.totalAdminCommissionCop || userResults.reduce((sum, r) => sum + (r.adminCommissionCop || 0), 0))
     : userResults.reduce((sum, r) => sum + (r.adminCommissionCop || 0), 0);
 
-  // Solicitudes de Reinversión e Inyección asociadas al ciclo
+  // Solicitudes de ReinversiÃ³n e InyecciÃ³n asociadas al ciclo
   const cycleReinvestments = dataStore.getReinvestments().filter((r) => r.sourceCycleId === selectedCycleId);
   const pendingRequestsCount = cycleReinvestments.filter((r) => r.status === 'PENDING').length;
   const needsReviewRequestsCount = cycleReinvestments.filter((r) => r.status === 'NEEDS_REVIEW').length;
@@ -230,7 +230,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     setTrmError(null);
     const parsed = parseFloat(newTrmInput.replace(/[^0-9.]/g, ''));
     if (isNaN(parsed) || parsed <= 0) {
-      setTrmError('Ingresa un valor numérico de TRM válido mayor a cero.');
+      setTrmError('Ingresa un valor numÃ©rico de TRM vÃ¡lido mayor a cero.');
       return;
     }
 
@@ -243,7 +243,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
         cycleId: selectedCycleId,
         newTrm: parsed,
         clientRequestId,
-        reason: trmReason.trim() || 'Ajuste oficial de TRM para liquidación del período',
+        reason: trmReason.trim() || 'Ajuste oficial de TRM para liquidaciÃ³n del perÃ­odo',
       });
 
       // 2. Sincronizar espejo en memoria local (DataStore)
@@ -257,7 +257,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
       let msg = res.message || `TRM actualizada exitosamente a $${parsed.toLocaleString('es-CO')} COP.`;
       if (res.needsReviewCount && res.needsReviewCount > 0) {
-        msg += ` ⚠️ Atención: ${res.needsReviewCount} solicitud(es) de reinversión/inyección pasaron a estado "Requiere Revisión (NEEDS_REVIEW)" debido al ajuste. Por favor verifícalas antes del cierre.`;
+        msg += ` âš ï¸ AtenciÃ³n: ${res.needsReviewCount} solicitud(es) de reinversiÃ³n/inyecciÃ³n pasaron a estado "Requiere RevisiÃ³n (NEEDS_REVIEW)" debido al ajuste. Por favor verifÃ­calas antes del cierre.`;
       }
 
       setStatusMessage({
@@ -287,7 +287,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     if (groupsToCalc.length === 0) {
       setStatusMessage({
         type: 'info',
-        text: `Todos los grupos de la Ventana Bitácora ${category} ya están calculados.`,
+        text: `Todos los grupos de la Ventana BitÃ¡cora ${category} ya estÃ¡n calculados.`,
       });
       return;
     }
@@ -307,10 +307,10 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
       confetti({ particleCount: 50, spread: 60, origin: { y: 0.6 } });
       setStatusMessage({
         type: 'success',
-        text: `¡Ventana Bitácora ${category} liquidada con éxito! Se procesaron ${groupsToCalc.length} grupos con rendimiento sugerido (5%).`,
+        text: `Â¡Ventana BitÃ¡cora ${category} liquidada con Ã©xito! Se procesaron ${groupsToCalc.length} grupos con rendimiento sugerido (5%).`,
       });
     } catch (err: any) {
-      setStatusMessage({ type: 'error', text: err.message || 'Error al liquidar la ventana de bitácora' });
+      setStatusMessage({ type: 'error', text: err.message || 'Error al liquidar la ventana de bitÃ¡cora' });
     }
   };
 
@@ -325,7 +325,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     if (isNaN(num) || num <= 0) {
       setStatusMessage({
         type: 'error',
-        text: `Ingresa un monto USD válido para el grupo $${group.groupCapitalCop.toLocaleString('es-CO')} COP.`,
+        text: `Ingresa un monto USD vÃ¡lido para el grupo $${group.groupCapitalCop.toLocaleString('es-CO')} COP.`,
       });
       return;
     }
@@ -393,7 +393,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
       setStatusMessage({
         type: 'success',
-        text: `¡Mesa de Operaciones ejecutada con éxito! Se liquidaron ${count} grupos pendientes con rendimiento del 5%.`,
+        text: `Â¡Mesa de Operaciones ejecutada con Ã©xito! Se liquidaron ${count} grupos pendientes con rendimiento del 5%.`,
       });
 
       confetti({
@@ -404,7 +404,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     } catch (err: any) {
       setStatusMessage({
         type: 'error',
-        text: err.message || 'Error en ejecución por lote.',
+        text: err.message || 'Error en ejecuciÃ³n por lote.',
       });
     }
   };
@@ -417,12 +417,12 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
     const newUsd = parseFloat(correctionUsd);
     if (isNaN(newUsd) || newUsd <= 0) {
-      setCorrectionError('Ingresa un valor numérico en USD válido.');
+      setCorrectionError('Ingresa un valor numÃ©rico en USD vÃ¡lido.');
       return;
     }
 
     if (!correctionReason || correctionReason.trim().length < 5) {
-      setCorrectionError('Es obligatorio ingresar un motivo claro de la corrección (mínimo 5 caracteres).');
+      setCorrectionError('Es obligatorio ingresar un motivo claro de la correcciÃ³n (mÃ­nimo 5 caracteres).');
       return;
     }
 
@@ -446,7 +446,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
       setCorrectionReason('');
       setCorrectionUsd('');
     } catch (err: any) {
-      setCorrectionError(err.message || 'Error al corregir el cálculo.');
+      setCorrectionError(err.message || 'Error al corregir el cÃ¡lculo.');
     }
   };
 
@@ -488,11 +488,11 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     }
 
     if (hasUnresolvedRequests) {
-      alert(`No puedes cerrar el ciclo todavía.\n\nExisten solicitudes asociadas al ciclo que requieren decisión administrativa previa:\n• Pendientes: ${pendingRequestsCount}\n• En Revisión: ${needsReviewRequestsCount}\n\nPor favor aprueba, rechaza o resuelve todas las solicitudes antes de cerrar.`);
+      alert(`No puedes cerrar el ciclo todavÃ­a.\n\nExisten solicitudes asociadas al ciclo que requieren decisiÃ³n administrativa previa:\nâ€¢ Pendientes: ${pendingRequestsCount}\nâ€¢ En RevisiÃ³n: ${needsReviewRequestsCount}\n\nPor favor aprueba, rechaza o resuelve todas las solicitudes antes de cerrar.`);
       return;
     }
 
-    if (window.confirm(`¿Estás seguro de congelar y CERRAR formalmente el ciclo ${currentCycle.name}?\n\n• Solicitudes Aprobadas que se aplicarán a capital: ${approvedRequestsCount}\n• Solicitudes Rechazadas: ${rejectedRequestsCount}\n\nEsta acción ejecutará el Pre-Flight financiero y bloqueará cualquier edición posterior.`)) {
+    if (window.confirm(`Â¿EstÃ¡s seguro de congelar y CERRAR formalmente el ciclo ${currentCycle.name}?\n\nâ€¢ Solicitudes Aprobadas que se aplicarÃ¡n a capital: ${approvedRequestsCount}\nâ€¢ Solicitudes Rechazadas: ${rejectedRequestsCount}\n\nEsta acciÃ³n ejecutarÃ¡ el Pre-Flight financiero y bloquearÃ¡ cualquier ediciÃ³n posterior.`)) {
       try {
         const res = await dataStore.closeCycle(
           selectedCycleId,
@@ -521,23 +521,23 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     const startedBy = currentCycle.closingByName || currentCycle.closingByUid || 'Administrador';
 
     const confirmText = prompt(
-      `⚠️ RECUPERACIÓN EXCLUSIVA DE SUPERADMIN\n\n` +
-      `Estás a punto de forzar la liberación del lock de cierre huérfano para el ciclo ${currentCycle.name}.\n\n` +
+      `âš ï¸ RECUPERACIÃ“N EXCLUSIVA DE SUPERADMIN\n\n` +
+      `EstÃ¡s a punto de forzar la liberaciÃ³n del lock de cierre huÃ©rfano para el ciclo ${currentCycle.name}.\n\n` +
       `Detalles del Lock Activo:\n` +
-      `• Attempt ID: ${attemptId || 'Sin ID registrado'}\n` +
-      `• Iniciado el: ${startedAt}\n` +
-      `• Iniciado por: ${startedBy}\n\n` +
+      `â€¢ Attempt ID: ${attemptId || 'Sin ID registrado'}\n` +
+      `â€¢ Iniciado el: ${startedAt}\n` +
+      `â€¢ Iniciado por: ${startedBy}\n\n` +
       `Para autorizar el desbloqueo, escribe exactamente 'DESBLOQUEAR CIERRE':`
     );
 
     if (confirmText !== 'DESBLOQUEAR CIERRE') {
       if (confirmText !== null) {
-        alert('Confirmación incorrecta. La operación de desbloqueo fue cancelada.');
+        alert('ConfirmaciÃ³n incorrecta. La operaciÃ³n de desbloqueo fue cancelada.');
       }
       return;
     }
 
-    const reason = prompt('Ingresa el motivo obligatorio para la auditoría de desbloqueo (mínimo 5 caracteres):', 'Liberación manual por interrupción de cierre');
+    const reason = prompt('Ingresa el motivo obligatorio para la auditorÃ­a de desbloqueo (mÃ­nimo 5 caracteres):', 'LiberaciÃ³n manual por interrupciÃ³n de cierre');
     if (!reason || reason.trim().length < 5) {
       alert('Se requiere un motivo justificado de al menos 5 caracteres.');
       return;
@@ -569,7 +569,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     e.preventDefault();
     setReopenError(null);
     if (!reopenReason || reopenReason.trim().length < 5) {
-      setReopenError('El motivo de reapertura es obligatorio para auditoría.');
+      setReopenError('El motivo de reapertura es obligatorio para auditorÃ­a.');
       return;
     }
 
@@ -597,7 +597,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     setTrmError(null);
     const parsedTrm = parseFloat(newTrmInput.replace(/[^0-9.]/g, ''));
     if (isNaN(parsedTrm) || parsedTrm <= 0) {
-      setTrmError('Por favor ingresa una TRM válida mayor a cero.');
+      setTrmError('Por favor ingresa una TRM vÃ¡lida mayor a cero.');
       return;
     }
 
@@ -628,7 +628,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   const handleResetGroupBalance = (group: CategoryGroupInfo) => {
     if (
       !window.confirm(
-        `¿Estás seguro de REINICIAR EL SALDO a $0? Se eliminarán todas las operaciones y liquidaciones registradas para este grupo (${group.category} - ${formatCOP(
+        `Â¿EstÃ¡s seguro de REINICIAR EL SALDO a $0? Se eliminarÃ¡n todas las operaciones y liquidaciones registradas para este grupo (${group.category} - ${formatCOP(
           group.groupCapitalCop
         )}) en este ciclo.`
       )
@@ -663,7 +663,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
-      {/* Sub-navegación: Cierre del Ciclo vs Informes Oficiales */}
+      {/* Sub-navegaciÃ³n: Cierre del Ciclo vs Informes Oficiales */}
       <div className="flex items-center gap-2 border-b border-slate-800/80 pb-3">
         <button
           type="button"
@@ -689,7 +689,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             }`}
           >
             <Rocket className="w-3.5 h-3.5" />
-            Preparación del Próximo Ciclo
+            PreparaciÃ³n del PrÃ³ximo Ciclo
             <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-slate-950 text-blue-300 ml-1 border border-blue-500/20">
               SuperAdmin
             </span>
@@ -766,10 +766,10 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             </div>
             <div>
               <h4 className="text-sm font-extrabold text-amber-200">
-                🔒 Cierre Transaccional en Proceso (Lock Atómico Activo)
+                ðŸ”’ Cierre Transaccional en Proceso (Lock AtÃ³mico Activo)
               </h4>
               <p className="text-xs text-amber-300/80 mt-0.5">
-                El ciclo {currentCycle.name} está siendo procesado en el servidor. Las radicaciones y cálculos están bloqueados.
+                El ciclo {currentCycle.name} estÃ¡ siendo procesado en el servidor. Las radicaciones y cÃ¡lculos estÃ¡n bloqueados.
               </p>
             </div>
           </div>
@@ -777,9 +777,9 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             type="button"
             onClick={handleUnlockCycle}
             className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-slate-950 font-black text-xs shadow-md transition cursor-pointer shrink-0"
-            title="Liberar el lock si una transacción anterior quedó interrumpida o bloqueada"
+            title="Liberar el lock si una transacciÃ³n anterior quedÃ³ interrumpida o bloqueada"
           >
-            🔓 Liberar Lock Huérfano (Recovery)
+            ðŸ”“ Liberar Lock HuÃ©rfano (Recovery)
           </button>
         </div>
       )}
@@ -802,7 +802,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                 setShowExcelImportModal(true);
               }}
               className="min-h-[40px] flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 hover:text-blue-200 border border-blue-500/40 text-xs font-bold shadow-sm transition cursor-pointer"
-              title="Importar y migrar archivo Excel de bitácoras y usuarios"
+              title="Importar y migrar archivo Excel de bitÃ¡coras y usuarios"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-blue-400 shrink-0" />
               <span>Importar Excel</span>
@@ -847,17 +847,17 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                     type="button"
                     onClick={() => onNavigate('bitacoras')}
                     className="min-h-[36px] text-[11px] font-bold text-blue-300 hover:text-blue-200 transition cursor-pointer flex items-center justify-center gap-1 border border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20 px-2.5 py-1 rounded-lg"
-                    title="Ir a gestionar las bitácoras y registrar trades diarios"
+                    title="Ir a gestionar las bitÃ¡coras y registrar trades diarios"
                   >
                     <SlidersHorizontal className="w-3 h-3 shrink-0" />
-                    <span>Bitácoras Diarias</span>
+                    <span>BitÃ¡coras Diarias</span>
                   </button>
                 )}
 
                 <button
                   type="button"
                   onClick={() => {
-                    setNewTrmInput(currentCycle.trmApplied.toString());
+                    setNewTrmInput((currentCycle.trmApplied != null ? currentCycle.trmApplied.toString() : ''));
                     setShowTrmModal(true);
                     fetchMarketTrm();
                   }}
@@ -950,10 +950,10 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
           </div>
         </div>
 
-        {/* Card 5: Comisión Administrador */}
+        {/* Card 5: ComisiÃ³n Administrador */}
         <div className="p-3 sm:p-4 rounded-2xl bg-slate-900/95 border border-slate-800 shadow-md flex flex-col justify-between relative overflow-hidden group hover:border-slate-700 transition min-w-0">
           <div className="flex items-center justify-between mb-1.5 sm:mb-2">
-            <span className="text-[10px] sm:text-[11px] font-semibold text-slate-400 truncate">Comisión Admin</span>
+            <span className="text-[10px] sm:text-[11px] font-semibold text-slate-400 truncate">ComisiÃ³n Admin</span>
             <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center shrink-0">
               <DollarSign className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
             </div>
@@ -990,7 +990,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2.5">
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
-              Progreso de Liquidación del Ciclo
+              Progreso de LiquidaciÃ³n del Ciclo
             </span>
             <span
               className={`text-[11px] font-mono px-2 py-0.5 rounded font-bold ${
@@ -999,7 +999,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   : 'bg-amber-950 text-amber-300 border border-amber-500/40'
               }`}
             >
-              {is100Percent ? '100% COMPLETO ✓' : `${Math.round(progressPercentage)}% PROCESADO`}
+              {is100Percent ? '100% COMPLETO âœ“' : `${Math.round(progressPercentage)}% PROCESADO`}
             </span>
           </div>
 
@@ -1012,7 +1012,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   : 'bg-slate-800 text-slate-400 border border-slate-700'
               }`}
             >
-              {currentCycle.notificationsSent ? 'Despachadas ✓' : 'Pendientes de Enviar'}
+              {currentCycle.notificationsSent ? 'Despachadas âœ“' : 'Pendientes de Enviar'}
             </span>
           </div>
         </div>
@@ -1035,22 +1035,22 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                 Faltan <strong>{missingUsers.length}</strong> usuarios por calcular antes de enviar notificaciones o congelar el ciclo.
               </span>
             </div>
-            <span className="text-[11px] font-mono text-amber-400/80">Revisa las bitácoras abajo ↓</span>
+            <span className="text-[11px] font-mono text-amber-400/80">Revisa las bitÃ¡coras abajo â†“</span>
           </div>
         )}
       </div>
 
-      {/* Selector y Control de Ventanas de Bitácoras */}
+      {/* Selector y Control de Ventanas de BitÃ¡coras */}
       <div className="p-4 sm:p-5 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-800 pb-3">
           <div className="flex items-center gap-2.5">
             <Layers className="w-5 h-5 text-blue-400" />
             <div>
               <h3 className="text-base font-extrabold text-slate-100 flex items-center gap-2">
-                Bitácoras por Categoría
+                BitÃ¡coras por CategorÃ­a
               </h3>
               <p className="text-xs text-slate-400">
-                Liquidación mensual por grupos de capital exacto
+                LiquidaciÃ³n mensual por grupos de capital exacto
               </p>
             </div>
           </div>
@@ -1058,13 +1058,13 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
           {/* Category Range Legend Badges from Mockup */}
           <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
             <span className="px-2.5 py-1 rounded-lg bg-blue-950/70 border border-blue-500/30 text-blue-300">
-              🔵 AZUL: $7.000.000 - $9.999.999
+              ðŸ”µ AZUL: $7.000.000 - $9.999.999
             </span>
             <span className="px-2.5 py-1 rounded-lg bg-emerald-950/70 border border-emerald-500/30 text-emerald-300">
-              🟢 VERDE: $10.000.000 - $49.999.999
+              ðŸŸ¢ VERDE: $10.000.000 - $49.999.999
             </span>
             <span className="px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-600/40 text-slate-300">
-              ⚫ NEGRA / WHALE: $50.000.000 - $1.000.000.000
+              âš« NEGRA / WHALE: $50.000.000 - $1.000.000.000
             </span>
           </div>
         </div>
@@ -1095,14 +1095,14 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <div className="w-2.5 h-2.5 rounded-full bg-blue-500" />
-                    <span className="font-extrabold text-xs">Bitácora Azul</span>
+                    <span className="font-extrabold text-xs">BitÃ¡cora Azul</span>
                   </div>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-950 border border-blue-500/30 text-blue-300">
                     {calcCount}/{groups.length} Calcs
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(totalCap)}</p>
-                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas • $4M a $9M COP</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas â€¢ $4M a $9M COP</p>
               </button>
             );
           })()}
@@ -1131,14 +1131,14 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-                    <span className="font-extrabold text-xs">Bitácora Verde</span>
+                    <span className="font-extrabold text-xs">BitÃ¡cora Verde</span>
                   </div>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-950 border border-emerald-500/30 text-emerald-300">
                     {calcCount}/{groups.length} Calcs
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(totalCap)}</p>
-                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas • $10M a $50M COP</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas â€¢ $10M a $50M COP</p>
               </button>
             );
           })()}
@@ -1167,14 +1167,14 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <div className="w-2.5 h-2.5 rounded-full bg-slate-300" />
-                    <span className="font-extrabold text-xs">Bitácora Negra</span>
+                    <span className="font-extrabold text-xs">BitÃ¡cora Negra</span>
                   </div>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 border border-slate-600 text-slate-300">
                     {calcCount}/{groups.length} Calcs
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(totalCap)}</p>
-                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas • &gt; $60M COP</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">{usersCount} inversionistas â€¢ &gt; $60M COP</p>
               </button>
             );
           })()}
@@ -1205,7 +1205,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(totalManagedCapital)}</p>
-                <p className="text-[10px] text-slate-500 mt-0.5">Visión unificada de las 3 bitácoras</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">VisiÃ³n unificada de las 3 bitÃ¡coras</p>
               </button>
             );
           })()}
@@ -1227,7 +1227,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                 onClick={() => setWindowSearchQuery('')}
                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs"
               >
-                ✕
+                âœ•
               </button>
             )}
           </div>
@@ -1264,7 +1264,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
         </div>
       </div>
 
-      {/* Render Bitácora Windows */}
+      {/* Render BitÃ¡cora Windows */}
       {((activeBitacoraWindow === 'ALL' || windowLayoutMode === 'GRID')
         ? (['AZUL', 'VERDE', 'NEGRA'] as BitacoraCategory[])
         : [activeBitacoraWindow as BitacoraCategory]
@@ -1309,7 +1309,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
         const catStyles = {
           AZUL: {
-            title: 'Ventana Bitácora Azul',
+            title: 'Ventana BitÃ¡cora Azul',
             range: '$4.000.000 hasta menos de $10.000.000 COP',
             tag: 'TIER_BLUE_DESK',
             accent: 'blue',
@@ -1321,7 +1321,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             dot: 'bg-blue-500',
           },
           VERDE: {
-            title: 'Ventana Bitácora Verde',
+            title: 'Ventana BitÃ¡cora Verde',
             range: '$10.000.000 hasta menos de $60.000.000 COP',
             tag: 'TIER_GREEN_DESK',
             accent: 'emerald',
@@ -1333,7 +1333,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             dot: 'bg-emerald-500',
           },
           NEGRA: {
-            title: 'Ventana Bitácora Negra',
+            title: 'Ventana BitÃ¡cora Negra',
             range: '$60.000.000 hasta $4.000.000.000 COP',
             tag: 'TIER_BLACK_WHALE_DESK',
             accent: 'slate',
@@ -1398,10 +1398,10 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   <button
                     onClick={() => handleBatchCalculateCategory(category)}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-[11px] font-bold shadow-md shadow-emerald-600/30 transition cursor-pointer"
-                    title={`Calcula automáticamente los grupos pendientes de esta ventana con rendimiento sugerido (5%)`}
+                    title={`Calcula automÃ¡ticamente los grupos pendientes de esta ventana con rendimiento sugerido (5%)`}
                   >
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>⚡ Liquidar Ventana (5%)</span>
+                    <span>âš¡ Liquidar Ventana (5%)</span>
                   </button>
                 )}
 
@@ -1462,7 +1462,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   </div>
 
                   <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/80">
-                    <span className="text-[10px] text-slate-400 uppercase font-semibold">Comisión Admin</span>
+                    <span className="text-[10px] text-slate-400 uppercase font-semibold">ComisiÃ³n Admin</span>
                     <p className="text-sm font-extrabold text-amber-400 font-mono mt-0.5">
                       {formatCOP(totalAdminCommissionInWindow)}
                     </p>
@@ -1532,7 +1532,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
                               {isCalc ? (
                                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-300 font-bold text-[10px] font-mono border border-emerald-500/40">
-                                  <CheckCircle2 className="w-3 h-3" /> Calculado ✓
+                                  <CheckCircle2 className="w-3 h-3" /> Calculado âœ“
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-950/80 text-amber-300 font-semibold text-[10px] font-mono border border-amber-500/40">
@@ -1663,7 +1663,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                                   </span>
                                 </div>
                                 <div>
-                                  <span className="text-[9px] text-amber-400 uppercase block">Comisión Admin</span>
+                                  <span className="text-[9px] text-amber-400 uppercase block">ComisiÃ³n Admin</span>
                                   <span className="font-bold text-amber-400 text-[11px] block mt-0.5">
                                     {formatCOP(group.totalAdminCommissionCop)}
                                   </span>
@@ -1685,9 +1685,9 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                             <th className="py-3 px-3">USD Operado (c/u)</th>
                             <th className="py-3 px-3">Resultado Total COP</th>
                             <th className="py-3 px-3">Ganancia Clientes</th>
-                            <th className="py-3 px-3">Comisión Admin</th>
+                            <th className="py-3 px-3">ComisiÃ³n Admin</th>
                             <th className="py-3 px-3">Estado</th>
-                            <th className="py-3 px-3 text-right">Acción</th>
+                            <th className="py-3 px-3 text-right">AcciÃ³n</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800/60 font-mono">
@@ -1733,13 +1733,13 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                                           type="button"
                                           onClick={() => setSelectedGroupForDailyOps(group)}
                                           className="mt-0.5 flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 font-mono font-medium hover:underline transition"
-                                          title="Ver bitácora de operaciones diarias del grupo"
+                                          title="Ver bitÃ¡cora de operaciones diarias del grupo"
                                         >
                                           <Activity className="w-3 h-3 text-blue-400 shrink-0" />
                                           <span>
                                             {group.dailyOperations && group.dailyOperations.length > 0
                                               ? `${group.dailyOperations.length} trades (${formatUSD(group.totalUsdApplied)})`
-                                              : '+ Bitácora Diaria'}
+                                              : '+ BitÃ¡cora Diaria'}
                                           </span>
                                         </button>
                                       </div>
@@ -1790,17 +1790,17 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
                                   {/* Total COP per user */}
                                   <td className="py-3.5 px-3 text-slate-200">
-                                    {isCalc ? formatCOP(group.totalCopPerUser) : '—'}
+                                    {isCalc ? formatCOP(group.totalCopPerUser) : 'â€”'}
                                   </td>
 
                                   {/* User Profit */}
                                   <td className="py-3.5 px-3 font-semibold text-emerald-400">
-                                    {isCalc ? formatCOP(group.totalUsersProfitCop) : '—'}
+                                    {isCalc ? formatCOP(group.totalUsersProfitCop) : 'â€”'}
                                   </td>
 
                                   {/* Admin Commission */}
                                   <td className="py-3.5 px-3 font-semibold text-amber-400">
-                                    {isCalc ? formatCOP(group.totalAdminCommissionCop) : '—'}
+                                    {isCalc ? formatCOP(group.totalAdminCommissionCop) : 'â€”'}
                                   </td>
 
                                   {/* Status Badge */}
@@ -1808,7 +1808,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                                     {isCalc ? (
                                       <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 font-bold text-[11px] font-mono shadow-sm">
                                         <CheckCircle2 className="w-3.5 h-3.5" />
-                                        Calculado ✓
+                                        Calculado âœ“
                                       </span>
                                     ) : (
                                       <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-950/60 border border-amber-500/40 text-amber-300 font-semibold text-[11px] font-mono">
@@ -1827,7 +1827,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                                         title="Registrar o gestionar operaciones diarias de este grupo"
                                       >
                                         <Activity className="w-3.5 h-3.5 text-blue-400" />
-                                        <span className="hidden sm:inline">Bitácora Diaria</span>
+                                        <span className="hidden sm:inline">BitÃ¡cora Diaria</span>
                                       </button>
 
                                       {isCalc ? (
@@ -1910,13 +1910,13 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                                                         {user.fullName}
                                                       </h4>
                                                       <p className="text-[11px] text-slate-400 font-mono">
-                                                        {user.userCode} {user.documentId ? `• CC ${user.documentId}` : ''}
+                                                        {user.userCode} {user.documentId ? `â€¢ CC ${user.documentId}` : ''}
                                                       </p>
                                                     </div>
                                                   </div>
                                                   {isCalc && (
                                                     <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold font-mono">
-                                                      ✓ {formatUSD(appliedUsd)}
+                                                      âœ“ {formatUSD(appliedUsd)}
                                                     </span>
                                                   )}
                                                 </div>
@@ -1948,7 +1948,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                                                   </div>
                                                   <div>
                                                     <span className="text-[10px] text-amber-400 block font-semibold">
-                                                      Comisión Admin:
+                                                      ComisiÃ³n Admin:
                                                     </span>
                                                     <span className="text-amber-300 font-bold block">
                                                       {formatCOP(adminCommissionCop)}
@@ -2024,7 +2024,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
           </div>
 
           <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
-            <span className="text-[11px] text-slate-400 uppercase font-semibold">Comisión Admin</span>
+            <span className="text-[11px] text-slate-400 uppercase font-semibold">ComisiÃ³n Admin</span>
             <p className="text-base font-bold text-amber-400 font-mono mt-1">
               {formatCOP(currentCycle.totalAdminCommissionCop)}
             </p>
@@ -2057,11 +2057,11 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
               <span className="text-slate-400">Solicitudes:</span>
               {hasUnresolvedRequests ? (
                 <span className="text-amber-400 font-bold flex items-center gap-1">
-                  ⚠️ {pendingRequestsCount + needsReviewRequestsCount} por resolver ({pendingRequestsCount} pend, {needsReviewRequestsCount} rev)
+                  âš ï¸ {pendingRequestsCount + needsReviewRequestsCount} por resolver ({pendingRequestsCount} pend, {needsReviewRequestsCount} rev)
                 </span>
               ) : (
                 <span className="text-emerald-400 font-bold">
-                  ✓ {approvedRequestsCount} aprobadas {rejectedRequestsCount > 0 ? `• ${rejectedRequestsCount} rech` : ''} {appliedRequestsCount > 0 ? `• ${appliedRequestsCount} aplicadas` : ''}
+                  âœ“ {approvedRequestsCount} aprobadas {rejectedRequestsCount > 0 ? `â€¢ ${rejectedRequestsCount} rech` : ''} {appliedRequestsCount > 0 ? `â€¢ ${appliedRequestsCount} aplicadas` : ''}
                 </span>
               )}
             </div>
@@ -2080,7 +2080,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
               title={!is100Percent ? 'Debes calcular todos los usuarios antes de enviar notificaciones' : isClosing ? 'Cierre en proceso' : ''}
             >
               <Bell className="w-4 h-4 shrink-0" />
-              <span>🔔 ENVIAR NOTIFICACIONES</span>
+              <span>ðŸ”” ENVIAR NOTIFICACIONES</span>
             </button>
 
             {/* Close Cycle Button (Amber in mockup) */}
@@ -2098,12 +2098,12 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   : isClosing
                   ? 'Cierre en proceso...'
                   : hasUnresolvedRequests
-                  ? `Bloqueado: existen ${pendingRequestsCount + needsReviewRequestsCount} solicitudes pendientes/en revisión que deben resolverse antes de cerrar`
+                  ? `Bloqueado: existen ${pendingRequestsCount + needsReviewRequestsCount} solicitudes pendientes/en revisiÃ³n que deben resolverse antes de cerrar`
                   : ''
               }
             >
               <Lock className="w-4 h-4 shrink-0" />
-              <span className="text-center">{isClosing ? '⏳ PROCESANDO CIERRE...' : hasUnresolvedRequests ? '🔒 CIERRE BLOQUEADO (SOLICITUDES)' : '🔒 CERRAR CICLO'}</span>
+              <span className="text-center">{isClosing ? 'â³ PROCESANDO CIERRE...' : hasUnresolvedRequests ? 'ðŸ”’ CIERRE BLOQUEADO (SOLICITUDES)' : 'ðŸ”’ CERRAR CICLO'}</span>
             </button>
           </div>
         </div>
@@ -2114,7 +2114,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
               <span>
-                <strong>Atención (Gate 1 de Cierre):</strong> No se puede congelar el ciclo porque hay <strong>{pendingRequestsCount}</strong> solicitud(es) pendiente(s) y <strong>{needsReviewRequestsCount}</strong> en revisión. Debes resolverlas en la sección de Reinversiones antes de ejecutar el cierre.
+                <strong>AtenciÃ³n (Gate 1 de Cierre):</strong> No se puede congelar el ciclo porque hay <strong>{pendingRequestsCount}</strong> solicitud(es) pendiente(s) y <strong>{needsReviewRequestsCount}</strong> en revisiÃ³n. Debes resolverlas en la secciÃ³n de Reinversiones antes de ejecutar el cierre.
               </span>
             </div>
             {onNavigate && (
@@ -2123,7 +2123,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                 onClick={() => onNavigate('reinvestments')}
                 className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg shrink-0 cursor-pointer text-xs"
               >
-                Ir a Reinversiones →
+                Ir a Reinversiones â†’
               </button>
             )}
           </div>
@@ -2138,7 +2138,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             <div className="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/60 shrink-0">
               <div>
                 <h3 className="text-sm sm:text-base font-bold text-slate-100 flex items-center gap-2">
-                  <span>Detalle de Liquidación: {selectedGroupForDetail.category}</span>
+                  <span>Detalle de LiquidaciÃ³n: {selectedGroupForDetail.category}</span>
                   <span className="font-mono text-blue-400 text-xs sm:text-sm">
                     {formatCOP(selectedGroupForDetail.groupCapitalCop)}
                   </span>
@@ -2159,18 +2159,18 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
               <div>
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
-                  Liquidación Individual de Inversionistas
+                  LiquidaciÃ³n Individual de Inversionistas
                 </h4>
                 <div className="border border-slate-800 rounded-xl overflow-x-auto">
                   <table className="w-full text-left text-xs border-collapse min-w-[560px]">
                     <thead>
                       <tr className="bg-slate-950 text-slate-400 font-semibold border-b border-slate-800 text-[11px]">
-                        <th className="p-2.5">Código / Nombre</th>
+                        <th className="p-2.5">CÃ³digo / Nombre</th>
                         <th className="p-2.5">USD Base</th>
                         <th className="p-2.5">Total COP</th>
                         <th className="p-2.5">Split %</th>
                         <th className="p-2.5">Ganancia Usuario</th>
-                        <th className="p-2.5">Comisión Admin</th>
+                        <th className="p-2.5">ComisiÃ³n Admin</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800 font-mono">
@@ -2183,20 +2183,20 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                               <span className="text-[10px] font-mono text-slate-400">{user.userCode}</span>
                             </td>
                             <td className="p-2.5 text-slate-300">
-                              {res ? formatUSD(res.totalUsdOperated) : '—'}
+                              {res ? formatUSD(res.totalUsdOperated) : 'â€”'}
                             </td>
                             <td className="p-2.5 text-slate-300">
-                              {res ? formatCOP(res.totalGrossCop) : '—'}
+                              {res ? formatCOP(res.totalGrossCop) : 'â€”'}
                             </td>
                             <td className="p-2.5 font-bold">
                               <span className="text-emerald-400">{user.userPercentage}%</span> /{' '}
                               <span className="text-amber-400">{user.adminPercentage}%</span>
                             </td>
                             <td className="p-2.5 font-bold text-emerald-400">
-                              {res ? formatCOP(res.userProfitCop) : '—'}
+                              {res ? formatCOP(res.userProfitCop) : 'â€”'}
                             </td>
                             <td className="p-2.5 font-bold text-amber-400">
-                              {res ? formatCOP(res.adminCommissionCop) : '—'}
+                              {res ? formatCOP(res.adminCommissionCop) : 'â€”'}
                             </td>
                           </tr>
                         );
@@ -2212,7 +2212,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   <div className="flex items-center gap-2">
                     <Edit3 className="w-4 h-4 text-amber-400" />
                     <h4 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                      Corregir Valor USD del Grupo (Auditoría V2.1)
+                      Corregir Valor USD del Grupo (AuditorÃ­a V2.1)
                     </h4>
                   </div>
 
@@ -2248,7 +2248,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
                   <div>
                     <label className="block text-xs text-slate-300 font-semibold mb-1">
-                      Motivo Obligatorio de Corrección
+                      Motivo Obligatorio de CorrecciÃ³n
                     </label>
                     <input
                       type="text"
@@ -2272,7 +2272,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                       type="submit"
                       className="px-5 py-2 text-xs font-bold text-slate-950 bg-amber-500 hover:bg-amber-400 rounded-xl shadow-lg shadow-amber-500/20 transition cursor-pointer"
                     >
-                      Aplicar Corrección Auditada
+                      Aplicar CorrecciÃ³n Auditada
                     </button>
                   </div>
                 </form>
@@ -2329,26 +2329,26 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
               <div className="p-5 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 flex items-center gap-3 my-4">
                 <CheckCircle2 className="w-7 h-7 shrink-0" />
                 <div>
-                  <p className="text-sm font-bold">¡Notificaciones enviadas exitosamente!</p>
-                  <p className="text-xs mt-0.5">Cada inversionista ha recibido su notificación con su valor exacto.</p>
+                  <p className="text-sm font-bold">Â¡Notificaciones enviadas exitosamente!</p>
+                  <p className="text-xs mt-0.5">Cada inversionista ha recibido su notificaciÃ³n con su valor exacto.</p>
                 </div>
               </div>
             ) : (
               <div className="space-y-4">
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  Se enviarán <strong>{totalActiveUsers}</strong> notificaciones personalizadas a la bandeja y push de cada inversionista activo.
+                  Se enviarÃ¡n <strong>{totalActiveUsers}</strong> notificaciones personalizadas a la bandeja y push de cada inversionista activo.
                 </p>
 
                 {/* Previews of messages */}
                 <div className="space-y-2 text-xs">
                   <span className="font-semibold text-slate-400 uppercase text-[10px]">Ejemplo de Mensaje para Inversionista 50%:</span>
                   <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 text-[11px] leading-relaxed">
-                    &quot;Tu operación del mes de {currentCycle.name} fue de USD $400.00. Tu resultado convertido es de $1.608.000 COP y tu ganancia correspondiente (50%) es de $804.000 COP.&quot;
+                    &quot;Tu operaciÃ³n del mes de {currentCycle.name} fue de USD $400.00. Tu resultado convertido es de $1.608.000 COP y tu ganancia correspondiente (50%) es de $804.000 COP.&quot;
                   </div>
 
                   <span className="font-semibold text-slate-400 uppercase text-[10px]">Ejemplo de Mensaje para Inversionista 70%:</span>
                   <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 text-[11px] leading-relaxed">
-                    &quot;Tu operación del mes de {currentCycle.name} fue de USD $400.00. Tu resultado convertido es de $1.608.000 COP y tu ganancia correspondiente (70%) es de $1.125.600 COP.&quot;
+                    &quot;Tu operaciÃ³n del mes de {currentCycle.name} fue de USD $400.00. Tu resultado convertido es de $1.608.000 COP y tu ganancia correspondiente (70%) es de $1.125.600 COP.&quot;
                   </div>
                 </div>
 
@@ -2405,13 +2405,13 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             <form onSubmit={handleReopenCycle} className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Motivo de Auditoría Obligatorio
+                  Motivo de AuditorÃ­a Obligatorio
                 </label>
                 <textarea
                   rows={3}
                   value={reopenReason}
                   onChange={(e) => setReopenReason(e.target.value)}
-                  placeholder="ej: Corrección extraordinaria autorizada por el comité para recalcular Bitácora Verde"
+                  placeholder="ej: CorrecciÃ³n extraordinaria autorizada por el comitÃ© para recalcular BitÃ¡cora Verde"
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
                   required
                 />
@@ -2469,11 +2469,11 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                         : 'bg-amber-950 text-amber-300 border-amber-500/40'
                     }`}
                   >
-                    {dataStore.getConfig().trmMode === 'AUTOMATIC' ? '⚡ Automático' : '✍️ Manual'}
+                    {dataStore.getConfig().trmMode === 'AUTOMATIC' ? 'âš¡ AutomÃ¡tico' : 'âœï¸ Manual'}
                   </span>
                 </div>
                 <p className="text-xs text-slate-400">
-                  {currentCycle.name} • TRM Actual:{' '}
+                  {currentCycle.name} â€¢ TRM Actual:{' '}
                   <span className="font-mono font-bold text-blue-300">{formatTRM(currentCycle.trmApplied)} COP</span>
                 </p>
               </div>
@@ -2494,7 +2494,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   onClick={fetchMarketTrm}
                   disabled={isFetchingTrm}
                   className="flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 transition cursor-pointer disabled:opacity-50"
-                  title="Consultar cotización oficial del mercado"
+                  title="Consultar cotizaciÃ³n oficial del mercado"
                 >
                   <RefreshCw className={`w-3 h-3 ${isFetchingTrm ? 'animate-spin' : ''}`} />
                   <span>{isFetchingTrm ? 'Consultando...' : 'Sincronizar'}</span>
@@ -2513,7 +2513,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   }}
                   className="px-2 py-1 text-[11px] font-bold text-slate-900 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition cursor-pointer"
                 >
-                  ⚡ Usar Esta Tasa
+                  âš¡ Usar Esta Tasa
                 </button>
               </div>
 
@@ -2542,13 +2542,13 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   />
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
-                  Puedes escribir un valor manual o usar la tasa automática del mercado.
+                  Puedes escribir un valor manual o usar la tasa automÃ¡tica del mercado.
                 </p>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Motivo de Auditoría (Opcional)
+                  Motivo de AuditorÃ­a (Opcional)
                 </label>
                 <input
                   type="text"
@@ -2562,7 +2562,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
               <div className="p-3 rounded-xl bg-blue-950/40 border border-blue-500/30 text-blue-200 text-xs flex items-start gap-2.5">
                 <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
                 <span>
-                  Al guardar, se recalcularán automáticamente los totales en COP y las liquidaciones de todos los inversionistas de este ciclo.
+                  Al guardar, se recalcularÃ¡n automÃ¡ticamente los totales en COP y las liquidaciones de todos los inversionistas de este ciclo.
                 </span>
               </div>
 
@@ -2624,7 +2624,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
           setShowExcelImportModal(false);
           setStatusMessage({
             type: 'success',
-            text: '¡Migración e importación de Bitácora desde Excel completada con éxito!',
+            text: 'Â¡MigraciÃ³n e importaciÃ³n de BitÃ¡cora desde Excel completada con Ã©xito!',
           });
         }}
       />
