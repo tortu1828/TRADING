@@ -170,40 +170,60 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
       (u.email && u.email.toLowerCase().includes(q))
     );
   });
+  const handleConsolidateSession = async () => {
 
-  const handleConsolidateSession = () => {
     setError(null);
     setSuccessMsg(null);
-    if (activeUsd === 0) {
-      setError('No hay operaciones activas pendientes en la sesión actual para consolidar.');
+
+    if (activeOps.length === 0) {
+      setError(
+        'No hay operaciones activas pendientes en esta sesi?n.'
+      );
       return;
     }
+
     if (
       !window.confirm(
-        `¿Confirmas CERRAR Y CONSOLIDAR las operaciones activas de hoy ($${formatUSD(activeUsd)})?\n\n` +
-          `• Se guardarán permanentemente en el Cierre Mensual ($${formatUSD(
-            totalUsdAccumulated
-          )} acumulados hasta la fecha).\n` +
-          `• El mostrador operativo diario volverá a $0.00 USD para iniciar una nueva sesión.`
+        `?Confirmas CERRAR esta sesi?n por ${formatUSD(activeUsd)}?\n\n` +
+        `? El mostrador de esta bit?cora volver? a $0.\n` +
+        `? Las operaciones seguir?n pendientes del Cierre Global.\n` +
+        `? No se duplicar?n las ganancias del ciclo.`
       )
     ) {
       return;
     }
 
     try {
-      const res = dataStore.consolidateDailyOperations(
-        cycle.cycleId,
-        group.category,
-        group.groupCapitalCop,
-        adminUid,
-        adminName
+
+      const res =
+        await dataStore
+          .consolidateDailyOperations(
+            cycle.cycleId,
+            group.category,
+            group.groupCapitalCop,
+            adminUid,
+            adminName
+          );
+
+      setSuccessMsg(
+        res.message
       );
-      setSuccessMsg(res.message);
-      setTimeout(() => setSuccessMsg(null), 5000);
+
+      setTimeout(
+        () => setSuccessMsg(null),
+        5000
+      );
+
     } catch (err: any) {
-      setError(err.message || 'Error al consolidar la sesión diaria.');
+
+      setError(
+        err.message ||
+        'Error al cerrar la sesi?n diaria.'
+      );
     }
   };
+
+
 
   const handleStartEdit = (op: DailyGroupOperation) => {
     setEditingOpId(op.id);

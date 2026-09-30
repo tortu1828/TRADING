@@ -137,12 +137,22 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
   const [isCreatingGenesis, setIsCreatingGenesis] = useState(false);
   const [genesisError, setGenesisError] = useState<string | null>(null);
 
+  const [showNextCycleModal, setShowNextCycleModal] = useState(false);
+  const [nextCycleName, setNextCycleName] = useState('');
+  const [isCreatingNextCycle, setIsCreatingNextCycle] = useState(false);
+  const [nextCycleError, setNextCycleError] = useState<string | null>(null);
+
   const hasAnyRealCycle = cycles && cycles.length > 0;
   const canCreateGenesis =
     isSuperAdmin &&
     !hasAnyRealCycle &&
     !config?.preparingCycleId &&
     !config?.operationalCycleId;
+
+  const canCreateNextCycle =
+    isSuperAdmin &&
+    hasAnyRealCycle &&
+    !config?.preparingCycleId;
 
   // Sync dataStore state
   useEffect(() => {
@@ -397,6 +407,133 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
     }
   };
 
+  // Manejador Crear Proximo Ciclo
+  const handleCreateNextCycle = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    // 1. Intentar usar el ciclo seleccionado si realmente existe.
+    const selectedSource = selectedCycleId
+      ? cycles.find(
+          (c) =>
+            c.id === selectedCycleId ||
+            c.cycleId === selectedCycleId
+        )
+      : null;
+
+    // 2. Caso post-cierre: buscar el ultimo CLOSED que aun no tenga sucesor.
+    const closedSource =
+      cycles
+        .filter(
+          (c) =>
+            c.status === 'CLOSED' &&
+            !c.nextCycleId
+        )
+        .sort((a, b) => {
+          const aTime =
+            Date.parse(
+              String(
+                (a as any).closedAt ||
+                (a as any).updatedAt ||
+                (a as any).createdAt ||
+                ''
+              )
+            ) || 0;
+
+          const bTime =
+            Date.parse(
+              String(
+                (b as any).closedAt ||
+                (b as any).updatedAt ||
+                (b as any).createdAt ||
+                ''
+              )
+            ) || 0;
+
+          return bTime - aTime;
+        })[0] || null;
+
+    // 3. Compatibilidad: tambien puede crearse el sucesor
+    // anticipadamente desde un ciclo STARTED.
+    const startedSource =
+      cycles.find(
+        (c) =>
+          c.operationalStatus === 'STARTED' &&
+          !c.nextCycleId
+      ) || null;
+
+    const sourceCycle =
+      closedSource ||
+      selectedSource ||
+      startedSource ||
+      currentCycle ||
+      null;
+
+    const sourceCycleId =
+      sourceCycle?.cycleId ||
+      sourceCycle?.id ||
+      null;
+
+    if (!sourceCycleId) {
+      console.error('[CreateNextCycle] No se pudo resolver origen', {
+        selectedCycleId,
+        cycles: cycles.map((c) => ({
+          id: c.id,
+          cycleId: c.cycleId,
+          name: c.name,
+          status: c.status,
+          operationalStatus: c.operationalStatus,
+          nextCycleId: c.nextCycleId,
+        })),
+        currentCycle,
+      });
+
+      setNextCycleError(
+        'No se pudo determinar el ciclo origen. Recarga la pagina e intenta nuevamente.'
+      );
+      return;
+    }
+
+    const cleanName = nextCycleName.trim();
+
+    if (cleanName.length < 3 || cleanName.length > 60) {
+      setNextCycleError(
+        'El nombre debe tener entre 3 y 60 caracteres.'
+      );
+      return;
+    }
+
+    setNextCycleError(null);
+    setIsCreatingNextCycle(true);
+
+    try {
+      const res =
+        await firestoreService.adminCreateNextCycleCallable({
+          sourceCycleId,
+          name: cleanName,
+          clientRequestId: crypto.randomUUID(),
+        });
+
+      setShowNextCycleModal(false);
+      setNextCycleName('');
+
+      setNotification({
+        type: 'success',
+        message: `Nuevo ciclo creado correctamente: ${cleanName} (${res.cycleId})`,
+      });
+
+      if (onRefresh) onRefresh();
+    } catch (err: any) {
+      console.error('Error creando proximo ciclo:', err);
+
+      setNextCycleError(
+        err.message ||
+          'Error al crear el proximo ciclo.'
+      );
+    } finally {
+      setIsCreatingNextCycle(false);
+    }
+  };
+
   // Manejador Iniciar Ciclo Operativo
   const handleStartCycle = async () => {
     if (!preparingCycleId) {
@@ -595,7 +732,11 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
               >
                 {cycles.map((c) => (
                   <option key={c.id} value={c.id} className="bg-slate-900 text-slate-100">
-                    {c.name} ({c.operationalStatus === 'STARTED' ? 'INICIADO' : 'PREPARANDO'})
+                    {c.name} ({c.status === 'CLOSED'
+                      ? 'CERRADO'
+                      : c.operationalStatus === 'STARTED'
+                      ? 'INICIADO'
+                      : 'PREPARANDO'})
                   </option>
                 ))}
               </select>
@@ -615,6 +756,19 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
             >
               <Plus className="w-4 h-4" />
               Crear Ciclo Inicial
+            </button>
+          ) : canCreateNextCycle ? (
+            <button
+              type="button"
+              onClick={() => {
+                setNextCycleName(`Ciclo ${cycles.length + 1}`);
+                setNextCycleError(null);
+                setShowNextCycleModal(true);
+              }}
+              className="px-4 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white text-xs font-black shadow-lg shadow-violet-600/30 transition flex items-center gap-2 cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              Crear Pr&oacute;ximo Ciclo
             </button>
           ) : !preparingCycleId ? (
             <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-900/80 border border-slate-800 text-slate-400 text-xs font-medium">
@@ -1167,6 +1321,101 @@ export const CyclePreparationView: React.FC<CyclePreparationViewProps> = ({
       {/* ========================================================================= */}
       {/* MODAL 2: INICIAR CICLO OPERATIVO (Sections 22, 23, 24, 25, 26) */}
       {/* ========================================================================= */}
+      {showNextCycleModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative text-slate-100">
+
+            <button
+              type="button"
+              onClick={() => setShowNextCycleModal(false)}
+              disabled={isCreatingNextCycle}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-white"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-violet-600/20 border border-violet-500/40 flex items-center justify-center text-violet-400">
+                <Plus className="w-5 h-5" />
+              </div>
+
+              <div>
+                <h3 className="text-base font-black">
+                  CREAR PR&Oacute;XIMO CICLO
+                </h3>
+                <p className="text-xs text-slate-400">
+                  El nuevo ciclo quedar&aacute; en preparaci&oacute;n.
+                </p>
+              </div>
+            </div>
+
+            <form
+              onSubmit={handleCreateNextCycle}
+              className="space-y-4"
+            >
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Nombre del nuevo ciclo
+                </label>
+
+                <input
+                  value={nextCycleName}
+                  onChange={(e) =>
+                    setNextCycleName(e.target.value)
+                  }
+                  disabled={isCreatingNextCycle}
+                  minLength={3}
+                  maxLength={60}
+                  autoFocus
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-violet-500"
+                  placeholder="Ej. Ciclo prueba 3"
+                />
+              </div>
+
+              {nextCycleError && (
+                <div className="p-3 rounded-xl bg-rose-950/70 border border-rose-500/50 text-rose-300 text-xs">
+                  {nextCycleError}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setShowNextCycleModal(false)
+                  }
+                  disabled={isCreatingNextCycle}
+                  className="px-4 py-2 text-xs text-slate-400"
+                >
+                  Cancelar
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={
+                    isCreatingNextCycle ||
+                    nextCycleName.trim().length < 3
+                  }
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 text-white text-xs font-black disabled:opacity-50 flex items-center gap-2"
+                >
+                  {isCreatingNextCycle ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      Creando...
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="w-4 h-4" />
+                      Crear Ciclo
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {showStartModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-lg p-6 shadow-2xl relative text-slate-100">

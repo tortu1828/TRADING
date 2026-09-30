@@ -124,73 +124,311 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
 
   // Cálculos consolidados para Cierre Operativo Global y Notificaciones vinculados estrictamente a grupos activos
   const allActiveOps = dataStore
-    .getDailyOperations(currentCycle.cycleId)
-    .filter((op) => op.status !== 'CONSOLIDATED' && activeGroupKeys.has(`${op.category}_${op.groupCapitalCop}`));
-  const globalActiveUsdTotal = allActiveOps.reduce((sum, o) => sum + o.amountUsd, 0);
-  const globalActiveGrossCopTotal = globalActiveUsdTotal * trm;
+    .getDailyOperations(
+      currentCycle.cycleId
+    )
+    .filter(
+      (op) =>
+        !(op as any).globalClosedAt &&
+        activeGroupKeys.has(
+          `${op.category}_${op.groupCapitalCop}`
+        )
+    );
 
-  const operatedGroupsList = allGroups
-    .map((group) => {
-      const ops = dataStore
-        .getDailyOperations(currentCycle.cycleId, group.category, group.groupCapitalCop)
-        .filter((o) => o.status !== 'CONSOLIDATED');
-      const usdOperated = ops.reduce((sum, o) => sum + o.amountUsd, 0);
-      if (usdOperated <= 0) return null;
+  const globalActiveUsdTotal =
+    allActiveOps.reduce(
+      (sum, op) =>
+        sum +
+        Number(op.amountUsd || 0),
+      0
+    );
 
-      const usersInGroup = group.users;
-      const groupGrossCop = usdOperated * trm;
+  const operatedGroupsList =
+    allGroups
+      .map((group) => {
 
-      return {
-        ...group,
-        usdOperated,
-        groupGrossCop,
-        activeOpsCount: ops.length,
-      };
-    })
-    .filter((g): g is NonNullable<typeof g> => g !== null);
+        const ops =
+          dataStore
+            .getDailyOperations(
+              currentCycle.cycleId,
+              group.category,
+              group.groupCapitalCop
+            )
+            .filter(
+              (op) =>
+                !(op as any)
+                  .globalClosedAt
+            );
 
-  const operatedUsersList: Array<{
-    user: UserProfile;
-    category: BitacoraCategory;
-    groupCapitalCop: number;
-    usdOperatedGroup: number;
-    userPercentage: number;
-    userProfitCop: number;
-    userProfitUsd: number;
-    grossCopIndividual: number;
-  }> = [];
+        if (ops.length === 0) {
+          return null;
+        }
 
-  operatedGroupsList.forEach((group) => {
-    const usdPerUser = group.usdOperated;
+        return {
+          ...group,
 
-    group.users.forEach((user) => {
-      const isAdmin = user.role === 'ADMIN' || user.email === 'elcocalombiano1828@gmail.com' || user.userCode?.startsWith('ADM');
-      if (isAdmin) return;
+          usdOperated:
+            ops.reduce(
+              (sum, op) =>
+                sum +
+                Number(
+                  op.amountUsd ||
+                  0
+                ),
+              0
+            ),
 
-      const rawUserPct = user.userPercentage !== undefined ? user.userPercentage : 75;
-      const rawAdminPct = user.adminPercentage !== undefined ? user.adminPercentage : 25;
-      const userPct = rawUserPct <= 1 ? rawUserPct * 100 : rawUserPct;
-      const adminPct = rawAdminPct <= 1 ? rawAdminPct * 100 : rawAdminPct;
+          groupGrossCop:
+            ops.reduce(
+              (sum, op) =>
+                sum +
+                Number(
+                  op.grossCop ??
+                  (
+                    Number(
+                      op.amountUsd ||
+                      0
+                    ) *
+                    Number(
+                      op.trmUsed ||
+                      trm
+                    )
+                  )
+                ),
+              0
+            ),
 
-      const calc = calculateUserMonthlyResult(usdPerUser, trm, userPct, adminPct);
+          activeOpsCount:
+            ops.length,
+        };
+      })
+      .filter(
+        (group):
+          group is NonNullable<
+            typeof group
+          > =>
+            group !== null
+      );
 
-      operatedUsersList.push({
-        user,
-        category: group.category,
-        groupCapitalCop: group.groupCapitalCop,
-        usdOperatedGroup: group.usdOperated,
-        userPercentage: userPct,
-        userProfitCop: calc.userProfitCop,
-        userProfitUsd: calc.userProfitUsd,
-        grossCopIndividual: calc.grossCop,
-      });
+  const operatedUsersMap =
+    new Map<string, {
+      user: UserProfile;
+      category: BitacoraCategory;
+      groupCapitalCop: number;
+      usdOperatedGroup: number;
+      userPercentage: number;
+      userProfitCop: number;
+      userProfitUsd: number;
+      grossCopIndividual: number;
+      adminCommissionCop: number;
+    }>();
+
+  allActiveOps.forEach((op) => {
+
+    const group =
+      allGroups.find(
+        (candidate) =>
+          candidate.category ===
+            op.category &&
+          Number(
+            candidate.groupCapitalCop
+          ) ===
+            Number(
+              op.groupCapitalCop
+            )
+      );
+
+    if (!group) {
+      return;
+    }
+
+    const authorized =
+      new Set(
+        (op.authorizedUids || [])
+          .filter(Boolean)
+          .map(
+            (value) =>
+              String(value)
+                .trim()
+                .toLowerCase()
+          )
+      );
+
+    const recipients =
+      authorized.size === 0
+        ? group.users
+        : group.users.filter(
+            (user) => {
+
+              const keys = [
+                user.uid,
+                user.id,
+                user.userCode,
+                user.email,
+              ]
+                .filter(Boolean)
+                .map(
+                  (value) =>
+                    String(value)
+                      .trim()
+                      .toLowerCase()
+                );
+
+              return keys.some(
+                (key) =>
+                  authorized.has(key)
+              );
+            }
+          );
+
+    recipients.forEach((user) => {
+
+      if (
+        user.role === 'ADMIN' ||
+        user.userCode?.startsWith(
+          'ADM'
+        )
+      ) {
+        return;
+      }
+
+      const rawUserPct =
+        user.userPercentage ??
+        75;
+
+      const rawAdminPct =
+        user.adminPercentage ??
+        25;
+
+      const userPct =
+        rawUserPct <= 1
+          ? rawUserPct * 100
+          : rawUserPct;
+
+      const adminPct =
+        rawAdminPct <= 1
+          ? rawAdminPct * 100
+          : rawAdminPct;
+
+      const opUsd =
+        Number(
+          op.amountUsd || 0
+        );
+
+      const opTrm =
+        Number(
+          op.trmUsed ||
+          trm
+        );
+
+      const calc =
+        calculateUserMonthlyResult(
+          opUsd,
+          opTrm,
+          userPct,
+          adminPct
+        );
+
+      const uid =
+        String(
+          user.uid ||
+          user.id ||
+          user.userCode
+        );
+
+      const rowKey =
+        `${uid}_${op.category}_${op.groupCapitalCop}`;
+
+      const current =
+        operatedUsersMap.get(
+          rowKey
+        );
+
+      if (current) {
+
+        current.usdOperatedGroup +=
+          opUsd;
+
+        current.userProfitCop +=
+          calc.userProfitCop;
+
+        current.userProfitUsd +=
+          calc.userProfitUsd;
+
+        current.grossCopIndividual +=
+          calc.grossCop;
+
+        current.adminCommissionCop +=
+          calc.adminCommissionCop;
+
+        return;
+      }
+
+      operatedUsersMap.set(
+        rowKey,
+        {
+          user,
+
+          category:
+            op.category,
+
+          groupCapitalCop:
+            Number(
+              op.groupCapitalCop
+            ),
+
+          usdOperatedGroup:
+            opUsd,
+
+          userPercentage:
+            userPct,
+
+          userProfitCop:
+            calc.userProfitCop,
+
+          userProfitUsd:
+            calc.userProfitUsd,
+
+          grossCopIndividual:
+            calc.grossCop,
+
+          adminCommissionCop:
+            calc.adminCommissionCop,
+        }
+      );
     });
   });
 
-  const totalClientProfitCopGlobal = operatedUsersList.reduce((sum, item) => sum + item.userProfitCop, 0);
-  const totalAdminCommissionCopGlobal = Math.max(0, globalActiveGrossCopTotal - totalClientProfitCopGlobal);
+  const operatedUsersList =
+    Array.from(
+      operatedUsersMap.values()
+    );
 
-  // Calculate global summary across all bitácoras for this cycle
+  const globalActiveGrossCopTotal =
+    operatedUsersList.reduce(
+      (sum, item) =>
+        sum +
+        item.grossCopIndividual,
+      0
+    );
+
+  const totalClientProfitCopGlobal =
+    operatedUsersList.reduce(
+      (sum, item) =>
+        sum +
+        item.userProfitCop,
+      0
+    );
+
+  const totalAdminCommissionCopGlobal =
+    operatedUsersList.reduce(
+      (sum, item) =>
+        sum +
+        item.adminCommissionCop,
+      0
+    );
+
+
   const totalOperationsCount = allGroups.reduce((acc, g) => {
     const ops = dataStore.getDailyOperations(currentCycle.cycleId, g.category, g.groupCapitalCop);
     return acc + ops.length;
@@ -326,7 +564,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
     setErrorToast(null);
     setSuccessToast(null);
 
-    if (operatedUsersList.length === 0 || globalActiveUsdTotal === 0) {
+    if (operatedUsersList.length === 0 || allActiveOps.length === 0) {
       setErrorToast('No hay operaciones activas ni inversionistas pendientes por notificar.');
       setTimeout(() => setErrorToast(null), 4000);
       return;
@@ -346,18 +584,18 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
     }
   };
 
-  const handleExecuteConsolidateAllGlobal = () => {
+  const handleExecuteConsolidateAllGlobal = async () => {
     setErrorToast(null);
     setSuccessToast(null);
 
-    if (allActiveOps.length === 0 || globalActiveUsdTotal === 0) {
+    if (allActiveOps.length === 0) {
       setErrorToast('No hay operaciones activas pendientes por cerrar en ninguna bitácora.');
       setTimeout(() => setErrorToast(null), 4000);
       return;
     }
 
     try {
-      const res = dataStore.consolidateAllDailyOperations(
+      const res = await dataStore.consolidateAllDailyOperations(
         currentCycle.cycleId,
         shouldNotifyOnGlobalClose,
         currentUser?.id || 'admin_root_uid',
@@ -373,7 +611,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
   };
 
   const handleConsolidateAllGlobal = () => {
-    if (allActiveOps.length === 0 || globalActiveUsdTotal === 0) {
+    if (allActiveOps.length === 0) {
       setErrorToast('No hay operaciones activas pendientes por cerrar en ninguna bitácora.');
       setTimeout(() => setErrorToast(null), 4000);
       return;
@@ -560,7 +798,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
             <button
               type="button"
               onClick={handleConsolidateAllGlobal}
-              disabled={!hasOperationalCycle || globalActiveUsdTotal === 0}
+              disabled={!hasOperationalCycle || allActiveOps.length === 0}
               className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white disabled:opacity-40 disabled:cursor-not-allowed text-xs font-bold flex items-center gap-2 transition cursor-pointer shadow-md shadow-emerald-600/20"
               title={!hasOperationalCycle ? "No hay un ciclo operativo iniciado" : `Cerrar la jornada diaria activa en todas las bitácoras (${formatUSD(globalActiveUsdTotal)}) y consolidar las ganancias en el Cierre Mensual`}
             >
@@ -576,7 +814,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                   setTimeout(() => setErrorToast(null), 4000);
                   return;
                 }
-                if (operatedUsersList.length === 0 || globalActiveUsdTotal === 0) {
+                if (operatedUsersList.length === 0 || allActiveOps.length === 0) {
                   setErrorToast('No hay operaciones activas ni inversionistas pendientes por notificar.');
                   setTimeout(() => setErrorToast(null), 4000);
                   return;
@@ -1431,7 +1669,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                   className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs flex items-center gap-2 transition cursor-pointer shadow-lg shadow-emerald-600/20"
                 >
                   <Lock className="w-4 h-4" />
-                  <span>Confirmar Cierre Global y Guardar ($0 USD)</span>
+                  <span>Confirmar Cierre Global y Guardar ({formatUSD(globalActiveUsdTotal)})</span>
                 </button>
               </div>
             </div>

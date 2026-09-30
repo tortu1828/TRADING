@@ -587,6 +587,36 @@ export const firestoreService = {
   /**
    * Ruta legacy deshabilitada.
    */
+  async adminCloseDailyOperationsCallable(payload: {
+    scope: 'GROUP' | 'GLOBAL';
+    cycleId: string;
+    category?: string;
+    groupCapitalCop?: number;
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    alreadyClosed?: boolean;
+    scope: 'GROUP' | 'GLOBAL';
+    cycleId: string;
+    closureId: string;
+    closedOperationsCount: number;
+    totalUsdClosed: number;
+    operationIds: string[];
+    message: string;
+  }> {
+
+    const callable =
+      httpsCallable<any, any>(
+        functions,
+        'adminCloseDailyOperationsCallable'
+      );
+
+    const response =
+      await callable(payload);
+
+    return response.data;
+  },
+
   async saveDailyOperation(_op: DailyGroupOperation) {
     throw new Error('Ruta legacy deshabilitada. Toda creación de operaciones financieras debe ejecutarse mediante adminExecuteDailyOperation.');
   },
@@ -975,6 +1005,25 @@ export const firestoreService = {
       reinvestmentsAppliedCount?: number;
       usersCapitalUpdatedCount?: number;
       message: string;
+    };
+  },
+
+  async adminCreateNextCycleCallable(payload: {
+    sourceCycleId: string;
+    name: string;
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    cycleId: string;
+    idempotentReplay?: boolean;
+  }> {
+    const callable = httpsCallable(functions, 'adminCreateNextCycleCallable');
+    const response = await callable(payload);
+
+    return response.data as {
+      success: boolean;
+      cycleId: string;
+      idempotentReplay?: boolean;
     };
   },
 

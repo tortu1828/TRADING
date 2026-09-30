@@ -1635,273 +1635,686 @@ class DataStore {
       message: `El saldo y las operaciones del grupo fueron reiniciadas a $0 exitosamente.`,
     };
   }
-
-  public consolidateDailyOperations(
+  public async consolidateDailyOperations(
     cycleId: string,
     category: BitacoraCategory,
     groupCapitalCop: number,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
-  ): { success: boolean; consolidatedUsd: number; totalUsdAccumulated: number; message: string } {
-    const cycle = this.getCycleById(cycleId);
+  ): Promise<{
+    success: boolean;
+    consolidatedUsd: number;
+    totalUsdAccumulated: number;
+    message: string;
+  }> {
+
+    const cycle =
+      this.getCycleById(cycleId);
+
     if (!cycle || cycle.status === 'CLOSED') {
-      throw new Error('No se pueden consolidar operaciones de un ciclo cerrado.');
+      throw new Error(
+        'No se pueden consolidar operaciones de un ciclo cerrado.'
+      );
     }
 
-    const activeOps = this.dailyOperations.filter(
-      (op) => op.cycleId === cycleId && op.category === category && Number(op.groupCapitalCop) === Number(groupCapitalCop) && op.status !== 'CONSOLIDATED'
-    );
+    const activeOps =
+      this.dailyOperations.filter(
+        (op) =>
+          op.cycleId === cycleId &&
+          op.category === category &&
+          Number(op.groupCapitalCop) ===
+            Number(groupCapitalCop) &&
+          op.status !== 'CONSOLIDATED'
+      );
 
     if (activeOps.length === 0) {
-      throw new Error('No hay operaciones diarias activas pendientes por consolidar en este grupo.');
+      throw new Error(
+        'No hay operaciones activas pendientes en este grupo.'
+      );
     }
 
-    const now = new Date().toISOString();
-    let sessionUsdSum = 0;
+    const requestId =
+      globalThis.crypto?.randomUUID?.() ||
+      `group_close_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2)}`;
 
-    activeOps.forEach((op) => {
-      op.status = 'CONSOLIDATED';
-      op.consolidatedAt = now;
-      sessionUsdSum += op.amountUsd;
-      firestoreService.saveDailyOperation(op).catch((e) => console.warn('Error updating op in Firestore:', e));
-    });
+    const result =
+      await firestoreService
+        .adminCloseDailyOperationsCallable({
+          scope: 'GROUP',
+          cycleId,
+          category,
+          groupCapitalCop,
+          clientRequestId:
+            requestId,
+        });
 
-    // Mantener la suma acumulada completa de todas las operaciones (consolidadas + activas)
-    const allOps = this.getDailyOperations(cycleId, category, groupCapitalCop);
-    const totalUsdAccumulated = allOps.reduce((sum, o) => sum + o.amountUsd, 0);
+    const affectedIds =
+      new Set(
+        result.operationIds || []
+      );
 
-    // Asegurar que el cálculo del grupo mantenga el total acumulado para el Cierre Mensual
-    this.calculateGroup(cycleId, category, groupCapitalCop, totalUsdAccumulated, adminUid, adminName, true);
+    const now =
+      new Date().toISOString();
 
-    this.addAuditLog({
-      action: 'DAILY_OPERATIONS_CONSOLIDATED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      cycleId,
-      targetEntity: `${cycleId}_${category}_${groupCapitalCop}`,
-      details: {
-        category,
-        groupCapitalCop,
-        consolidatedOpsCount: activeOps.length,
-        sessionUsdSum,
-        totalUsdAccumulated,
-      },
-    });
+    // Optimistic LOCAL update ?nicamente
+    // DESPU?S de confirmaci?n del servidor.
+    this.dailyOperations.forEach(
+      (op) => {
+        if (affectedIds.has(op.id)) {
+          op.status =
+            'CONSOLIDATED';
+
+          op.consolidatedAt =
+            op.consolidatedAt ||
+            now;
+        }
+      }
+    );
 
     this.notify();
 
+    const totalUsdAccumulated =
+      this.getDailyOperations(
+        cycleId,
+        category,
+        groupCapitalCop
+      ).reduce(
+        (sum, op) =>
+          sum +
+          Number(op.amountUsd || 0),
+        0
+      );
+
     return {
-      success: true,
-      consolidatedUsd: sessionUsdSum,
+      success:
+        result.success,
+
+      consolidatedUsd:
+        Number(
+          result.totalUsdClosed || 0
+        ),
+
       totalUsdAccumulated,
-      message: `Operación de $${sessionUsdSum} USD consolidada. El mostrador diario se reinició a $0 USD para nuevas operaciones, manteniendo $${totalUsdAccumulated} USD acumulados en el Cierre Mensual.`,
+
+      message:
+        result.message,
     };
   }
+  private resolveNotificationRecipientsFromOperation(
+    operation: DailyGroupOperation,
+    cycleId: string
+  ): UserProfile[] {
 
+    const uids =
+      Array.from(
+        new Set(
+          (operation.authorizedUids || [])
+            .filter(
+              (uid): uid is string =>
+                typeof uid === 'string' &&
+                uid.trim().length > 0
+            )
+            .map(
+              (uid) =>
+                uid.trim()
+            )
+        )
+      );
+
+    const activeUsers =
+      this.getActiveUsers();
+
+    // Solo compatibilidad legacy.
+    if (uids.length === 0) {
+      return this.resolveOperationRecipients(
+        operation,
+        activeUsers
+      );
+    }
+
+    const liveMap =
+      new Map<string, UserProfile>();
+
+    activeUsers.forEach((user) => {
+
+      [
+        user.uid,
+        user.id,
+        user.userCode,
+        user.email?.toLowerCase(),
+      ]
+        .filter(Boolean)
+        .forEach((key) =>
+          liveMap.set(
+            String(key).trim(),
+            user
+          )
+        );
+    });
+
+    const snapshotMap =
+      new Map<string, any>();
+
+    this.getUserResults(cycleId)
+      .forEach((result) => {
+
+        [
+          result.userUid,
+          result.userId,
+          result.userCode,
+          result.email?.toLowerCase(),
+        ]
+          .filter(Boolean)
+          .forEach((key) =>
+            snapshotMap.set(
+              String(key).trim(),
+              result
+            )
+          );
+      });
+
+    const recipients =
+      new Map<string, UserProfile>();
+
+    uids.forEach((uid) => {
+
+      const live =
+        liveMap.get(uid);
+
+      if (live) {
+        recipients.set(
+          String(
+            live.uid ||
+            live.id
+          ),
+          live
+        );
+        return;
+      }
+
+      const result =
+        snapshotMap.get(uid);
+
+      if (!result) {
+        console.warn(
+          '[NotificationRecipients] UID no resuelto:',
+          uid
+        );
+        return;
+      }
+
+      const capital =
+        Number(
+          result.cycleCapitalCop ||
+          result.groupCapitalCop ||
+          operation.groupCapitalCop ||
+          0
+        );
+
+      const profile = {
+        id:
+          result.userId ||
+          uid,
+
+        uid:
+          result.userUid ||
+          uid,
+
+        userCode:
+          result.userCode ||
+          '',
+
+        fullName:
+          result.userName ||
+          'Inversionista',
+
+        email:
+          result.email ||
+          '',
+
+        phone: '',
+        role: 'USER',
+        status: 'ACTIVE',
+
+        currentCapital:
+          capital,
+
+        currency: 'COP',
+
+        category:
+          result.cycleCategory ||
+          operation.category,
+
+        userPercentage:
+          result.userPercentage,
+
+        adminPercentage:
+          result.adminPercentage,
+
+        paymentMethod: '',
+        paymentDetails: '',
+
+        createdAt:
+          result.calculatedAt ||
+          '',
+
+        entryDate: '',
+      } as UserProfile;
+
+      recipients.set(
+        String(profile.uid),
+        profile
+      );
+    });
+
+    return Array.from(
+      recipients.values()
+    );
+  }
   public notifyAllActiveDailyOperations(
     cycleId: string,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
-  ): { success: boolean; sentCount: number; totalUsdNotified: number; message: string } {
-    const cycle = this.getCycleById(cycleId) || this.getActiveCycle();
-    const trm = cycle.trmApplied || 4028.5;
+  ): {
+    success: boolean;
+    sentCount: number;
+    totalUsdNotified: number;
+    message: string;
+  } {
 
-    const activeOps = this.dailyOperations.filter(
-      (op) => op.cycleId === cycleId && op.status !== 'CONSOLIDATED'
-    );
+    const cycle =
+      this.getCycleById(cycleId) ||
+      this.getActiveCycle();
 
-    if (activeOps.length === 0) {
-      throw new Error('No hay operaciones diarias activas pendientes por notificar.');
+    if (!cycle) {
+      throw new Error(
+        'No se encontr? el ciclo.'
+      );
     }
+
+    // La condici?n de jornada global es globalClosedAt,
+    // NO status === ACTIVE.
+    const pendingOps =
+      this.dailyOperations.filter(
+        (op) =>
+          op.cycleId === cycleId &&
+          !(op as any).globalClosedAt
+      );
+
+    if (pendingOps.length === 0) {
+      throw new Error(
+        'No hay operaciones pendientes por notificar.'
+      );
+    }
+
+    const now =
+      new Date().toISOString();
 
     let totalSentCount = 0;
     let totalUsdNotified = 0;
-    const now = new Date().toISOString();
-    const notificationsToSave: NotificationItem[] = [];
 
-    const activeUsers = this.getActiveUsers();
+    const notificationsToSave:
+      NotificationItem[] = [];
 
-    // Procesar CADA operación activa y resolver los destinatarios autorizados para esa operación
-    activeOps.forEach((op) => {
-      const recipients = this.resolveOperationRecipients(op, activeUsers);
+    pendingOps.forEach((op) => {
 
-      if (recipients.length === 0) {
-        console.warn('[DEV] notifyAllActiveDailyOperations: Operación sin destinatarios autorizados:', op.id);
-        return;
-      }
-
-      const opUsd = Number(op.amountUsd || 0);
+      const recipients =
+        this.resolveNotificationRecipientsFromOperation(
+          op,
+          cycleId
+        );
 
       recipients.forEach((user) => {
-        const isAdmin = user.role === 'ADMIN' || user.userCode?.startsWith('ADM');
-        if (isAdmin) return;
 
-        totalUsdNotified += opUsd;
+        if (
+          user.role === 'ADMIN' ||
+          user.userCode?.startsWith('ADM')
+        ) {
+          return;
+        }
 
-        const rawUserPct = user.userPercentage !== undefined ? user.userPercentage : 75;
-        const rawAdminPct = user.adminPercentage !== undefined ? user.adminPercentage : 25;
-        const userPct = rawUserPct <= 1 ? rawUserPct * 100 : rawUserPct;
-        const adminPct = rawAdminPct <= 1 ? rawAdminPct * 100 : rawAdminPct;
-        const userCategory = user.category || getCategoryForCapital(user.currentCapital) || 'AZUL';
+        const opUsd =
+          Number(op.amountUsd || 0);
 
-        const calc = calculateUserMonthlyResult(opUsd, trm, userPct, adminPct);
-        const isPositive = opUsd >= 0;
-        const signStr = isPositive ? '+' : '-';
-        const formattedUsd = `${signStr}$${Math.abs(opUsd).toFixed(2)} USD`;
-        const formattedProfitCop = `${isPositive ? '+' : '-'}$${Math.abs(calc.userProfitCop).toLocaleString('es-CO')} COP`;
+        const opTrm =
+          Number(
+            op.trmUsed ||
+            cycle.trmApplied ||
+            4028.5
+          );
 
-        // ID Determinístico para idempotencia: notif_op_${op.id}_${recipient.uid}
-        const recipientUid = user.uid || user.id;
-        const notifId = `notif_op_${op.id}_${recipientUid}`;
+        const rawUserPct =
+          user.userPercentage ??
+          75;
 
-        const tradeName = resolveTradeNotificationName(user);
+        const rawAdminPct =
+          user.adminPercentage ??
+          25;
 
-        const notif: NotificationItem = {
-          id: notifId,
-          userId: user.id,
-          userUid: user.uid,
-          userCode: user.userCode,
-          userEmail: user.email,
-          userName: user.fullName,
+        const userPct =
+          rawUserPct <= 1
+            ? rawUserPct * 100
+            : rawUserPct;
+
+        const adminPct =
+          rawAdminPct <= 1
+            ? rawAdminPct * 100
+            : rawAdminPct;
+
+        const calc =
+          calculateUserMonthlyResult(
+            opUsd,
+            opTrm,
+            userPct,
+            adminPct
+          );
+
+        const recipientUid =
+          user.uid ||
+          user.id;
+
+        const notifId =
+          `notif_op_${op.id}_${recipientUid}`;
+
+        const tradeName =
+          resolveTradeNotificationName(
+            user
+          );
+
+        const formattedUsd =
+          `+$${Math.abs(opUsd).toFixed(2)} USD`;
+
+        const formattedProfit =
+          `+$${Math.abs(
+            calc.userProfitCop
+          ).toLocaleString(
+            'es-CO'
+          )} COP`;
+
+        const notification:
+          NotificationItem = {
+
+          id:
+            notifId,
+
+          userId:
+            user.id,
+
+          userUid:
+            user.uid,
+
+          userCode:
+            user.userCode,
+
+          userEmail:
+            user.email,
+
+          userName:
+            user.fullName,
+
           cycleId,
-          type: 'SYSTEM',
-          title: `${isPositive ? '📈' : '📉'} Operación Registrada: ${formattedUsd}`,
-          message: `Hola ${tradeName}, se ejecutó una operación de trading por ${formattedUsd} el ${op.date || 'día de hoy'} en tu Bitácora ${userCategory}. Tu resultado para esta operación es de ${formattedProfitCop}.`,
+
+          type:
+            'SYSTEM',
+
+          title:
+            `?? Operaci?n Registrada: ${formattedUsd}`,
+
+          message:
+            `Hola ${tradeName}, se ejecut? una operaci?n de trading por ${formattedUsd} el ${
+              op.date ||
+              'd?a de hoy'
+            } en tu Bit?cora ${
+              user.category ||
+              op.category
+            }. Tu resultado para esta operaci?n es de ${formattedProfit}.`,
+
           payload: {
             cycleId,
-            operationId: op.id,
-            usdAmount: opUsd,
-            copAmount: calc.grossCop,
-            userProfitCop: calc.userProfitCop,
-            userProfitUsd: calc.userProfitUsd,
-            trmUsed: trm,
-            category: userCategory,
-            groupCapitalCop: user.currentCapital,
-            userEmail: user.email,
-            userUid: user.uid,
+
+            operationId:
+              op.id,
+
+            usdAmount:
+              opUsd,
+
+            copAmount:
+              calc.grossCop,
+
+            userProfitCop:
+              calc.userProfitCop,
+
+            userProfitUsd:
+              calc.userProfitUsd,
+
+            trmUsed:
+              opTrm,
+
+            category:
+              user.category ||
+              op.category,
+
+            groupCapitalCop:
+              Number(
+                op.groupCapitalCop
+              ),
+
+            userEmail:
+              user.email,
+
+            userUid:
+              user.uid,
           },
-          isRead: false,
-          sentAt: now,
-          readAt: null,
+
+          isRead:
+            false,
+
+          sentAt:
+            now,
+
+          readAt:
+            null,
         };
 
-        const existingIndex = this.notifications.findIndex((n) => n.id === notifId);
-        if (existingIndex >= 0) {
-          this.notifications[existingIndex] = notif;
+        const index =
+          this.notifications
+            .findIndex(
+              (n) =>
+                n.id === notifId
+            );
+
+        if (index >= 0) {
+          this.notifications[
+            index
+          ] = notification;
+
         } else {
-          this.notifications.push(notif);
+          this.notifications.push(
+            notification
+          );
         }
-        notificationsToSave.push(notif);
+
+        notificationsToSave.push(
+          notification
+        );
+
         totalSentCount++;
+        totalUsdNotified +=
+          opUsd;
       });
     });
 
-    if (notificationsToSave.length > 0) {
-      firestoreService.saveNotificationsBatch(notificationsToSave).catch((e) => console.warn('Error saving global daily notifs:', e));
+    if (
+      notificationsToSave.length >
+      0
+    ) {
+      firestoreService
+        .saveNotificationsBatch(
+          notificationsToSave
+        )
+        .catch((error) =>
+          console.warn(
+            'Error guardando notificaciones globales:',
+            error
+          )
+        );
     }
-
-    this.addAuditLog({
-      action: 'DAILY_OPERATION_NOTIFIED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      cycleId,
-      targetEntity: `GLOBAL_DAILY_NOTIF_${cycleId}`,
-      details: {
-        totalSentCount,
-        totalUsdNotified,
-      },
-    });
 
     this.notify();
 
     return {
       success: true,
-      sentCount: totalSentCount,
+
+      sentCount:
+        totalSentCount,
+
       totalUsdNotified,
-      message: `✓ Se enviaron ${totalSentCount} notificaciones individuales a los destinatarios autorizados por sus operaciones activas ($${totalUsdNotified.toFixed(2)} USD en total).`,
+
+      message:
+        `? ${totalSentCount} notificaciones generadas para las operaciones pendientes del Cierre Global.`,
     };
   }
-
-  public consolidateAllDailyOperations(
+  public async consolidateAllDailyOperations(
     cycleId: string,
     shouldNotify: boolean = false,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
-  ): { success: boolean; consolidatedOpsCount: number; totalUsdConsolidated: number; notificationsSent: number; message: string } {
-    const cycle = this.getCycleById(cycleId);
+  ): Promise<{
+    success: boolean;
+    consolidatedOpsCount: number;
+    totalUsdConsolidated: number;
+    notificationsSent: number;
+    message: string;
+  }> {
+
+    const cycle =
+      this.getCycleById(cycleId);
+
     if (!cycle || cycle.status === 'CLOSED') {
-      throw new Error('No se pueden consolidar operaciones de un ciclo cerrado.');
+      throw new Error(
+        'No se pueden cerrar operaciones de un ciclo cerrado.'
+      );
     }
 
-    const activeOps = this.dailyOperations.filter(
-      (op) => op.cycleId === cycleId && op.status !== 'CONSOLIDATED'
-    );
+    const pendingOps =
+      this.dailyOperations.filter(
+        (op) =>
+          op.cycleId === cycleId &&
+          !(op as any).globalClosedAt
+      );
 
-    if (activeOps.length === 0) {
-      throw new Error('No hay operaciones diarias activas pendientes por consolidar en ninguna bitácora.');
+    if (pendingOps.length === 0) {
+      throw new Error(
+        'No hay operaciones pendientes del Cierre Global.'
+      );
     }
 
     let notificationsSent = 0;
+
     if (shouldNotify) {
       try {
-        const notifRes = this.notifyAllActiveDailyOperations(cycleId, adminUid, adminName);
-        notificationsSent = notifRes.sentCount;
-      } catch (e) {
-        console.warn('Notification issue during consolidation:', e);
+
+        const notificationResult =
+          this.notifyAllActiveDailyOperations(
+            cycleId,
+            adminUid,
+            adminName
+          );
+
+        notificationsSent =
+          notificationResult.sentCount;
+
+      } catch (error) {
+
+        console.warn(
+          '[GlobalClose] Error en notificaciones:',
+          error
+        );
       }
     }
 
-    const now = new Date().toISOString();
-    let totalUsdConsolidated = 0;
+    const requestId =
+      globalThis.crypto?.randomUUID?.() ||
+      `global_close_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2)}`;
 
-    activeOps.forEach((op) => {
-      op.status = 'CONSOLIDATED';
-      op.consolidatedAt = now;
-      totalUsdConsolidated += op.amountUsd;
-      firestoreService.saveDailyOperation(op).catch((e) => console.warn('Error updating op in Firestore:', e));
-    });
+    const result =
+      await firestoreService
+        .adminCloseDailyOperationsCallable({
+          scope:
+            'GLOBAL',
 
-    // Recalcular todos los grupos para reflejar los acumulados completos en Cierre Mensual
-    const groupsByCategory = this.getCategoryGroups(cycleId);
-    const allGroups: CategoryGroupInfo[] = [
-      ...(groupsByCategory.AZUL || []),
-      ...(groupsByCategory.VERDE || []),
-      ...(groupsByCategory.NEGRA || []),
-    ];
+          cycleId,
 
-    allGroups.forEach((group) => {
-      const ops = this.getDailyOperations(cycleId, group.category, group.groupCapitalCop);
-      const totalUsdAccumulated = ops.reduce((sum, o) => sum + o.amountUsd, 0);
-      if (totalUsdAccumulated > 0) {
-        this.calculateGroup(cycleId, group.category, group.groupCapitalCop, totalUsdAccumulated, adminUid, adminName, true);
+          clientRequestId:
+            requestId,
+        });
+
+    const affected =
+      new Set(
+        result.operationIds || []
+      );
+
+    const now =
+      new Date().toISOString();
+
+    // Actualizaci?n local SOLO despu?s
+    // de confirmaci?n del servidor.
+    this.dailyOperations.forEach(
+      (op) => {
+
+        if (!affected.has(op.id)) {
+          return;
+        }
+
+        op.status =
+          'CONSOLIDATED';
+
+        op.consolidatedAt =
+          op.consolidatedAt ||
+          now;
+
+        (op as any).globalClosureId =
+          result.closureId;
+
+        (op as any).globalClosedAt =
+          now;
       }
-    });
-
-    this.addAuditLog({
-      action: 'DAILY_OPERATIONS_CONSOLIDATED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      cycleId,
-      targetEntity: `ALL_GROUPS_${cycleId}`,
-      details: {
-        consolidatedOpsCount: activeOps.length,
-        totalUsdConsolidated,
-        notificationsSent,
-      },
-    });
+    );
 
     this.notify();
 
     return {
-      success: true,
-      consolidatedOpsCount: activeOps.length,
-      totalUsdConsolidated,
+      success:
+        result.success,
+
+      consolidatedOpsCount:
+        Number(
+          result.closedOperationsCount ||
+          0
+        ),
+
+      totalUsdConsolidated:
+        Number(
+          result.totalUsdClosed ||
+          0
+        ),
+
       notificationsSent,
-      message: `Se cerraron y consolidaron ${activeOps.length} operaciones ($${totalUsdConsolidated.toFixed(2)} USD) en todas las bitácoras. ${notificationsSent > 0 ? `Se enviaron ${notificationsSent} notificaciones a los inversionistas. ` : ''}Los mostradores diarios se reiniciaron a $0 USD y todos los saldos se guardaron en el Cierre Mensual.`,
+
+      message:
+        `${result.message}${
+          notificationsSent > 0
+            ? ` Se generaron ${notificationsSent} notificaciones.`
+            : ''
+        }`,
     };
   }
 
-  // Recalcular métricas de ciclos
+
   private recalculateCycleMetrics() {
     this.cycles = this.cycles.map((cycle) => {
       const activeUsers = this.getActiveUsers();
@@ -2262,6 +2675,14 @@ class DataStore {
     const cycle = this.getCycleById(cycleId);
     if (!cycle) {
       throw new Error(`El ciclo ${cycleId} no existe.`);
+    }
+
+    // Cycle-close notifications are automatic for modern cycles.
+    // This legacy method must never compete with adminCloseCycleCallable.
+    if (cycle.isLegacy !== true) {
+      throw new Error(
+        'Las notificaciones de cierre se generan autom\u00e1ticamente al cerrar el ciclo con la TRM definitiva.'
+      );
     }
 
     const activeUsers = this.getActiveUsers();
@@ -2694,7 +3115,7 @@ class DataStore {
     return {
       success: true,
       closingTrm: finalClosingTrm,
-      message: `Ciclo ${cycle.name} cerrado exitosamente con TRM definitiva de $${finalClosingTrm.toLocaleString('es-CO')} COP.`,
+      message: `Ciclo ${cycle.name} cerrado exitosamente con TRM definitiva de $${finalClosingTrm.toLocaleString('es-CO')} COP. Las notificaciones personalizadas de cierre quedaron programadas autom\u00e1ticamente para los inversionistas.`,
     };
   }
 

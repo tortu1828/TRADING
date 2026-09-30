@@ -70,6 +70,9 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   const [selectedCycleId, setSelectedCycleId] = useState<string>(activeCycle.cycleId);
   const currentCycle = dataStore.getCycleById(selectedCycleId) || activeCycle;
   const isClosed = currentCycle.status === 'CLOSED';
+  const usesFrozenCycleSnapshot =
+    currentCycle.status === 'CLOSED' ||
+    currentCycle.status === 'REOPENED';
 
   // Excel Bitacora Import Modal State
   const [showExcelImportModal, setShowExcelImportModal] = useState<boolean>(false);
@@ -166,15 +169,19 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   const eligibleActiveUsers = activeUsers.filter((u) => u.status === 'ACTIVE' && u.role === 'USER');
   const eligibleActiveUids = new Set(eligibleActiveUsers.map((u) => u.uid || u.id));
 
-  const userResults = isClosed
+  const userResults = usesFrozenCycleSnapshot
     ? rawUserResults
     : rawUserResults.filter((r) => {
         const uid = r.userUid || r.userId;
         return eligibleActiveUids.has(uid);
       });
 
-  const totalActiveUsers = isClosed
-    ? (currentCycle.totalUsersActive || rawUserResults.length)
+  const totalActiveUsers = usesFrozenCycleSnapshot
+    ? (
+        currentCycle.initialActiveUsersCount ||
+        currentCycle.totalUsersActive ||
+        rawUserResults.length
+      )
     : eligibleActiveUsers.length;
 
   // calculatedEligibleUids: Set de UIDs únicos para evitar que duplicados sumen más de 100%
@@ -519,7 +526,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
       return;
     }
 
-    if (window.confirm(`¿Estás seguro de congelar y CERRAR formalmente el ciclo ${currentCycle.name}?\n\n• Solicitudes Aprobadas que se aplicarán a capital: ${approvedRequestsCount}\n• Solicitudes Rechazadas: ${rejectedRequestsCount}\n\nEsta acción ejecutará el Pre-Flight financiero y bloqueará cualquier edición posterior.`)) {
+    if (window.confirm(`\u00bfEst\u00e1s seguro de congelar y CERRAR formalmente el ciclo ${currentCycle.name}?\n\n\u2022 Solicitudes Aprobadas que se aplicar\u00e1n a capital: ${approvedRequestsCount}\n\u2022 Solicitudes Rechazadas: ${rejectedRequestsCount}\n\nEsta acci\u00f3n ejecutar\u00e1 el Pre-Flight financiero, bloquear\u00e1 cualquier edici\u00f3n posterior y generar\u00e1 autom\u00e1ticamente una notificaci\u00f3n personalizada de cierre para cada inversionista usando la TRM definitiva ingresada.`)) {
       try {
         const res = await dataStore.closeCycle(
           canonicalCycleId,
@@ -2114,19 +2121,15 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
           </div>
 
           <div className="grid grid-cols-1 sm:flex sm:items-center gap-3 w-full lg:w-auto">
-            {/* Send Notifications Button (Blue in mockup) */}
+            {/* Cycle-close notifications are automatic and mandatory */}
             <button
-              onClick={() => setShowNotifyModal(true)}
-              disabled={!is100Percent || isClosed || isClosing}
-              className={`min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs font-extrabold shadow-lg transition cursor-pointer w-full sm:w-auto active:scale-95 ${
-                is100Percent && !isClosed && !isClosing
-                  ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/30'
-                  : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
-              }`}
-              title={!is100Percent ? 'Debes calcular todos los usuarios antes de enviar notificaciones' : isClosing ? 'Cierre en proceso' : ''}
+              type="button"
+              disabled
+              className="min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs font-extrabold w-full sm:w-auto bg-emerald-950/40 text-emerald-300 border border-emerald-800/60 cursor-default"
+              title={'Las notificaciones personalizadas se generan autom\u00e1ticamente al cerrar el ciclo con la TRM definitiva.'}
             >
               <Bell className="w-4 h-4 shrink-0" />
-              <span>🔔 ENVIAR NOTIFICACIONES</span>
+              <span>{'\uD83D\uDD14 NOTIFICACIONES AUTOM\u00c1TICAS AL CERRAR'}</span>
             </button>
 
             {/* TRM definitiva de cierre */}

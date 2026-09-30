@@ -3973,6 +3973,435 @@ exports.adminResolveReinvestmentCallable = onCall(
  *   5. Si falla cualquiera, se descarta la transacción completa (cero estados parciales).
  * - Completamente IDEMPOTENTE ante reintentos o reconexiones de red.
  */
+
+/**
+ * Cierre diario autoritativo.
+ *
+ * GROUP:
+ *   Cierra ?nicamente el mostrador del grupo.
+ *
+ * GLOBAL:
+ *   Incluye todas las operaciones del ciclo que todav?a
+ *   NO tengan globalClosedAt, incluso si status ya es
+ *   CONSOLIDATED.
+ *
+ * Esta funci?n NO modifica cycleUserResults ni vuelve a
+ * calcular ganancias.
+ */
+exports.adminCloseDailyOperationsCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const {
+      authUid,
+      createdByName,
+    } = await verifySuperAdminPrivileges(request);
+
+    const data = request.data || {};
+
+    const cycleId =
+      typeof data.cycleId === "string"
+        ? data.cycleId.trim()
+        : "";
+
+    const scope =
+      typeof data.scope === "string"
+        ? data.scope.trim().toUpperCase()
+        : "";
+
+    const category =
+      typeof data.category === "string"
+        ? data.category.trim()
+        : "";
+
+    const groupCapitalCop =
+      Number(data.groupCapitalCop);
+
+    const rawRequestId =
+      typeof data.clientRequestId === "string"
+        ? data.clientRequestId.trim()
+        : "";
+
+    const cleanRequestId =
+      rawRequestId
+        .replace(/[^a-zA-Z0-9_-]/g, "")
+        .slice(0, 80);
+
+    if (!cycleId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "cycleId es obligatorio."
+      );
+    }
+
+    if (!["GROUP", "GLOBAL"].includes(scope)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "scope debe ser GROUP o GLOBAL."
+      );
+    }
+
+    if (
+      scope === "GROUP" &&
+      (
+        !category ||
+        !Number.isFinite(groupCapitalCop) ||
+        groupCapitalCop <= 0
+      )
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "GROUP requiere category y groupCapitalCop v?lidos."
+      );
+    }
+
+    const nowIso =
+      new Date().toISOString();
+
+    const closureId =
+      `dailyclose_${cycleId}_${
+        cleanRequestId ||
+        `${Date.now()}_${Math.random()
+          .toString(36)
+          .slice(2, 10)}`
+      }`;
+
+    const cycleRef =
+      db.collection("monthlyCycles")
+        .doc(cycleId);
+
+    const configRef =
+      db.collection("settings")
+        .doc("global_config");
+
+    try {
+      return await db.runTransaction(
+        async (transaction) => {
+
+          // --------------------------
+          // READ PHASE
+          // --------------------------
+
+          const cycleSnap =
+            await transaction.get(cycleRef);
+
+          const configSnap =
+            await transaction.get(configRef);
+
+          const opsSnap =
+            await transaction.get(
+              db.collection("dailyOperations")
+                .where(
+                  "cycleId",
+                  "==",
+                  cycleId
+                )
+            );
+
+          if (!cycleSnap.exists) {
+            throw new HttpsError(
+              "not-found",
+              `El ciclo ${cycleId} no existe.`
+            );
+          }
+
+          const cycleData =
+            cycleSnap.data() || {};
+
+          if (
+            cycleData.status !== "OPEN" &&
+            cycleData.status !== "REOPENED"
+          ) {
+            throw new HttpsError(
+              "failed-precondition",
+              "El ciclo no est? abierto."
+            );
+          }
+
+          if (
+            cycleData.operationalStatus !==
+            "STARTED"
+          ) {
+            throw new HttpsError(
+              "failed-precondition",
+              "CYCLE_NOT_STARTED"
+            );
+          }
+
+          const configData =
+            configSnap.exists
+              ? configSnap.data() || {}
+              : {};
+
+          if (
+            configData.operationalCycleId !==
+            cycleId
+          ) {
+            throw new HttpsError(
+              "failed-precondition",
+              `CONFIG_CYCLE_MISMATCH: ${
+                configData.operationalCycleId ||
+                "null"
+              } != ${cycleId}`
+            );
+          }
+
+          const candidates = [];
+
+          opsSnap.docs.forEach((docSnap) => {
+            const op =
+              docSnap.data() || {};
+
+            if (scope === "GROUP") {
+
+              if (
+                op.category === category &&
+                Number(op.groupCapitalCop) ===
+                  Number(groupCapitalCop) &&
+                op.status !== "CONSOLIDATED"
+              ) {
+                candidates.push({
+                  ref: docSnap.ref,
+                  id: docSnap.id,
+                  op,
+                });
+              }
+
+              return;
+            }
+
+            // GLOBAL:
+            // consolidated != globalmente cerrado.
+            if (!op.globalClosedAt) {
+              candidates.push({
+                ref: docSnap.ref,
+                id: docSnap.id,
+                op,
+              });
+            }
+          });
+
+          if (candidates.length === 0) {
+            return {
+              success: true,
+              alreadyClosed: true,
+              scope,
+              cycleId,
+              closureId,
+              closedOperationsCount: 0,
+              totalUsdClosed: 0,
+              operationIds: [],
+              message:
+                scope === "GLOBAL"
+                  ? "No hay operaciones pendientes del Cierre Global."
+                  : "El grupo no tiene operaciones activas pendientes.",
+            };
+          }
+
+          if (candidates.length > 450) {
+            throw new HttpsError(
+              "resource-exhausted",
+              `Demasiadas operaciones para una sola transacci?n: ${candidates.length}.`
+            );
+          }
+
+          let totalUsdClosed = 0;
+          const operationIds = [];
+
+          candidates.forEach((item) => {
+
+            const op =
+              item.op || {};
+
+            totalUsdClosed +=
+              Number(op.amountUsd || 0);
+
+            operationIds.push(
+              item.id
+            );
+
+            if (scope === "GROUP") {
+
+              transaction.update(
+                item.ref,
+                {
+                  status:
+                    "CONSOLIDATED",
+
+                  consolidatedAt:
+                    op.consolidatedAt ||
+                    nowIso,
+
+                  consolidatedByUid:
+                    authUid,
+
+                  consolidatedByName:
+                    createdByName ||
+                    "SuperAdmin",
+
+                  updatedAt:
+                    nowIso,
+
+                  updatedByUid:
+                    authUid,
+                }
+              );
+
+              return;
+            }
+
+            transaction.update(
+              item.ref,
+              {
+                status:
+                  "CONSOLIDATED",
+
+                consolidatedAt:
+                  op.consolidatedAt ||
+                  nowIso,
+
+                consolidatedByUid:
+                  op.consolidatedByUid ||
+                  authUid,
+
+                consolidatedByName:
+                  op.consolidatedByName ||
+                  createdByName ||
+                  "SuperAdmin",
+
+                globalClosureId:
+                  closureId,
+
+                globalClosedAt:
+                  nowIso,
+
+                globalClosedByUid:
+                  authUid,
+
+                globalClosedByName:
+                  createdByName ||
+                  "SuperAdmin",
+
+                updatedAt:
+                  nowIso,
+
+                updatedByUid:
+                  authUid,
+              }
+            );
+          });
+
+          const auditRef =
+            db.collection("auditLogs")
+              .doc();
+
+          transaction.set(
+            auditRef,
+            {
+              id:
+                auditRef.id,
+
+              action:
+                scope === "GLOBAL"
+                  ? "DAILY_GLOBAL_OPERATIONS_CLOSED"
+                  : "DAILY_GROUP_OPERATIONS_CLOSED",
+
+              performedBy:
+                authUid,
+
+              performedByUid:
+                authUid,
+
+              performedByName:
+                createdByName ||
+                "SuperAdmin",
+
+              cycleId,
+
+              targetEntity:
+                scope === "GLOBAL"
+                  ? `GLOBAL_${cycleId}`
+                  : `${cycleId}_${category}_${groupCapitalCop}`,
+
+              details: {
+                scope,
+
+                category:
+                  scope === "GROUP"
+                    ? category
+                    : null,
+
+                groupCapitalCop:
+                  scope === "GROUP"
+                    ? groupCapitalCop
+                    : null,
+
+                closureId,
+
+                closedOperationsCount:
+                  candidates.length,
+
+                totalUsdClosed,
+
+                operationIds,
+              },
+
+              timestamp:
+                nowIso,
+
+              createdAt:
+                admin.firestore
+                  .FieldValue
+                  .serverTimestamp(),
+            }
+          );
+
+          return {
+            success: true,
+            alreadyClosed: false,
+
+            scope,
+            cycleId,
+            closureId,
+
+            closedOperationsCount:
+              candidates.length,
+
+            totalUsdClosed,
+
+            operationIds,
+
+            message:
+              scope === "GLOBAL"
+                ? `Cierre Global completado: ${candidates.length} operaci?n(es), $${totalUsdClosed.toFixed(2)} USD.`
+                : `Grupo consolidado: ${candidates.length} operaci?n(es), $${totalUsdClosed.toFixed(2)} USD.`,
+          };
+        }
+      );
+
+    } catch (err) {
+
+      console.error(
+        "[adminCloseDailyOperationsCallable]",
+        err
+      );
+
+      if (err instanceof HttpsError) {
+        throw err;
+      }
+
+      throw new HttpsError(
+        "internal",
+        err?.message ||
+        "Error cerrando operaciones."
+      );
+    }
+  }
+);
+
+
 exports.adminCloseCycleCallable = onCall(
   {
     region: "us-central1",
@@ -4026,6 +4455,14 @@ exports.adminCloseCycleCallable = onCall(
 
     // Generar un identificador único seguro (UUID v4) para este intento de cierre
     const closureAttemptId = crypto.randomUUID();
+
+    const closureNotificationJobId =
+      `cycle_close_notify_${targetCycleId}_${closureAttemptId}`;
+
+    const closureNotificationJobRef =
+      db
+        .collection("cycleClosureNotificationJobs")
+        .doc(closureNotificationJobId);
 
     // =========================================================================
     // GATE 1 Y ADQUISICIÓN ATÓMICA DEL LOCK DE CIERRE (TRANSACCIÓN SERVIDOR)
@@ -4719,6 +5156,18 @@ exports.adminCloseCycleCallable = onCall(
           totalGrossCop: totalGrossCopAtClose,
           totalUsersProfitCop: totalUsersProfitCopAtClose,
           totalAdminCommissionCop: totalAdminCommCopAtClose,
+
+          notificationsSent: false,
+          notificationsSentAt: null,
+
+          closureNotificationsStatus: "PENDING",
+          closureNotificationsJobId: closureNotificationJobId,
+          closureNotificationsExpected: null,
+          closureNotificationsCreated: 0,
+          closureNotificationsCompletedAt: null,
+          closureNotificationsFailedAt: null,
+          closureNotificationsLastError: null,
+
           isClosing: false,
           closingStartedAt: null,
           closingByUid: null,
@@ -4771,6 +5220,35 @@ exports.adminCloseCycleCallable = onCall(
             updatedAt: nowIso,
           },
           { merge: true }
+        );
+
+        transaction.set(
+          closureNotificationJobRef,
+          {
+            id: closureNotificationJobId,
+            cycleId: targetCycleId,
+            closureAttemptId,
+            closureVersion: newClosureVersion,
+
+            closingTrm: parsedClosingTrm,
+
+            createdByUid: authUid,
+            createdByName: adminName,
+
+            status: "PENDING",
+
+            sourceResultsCount:
+              definitiveUserResults.length,
+
+            expectedNotifications: null,
+            createdNotifications: 0,
+
+            createdAt: nowIso,
+            processingStartedAt: null,
+            completedAt: null,
+            failedAt: null,
+            lastError: null,
+          }
         );
       });
     } catch (err) {
@@ -4910,6 +5388,10 @@ exports.adminCloseCycleCallable = onCall(
       closingTrmSetByName: adminName,
       observedMarketTrmAtClose: observedMarketTrmAtClose ? Number(observedMarketTrmAtClose) : null,
       reportVersionId,
+
+      closureNotificationsJobId,
+      notificationsQueued: true,
+
       processedCount,
       appliedCount: appliedReinvestments.length,
       alreadyAppliedCount,
@@ -4928,6 +5410,714 @@ exports.adminCloseCycleCallable = onCall(
  * Permite a la administración SuperAdmin limpiar un lock de cierre huérfano de manera segura
  * validando que el closureAttemptId coincida con el lock activo y requiriendo confirmación explícita.
  */
+
+/**
+ * Automatic cycle-close notification worker.
+ *
+ * The job is created atomically by adminCloseCycleCallable.
+ * Notification IDs are deterministic to make retries idempotent.
+ */
+exports.onCycleClosureNotificationJobCreated = onDocumentCreated(
+  {
+    document:
+      "cycleClosureNotificationJobs/{jobId}",
+
+    region:
+      "us-central1",
+
+    retry:
+      true,
+  },
+
+  async (event) => {
+
+    const jobId =
+      event.params.jobId;
+
+    const jobRef =
+      db
+        .collection("cycleClosureNotificationJobs")
+        .doc(jobId);
+
+    const jobSnap =
+      await jobRef.get();
+
+    if (!jobSnap.exists) {
+      console.warn(
+        "[CycleClosureNotifications] missing job",
+        jobId
+      );
+
+      return;
+    }
+
+    const job =
+      jobSnap.data() || {};
+
+    if (job.status === "COMPLETED") {
+      console.log(
+        "[CycleClosureNotifications] already completed",
+        jobId
+      );
+
+      return;
+    }
+
+    const cycleId =
+      String(
+        job.cycleId || ""
+      ).trim();
+
+    const closingTrm =
+      Number(
+        job.closingTrm
+      );
+
+    const closureVersion =
+      Number(
+        job.closureVersion || 1
+      );
+
+    if (!cycleId) {
+      throw new Error(
+        "INVALID_JOB_CYCLE_ID"
+      );
+    }
+
+    if (
+      !Number.isFinite(closingTrm) ||
+      closingTrm <= 0
+    ) {
+      throw new Error(
+        "INVALID_JOB_CLOSING_TRM"
+      );
+    }
+
+    const cycleRef =
+      db
+        .collection("monthlyCycles")
+        .doc(cycleId);
+
+    const processingStartedAt =
+      new Date().toISOString();
+
+    await jobRef.set(
+      {
+        status:
+          "PROCESSING",
+
+        processingStartedAt,
+
+        attempts:
+          admin.firestore
+            .FieldValue
+            .increment(1),
+
+        lastError:
+          null,
+      },
+
+      {
+        merge:
+          true,
+      }
+    );
+
+    try {
+
+      // =====================================================
+      // VERIFY FINANCIAL CLOSE
+      // =====================================================
+
+      const cycleSnap =
+        await cycleRef.get();
+
+      if (!cycleSnap.exists) {
+        throw new Error(
+          `CYCLE_NOT_FOUND:${cycleId}`
+        );
+      }
+
+      const cycle =
+        cycleSnap.data() || {};
+
+      if (
+        cycle.status !== "CLOSED"
+      ) {
+        throw new Error(
+          `CYCLE_NOT_CLOSED:${cycle.status || "UNKNOWN"}`
+        );
+      }
+
+      const persistedClosingTrm =
+        Number(
+          cycle.closingTrm ||
+          cycle.trmApplied
+        );
+
+      if (
+        !Number.isFinite(
+          persistedClosingTrm
+        ) ||
+        persistedClosingTrm <= 0
+      ) {
+        throw new Error(
+          "CLOSING_TRM_NOT_PERSISTED"
+        );
+      }
+
+      if (
+        Math.abs(
+          persistedClosingTrm -
+          closingTrm
+        ) > 0.000001
+      ) {
+        throw new Error(
+          `CLOSING_TRM_MISMATCH:${persistedClosingTrm}:${closingTrm}`
+        );
+      }
+
+
+      // =====================================================
+      // READ FINAL USER RESULTS
+      // =====================================================
+
+      const resultSnap =
+        await db
+          .collection("cycleUserResults")
+          .where(
+            "cycleId",
+            "==",
+            cycleId
+          )
+          .get();
+
+      const recipients = [];
+
+      for (
+        const resultDoc of resultSnap.docs
+      ) {
+
+        const result =
+          resultDoc.data() || {};
+
+        const userUid =
+          String(
+            result.userUid ||
+            result.userId ||
+            ""
+          ).trim();
+
+        if (!userUid) {
+          throw new Error(
+            `RESULT_WITHOUT_UID:${resultDoc.id}`
+          );
+        }
+
+        const userSnap =
+          await db
+            .collection("users")
+            .doc(userUid)
+            .get();
+
+        const user =
+          userSnap.exists
+            ? userSnap.data() || {}
+            : {};
+
+        const role =
+          String(
+            user.role || ""
+          )
+            .trim()
+            .toUpperCase();
+
+        const userCode =
+          String(
+            result.userCode ||
+            user.userCode ||
+            ""
+          ).trim();
+
+        const isAdmin =
+          role === "ADMIN" ||
+          role === "SUPERADMIN" ||
+          userCode
+            .toUpperCase()
+            .startsWith("ADM");
+
+        if (isAdmin) {
+          continue;
+        }
+
+        const calc =
+          calculateUserFinancialResult(
+            {
+              totalUsdOperated:
+                Number(
+                  result.totalUsdOperated ||
+                  0
+                ),
+
+              trm:
+                closingTrm,
+
+              userPercentage:
+                result.userPercentage,
+
+              adminPercentage:
+                result.adminPercentage,
+            }
+          );
+
+        recipients.push(
+          {
+            resultRef:
+              resultDoc.ref,
+
+            userUid,
+
+            userCode,
+
+            userName:
+              String(
+                result.userName ||
+                user.fullName ||
+                "Inversionista"
+              ),
+
+            userEmail:
+              String(
+                result.email ||
+                user.email ||
+                ""
+              ),
+
+            totalUsdOperated:
+              calc.usdOperated,
+
+            totalGrossCop:
+              calc.totalGrossCop,
+
+            userPercentage:
+              calc.userPercentage,
+
+            userProfitCop:
+              calc.userProfitCop,
+
+            userProfitUsd:
+              calc.userProfitUsd,
+          }
+        );
+      }
+
+
+      // =====================================================
+      // CREATE DETERMINISTIC NOTIFICATIONS
+      // =====================================================
+
+      const sentAt =
+        new Date().toISOString();
+
+      const cycleName =
+        String(
+          cycle.name ||
+          cycleId
+        );
+
+      const chunkSize =
+        200;
+
+      for (
+        let offset = 0;
+        offset < recipients.length;
+        offset += chunkSize
+      ) {
+
+        const chunk =
+          recipients.slice(
+            offset,
+            offset + chunkSize
+          );
+
+        const batch =
+          db.batch();
+
+        for (
+          const recipient of chunk
+        ) {
+
+          const notificationId =
+            `notif_cycle_close_${cycleId}_v${closureVersion}_${recipient.userUid}`;
+
+          const notificationRef =
+            db
+              .collection("notifications")
+              .doc(notificationId);
+
+          const formattedTrm =
+            closingTrm.toLocaleString(
+              "es-CO",
+              {
+                maximumFractionDigits: 2,
+              }
+            );
+
+          const formattedUsd =
+            Number(
+              recipient.totalUsdOperated
+            ).toLocaleString(
+              "es-CO",
+              {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              }
+            );
+
+          const formattedGrossCop =
+            Math.round(
+              Number(
+                recipient.totalGrossCop
+              )
+            ).toLocaleString(
+              "es-CO"
+            );
+
+          const formattedProfitCop =
+            Math.round(
+              Number(
+                recipient.userProfitCop
+              )
+            ).toLocaleString(
+              "es-CO"
+            );
+
+          const message =
+            `Hola ${recipient.userName}, el ciclo ${cycleName} fue cerrado con una TRM definitiva de $${formattedTrm} COP/USD. ` +
+            `Tu operacion acumulada fue de $${formattedUsd} USD, equivalente a $${formattedGrossCop} COP. ` +
+            `Tu ganancia correspondiente es de $${formattedProfitCop} COP.`;
+
+          batch.set(
+            notificationRef,
+
+            {
+              id:
+                notificationId,
+
+              userId:
+                recipient.userUid,
+
+              userUid:
+                recipient.userUid,
+
+              userCode:
+                recipient.userCode,
+
+              userName:
+                recipient.userName,
+
+              userEmail:
+                recipient.userEmail,
+
+              cycleId,
+
+              type:
+                "MONTHLY_CLOSURE",
+
+              targetType:
+                "INDIVIDUAL",
+
+              targetUserUid:
+                recipient.userUid,
+
+              targetUids: [
+                recipient.userUid,
+              ],
+
+              authorizedUids: [
+                recipient.userUid,
+              ],
+
+              title:
+                "Cierre de ciclo completado",
+
+              message,
+
+              payload: {
+                cycleId,
+
+                usdAmount:
+                  recipient.totalUsdOperated,
+
+                copAmount:
+                  recipient.totalGrossCop,
+
+                userProfitCop:
+                  recipient.userProfitCop,
+
+                userProfitUsd:
+                  recipient.userProfitUsd,
+
+                userPercentage:
+                  recipient.userPercentage,
+
+                trmUsed:
+                  closingTrm,
+
+                closingTrm,
+
+                closureVersion,
+
+                closureNotificationJobId:
+                  jobId,
+              },
+
+              isRead:
+                false,
+
+              readAt:
+                null,
+
+              sentAt,
+
+              createdAt:
+                sentAt,
+
+              createdByUid:
+                job.createdByUid ||
+                "",
+
+              createdByName:
+                job.createdByName ||
+                "Cycle Close System",
+            },
+
+            {
+              merge:
+                true,
+            }
+          );
+
+          batch.set(
+            recipient.resultRef,
+
+            {
+              notificationStatus:
+                "SENT",
+
+              notificationSentAt:
+                sentAt,
+            },
+
+            {
+              merge:
+                true,
+            }
+          );
+        }
+
+        await batch.commit();
+      }
+
+
+      // =====================================================
+      // COMPLETE JOB
+      // =====================================================
+
+      await Promise.all(
+        [
+          cycleRef.set(
+            {
+              notificationsSent:
+                true,
+
+              notificationsSentAt:
+                sentAt,
+
+              closureNotificationsStatus:
+                "COMPLETED",
+
+              closureNotificationsJobId:
+                jobId,
+
+              closureNotificationsExpected:
+                recipients.length,
+
+              closureNotificationsCreated:
+                recipients.length,
+
+              closureNotificationsCompletedAt:
+                sentAt,
+
+              closureNotificationsFailedAt:
+                null,
+
+              closureNotificationsLastError:
+                null,
+            },
+
+            {
+              merge:
+                true,
+            }
+          ),
+
+          jobRef.set(
+            {
+              status:
+                "COMPLETED",
+
+              expectedNotifications:
+                recipients.length,
+
+              createdNotifications:
+                recipients.length,
+
+              completedAt:
+                sentAt,
+
+              failedAt:
+                null,
+
+              lastError:
+                null,
+            },
+
+            {
+              merge:
+                true,
+            }
+          ),
+
+          db
+            .collection("auditLogs")
+            .doc(
+              `cycle_close_notifications_${jobId}`
+            )
+            .set(
+              {
+                action:
+                  "CYCLE_CLOSURE_NOTIFICATIONS_CREATED",
+
+                performedBy:
+                  job.createdByUid ||
+                  "SYSTEM",
+
+                performedByName:
+                  job.createdByName ||
+                  "Cycle Close System",
+
+                cycleId,
+
+                targetEntity:
+                  cycleId,
+
+                details: {
+                  jobId,
+                  closingTrm,
+                  closureVersion,
+
+                  expectedNotifications:
+                    recipients.length,
+
+                  createdNotifications:
+                    recipients.length,
+                },
+
+                timestamp:
+                  admin.firestore
+                    .FieldValue
+                    .serverTimestamp(),
+              },
+
+              {
+                merge:
+                  true,
+              }
+            ),
+        ]
+      );
+
+      console.log(
+        "[CycleClosureNotifications] COMPLETED",
+        {
+          cycleId,
+          jobId,
+          createdNotifications:
+            recipients.length,
+        }
+      );
+
+    } catch (err) {
+
+      const message =
+        err?.message ||
+        String(err);
+
+      const failedAt =
+        new Date().toISOString();
+
+      console.error(
+        "[CycleClosureNotifications] FAILED",
+        {
+          cycleId,
+          jobId,
+          error:
+            message,
+        }
+      );
+
+      await Promise.allSettled(
+        [
+          jobRef.set(
+            {
+              status:
+                "FAILED",
+
+              failedAt,
+
+              lastError:
+                message,
+            },
+
+            {
+              merge:
+                true,
+            }
+          ),
+
+          cycleRef.set(
+            {
+              notificationsSent:
+                false,
+
+              closureNotificationsStatus:
+                "FAILED",
+
+              closureNotificationsJobId:
+                jobId,
+
+              closureNotificationsFailedAt:
+                failedAt,
+
+              closureNotificationsLastError:
+                message,
+            },
+
+            {
+              merge:
+                true,
+            }
+          ),
+        ]
+      );
+
+      throw err;
+    }
+  }
+);
+
+
 exports.adminUnlockCycleCallable = onCall(
   {
     region: "us-central1",
@@ -8210,17 +9400,17 @@ exports.adminCreateNextCycleCallable = onCall(
         }
 
         const sourceData = sourceSnap.data() || {};
-        if (sourceData.status !== "OPEN" && sourceData.status !== "REOPENED") {
-          throw new HttpsError(
-            "failed-precondition",
-            `SOURCE_NOT_OPEN: El ciclo origen '${cleanSourceCycleId}' está en estado '${sourceData.status}'. Solo ciclos OPEN o REOPENED admiten crear sucesor.`
-          );
-        }
 
-        if (sourceData.operationalStatus !== "STARTED") {
+        const sourceIsStarted =
+          (sourceData.status === "OPEN" || sourceData.status === "REOPENED") &&
+          sourceData.operationalStatus === "STARTED";
+
+        const sourceIsClosed = sourceData.status === "CLOSED";
+
+        if (!sourceIsStarted && !sourceIsClosed) {
           throw new HttpsError(
             "failed-precondition",
-            `SOURCE_NOT_STARTED: El ciclo origen '${cleanSourceCycleId}' tiene operationalStatus '${sourceData.operationalStatus || "UNDEFINED"}'. Solo ciclos en estado STARTED admiten crear sucesor.`
+            `SOURCE_NOT_ELIGIBLE: El ciclo origen '${cleanSourceCycleId}' debe estar STARTED o CLOSED para crear su sucesor. Estado actual: ${sourceData.status || "UNDEFINED"} / ${sourceData.operationalStatus || "UNDEFINED"}.`
           );
         }
 
@@ -8233,10 +9423,40 @@ exports.adminCreateNextCycleCallable = onCall(
 
         // D. Verificación de configuración canónica (settings/global_config)
         const configData = configSnap.exists ? configSnap.data() || {} : {};
-        if (configData.operationalCycleId && configData.operationalCycleId !== cleanSourceCycleId) {
+
+        const hasOperationalCycle =
+          configData.operationalCycleId !== null &&
+          configData.operationalCycleId !== undefined &&
+          configData.operationalCycleId !== "";
+
+        const hasPreparingCycle =
+          configData.preparingCycleId !== null &&
+          configData.preparingCycleId !== undefined &&
+          configData.preparingCycleId !== "";
+
+        if (hasPreparingCycle) {
           throw new HttpsError(
             "failed-precondition",
-            `CONFIG_CYCLE_MISMATCH: settings/global_config.operationalCycleId (${configData.operationalCycleId}) no coincide con el ciclo origen indicado (${cleanSourceCycleId}).`
+            `PREPARING_CYCLE_ALREADY_EXISTS: Ya existe un ciclo en preparacion (${configData.preparingCycleId}).`
+          );
+        }
+
+        if (sourceIsStarted) {
+          if (
+            !hasOperationalCycle ||
+            configData.operationalCycleId !== cleanSourceCycleId
+          ) {
+            throw new HttpsError(
+              "failed-precondition",
+              `CONFIG_CYCLE_MISMATCH: operationalCycleId (${configData.operationalCycleId || "null"}) no coincide con el ciclo origen (${cleanSourceCycleId}).`
+            );
+          }
+        }
+
+        if (sourceIsClosed && hasOperationalCycle) {
+          throw new HttpsError(
+            "failed-precondition",
+            `POST_CLOSE_OPERATIONAL_CYCLE_EXISTS: Existe otro ciclo operativo (${configData.operationalCycleId}).`
           );
         }
 
@@ -8253,6 +9473,10 @@ exports.adminCreateNextCycleCallable = onCall(
           previousCycleId: cleanSourceCycleId,
           nextCycleId: null,
           cohortVersion: 1,
+          sourceClosureVersion: sourceIsClosed
+            ? Number(sourceData.closureVersion || 1)
+            : null,
+          preparationNeedsReview: false,
           trmApplied: null,
           closingTrm: null,
           closingTrmSetAt: null,
@@ -8281,14 +9505,22 @@ exports.adminCreateNextCycleCallable = onCall(
           updatedAt: nowIso,
         });
 
-        // 3. Actualizar configuración canónica (settings/global_config)
-        // Solo preparingCycleId cambia; operationalCycleId y activeCycleId se mantienen inalterados
+        // 3. Actualizar configuracion canonica
+        const configUpdate = {
+          preparingCycleId: candidateCycleId,
+          updatedAt: nowIso,
+        };
+
+        // Si A ya estaba CLOSED, B se convierte en el ciclo activo visible,
+        // pero sigue PREPARING hasta que el SuperAdmin haga START.
+        if (sourceIsClosed) {
+          configUpdate.operationalCycleId = null;
+          configUpdate.activeCycleId = candidateCycleId;
+        }
+
         transaction.set(
           configRef,
-          {
-            preparingCycleId: candidateCycleId,
-            updatedAt: nowIso,
-          },
+          configUpdate,
           { merge: true }
         );
 
