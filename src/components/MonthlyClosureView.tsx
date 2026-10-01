@@ -166,7 +166,14 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   // Si el ciclo está CERRADO: snapshot histórico inmutable (no filtrar usuarios que hoy no existan).
   // Si el ciclo está ACTIVO: filtrar estrictamente a usuarios que actualmente forman parte del ciclo activo.
   // Usuarios elegibles activos para el ciclo operativo actual (USER con status ACTIVE)
-  const eligibleActiveUsers = activeUsers.filter((u) => u.status === 'ACTIVE' && u.role === 'USER');
+  const eligibleActiveUsers = activeUsers.filter(
+    (u) =>
+      u.status === 'ACTIVE' &&
+      (
+        u.role === 'USER' ||
+        u.participatesInTrading === true
+      )
+  );
   const eligibleActiveUids = new Set(eligibleActiveUsers.map((u) => u.uid || u.id));
 
   const userResults = usesFrozenCycleSnapshot

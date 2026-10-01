@@ -26,10 +26,10 @@ export const BITACORA_RANGES: Record<BitacoraCategory, { min: number; max: numbe
  * - NEGRA / WHALE: >= $60.000.000 y <= $1.000.000.000
  */
 export function getCategoryForCapital(capital: number): BitacoraCategory {
-  if (capital >= 60_000_000) {
+  if (capital > 60_000_000) {
     return 'NEGRA';
   }
-  if (capital >= 10_000_000) {
+  if (capital > 10_000_000) {
     return 'VERDE';
   }
   return 'AZUL';
@@ -40,10 +40,10 @@ export function validateCapitalForCategory(capital: number, category: BitacoraCa
     return capital >= 4_000_000 && capital < 10_000_000;
   }
   if (category === 'VERDE') {
-    return capital >= 10_000_000 && capital < 60_000_000;
+    return capital > 10_000_000 && capital < 60_000_000;
   }
   if (category === 'NEGRA') {
-    return capital >= 60_000_000 && capital <= 1_000_000_000;
+    return capital > 60_000_000 && capital <= 1_000_000_000;
   }
   return false;
 }

@@ -22,6 +22,7 @@ import {
   downloadSampleBitacoraExcel,
 } from '../lib/excelMigrationService';
 import { dataStore } from '../lib/dataStore';
+import { firestoreService } from '../lib/firestoreService';
 import { useAuth } from '../context/AuthContext';
 
 interface ExcelBitacoraImportModalProps {
@@ -60,9 +61,23 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
 
   const cycles = dataStore.getCycles();
   const activeCycle = dataStore.getActiveCycle();
-  const [selectedCycleId, setSelectedCycleId] = useState<string>(
-    cycle?.cycleId || defaultCycleId || activeCycle.cycleId
-  );
+  const globalConfig = dataStore.getConfig();
+  const preparingCycleId =
+    String(globalConfig.preparingCycleId || '').trim();
+
+  const preparingCycle =
+    cycles.find(
+      (c) =>
+        (c.cycleId === preparingCycleId ||
+          c.id === preparingCycleId) &&
+        c.status === 'OPEN' &&
+        c.operationalStatus === 'PREPARING'
+    ) || null;
+
+  const [selectedCycleId, setSelectedCycleId] =
+    useState<string>(
+      preparingCycleId
+    );
 
   const [autoCreateUsers, setAutoCreateUsers] = useState<boolean>(true);
   const [updateExistingCapital, setUpdateExistingCapital] = useState<boolean>(true);
@@ -83,9 +98,15 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
       const forceCat = targetCategory === 'ALL' ? undefined : targetCategory;
       const result = await parseExcelBitacoraFile(selectedFile, existingUsers, forceCat);
 
-      if (result.detectedCycleId) {
-        setSelectedCycleId(result.detectedCycleId);
-      }
+      // El ciclo detectado dentro del Excel es solo
+      // metadata historica. Nunca puede seleccionar
+      // el ciclo financiero autoritativo.
+      setSelectedCycleId(
+        String(
+          globalConfig.preparingCycleId || ''
+        ).trim()
+      );
+
       setRows(result.rows);
       setParseErrors(result.errors);
     } catch (err: any) {
@@ -124,49 +145,246 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
         const updated = { ...r, [field]: value };
         if (field === 'capitalCop') {
           const cap = Number(value) || 0;
-          if (cap >= 50000000) updated.category = 'NEGRA';
-          else if (cap >= 10000000) updated.category = 'VERDE';
-          else updated.category = 'AZUL';
+          if (cap > 60000000) {
+            updated.category = 'NEGRA';
+          } else if (cap > 10000000) {
+            updated.category = 'VERDE';
+          } else {
+            updated.category = 'AZUL';
+          }
         }
         return updated;
       })
     );
   };
 
-  const handleImport = () => {
+  const handleImport = async () => {
     if (rows.length === 0) return;
 
+    setImportSuccessMessage(null);
+    setParseErrors([]);
     setIsImporting(true);
-    try {
-      const result = dataStore.importBitacoraFromExcel({
-        cycleId: selectedCycleId,
-        rows,
-        autoCreateUsers,
-        updateExistingCapital,
-        adminUid: currentAuthUser?.uid || 'admin_root_uid',
-        adminName: currentAuthUser?.fullName || 'Administrador Principal',
-      });
 
-      // Trigger celebration confetti
-      try {
-        confetti({
-          particleCount: 80,
-          spread: 70,
-          origin: { y: 0.6 },
-        });
-      } catch (e) {
-        // Safe fallback
+    try {
+      const latestConfig =
+        dataStore.getConfig();
+
+      const authoritativePreparingCycleId =
+        String(
+          latestConfig.preparingCycleId || ''
+        ).trim();
+
+      if (!authoritativePreparingCycleId) {
+        throw new Error(
+          'No existe un ciclo PREPARING autoritativo. ' +
+          'Crea o prepara el siguiente ciclo antes de importar inversionistas.'
+        );
+      }
+
+      const targetCycle =
+        dataStore
+          .getCycles()
+          .find(
+            (c) =>
+              (
+                c.cycleId ===
+                  authoritativePreparingCycleId ||
+                c.id ===
+                  authoritativePreparingCycleId
+              )
+          );
+
+      if (
+        !targetCycle ||
+        targetCycle.status !== 'OPEN' ||
+        targetCycle.operationalStatus !==
+          'PREPARING'
+      ) {
+        throw new Error(
+          'El ciclo de ingreso no esta disponible ' +
+          'en estado OPEN + PREPARING.'
+        );
+      }
+
+      setSelectedCycleId(
+        authoritativePreparingCycleId
+      );
+
+      const requestRows =
+        rows.map(
+          (row, index) => {
+            const raw =
+              row as any;
+
+            // Regla fija del negocio:
+            // 50% inversionista / 50% administracion.
+            const userPercentage = 50;
+
+            return {
+              rawId:
+                String(
+                  raw.rawId ??
+                  raw.id ??
+                  index + 1
+                ),
+
+              clientName:
+                String(
+                  raw.clientName || ''
+                ).trim(),
+
+              fullName:
+                String(
+                  raw.clientName ||
+                  raw.fullName ||
+                  ''
+                ).trim(),
+
+              email:
+                String(
+                  raw.email || ''
+                ).trim(),
+
+              phone:
+                String(
+                  raw.phone || ''
+                ).trim(),
+
+              capitalCop:
+                Number(
+                  raw.capitalCop
+                ) || 0,
+
+              currentCapital:
+                Number(
+                  raw.capitalCop
+                ) || 0,
+
+              matchedUserCode:
+                String(
+                  raw.matchedUserCode || ''
+                ).trim(),
+
+              userPercentage: 50,
+
+              adminPercentage: 50,
+
+              paymentMethod:
+                String(
+                  raw.paymentMethod || ''
+                ).trim(),
+
+              paymentDetails:
+                String(
+                  raw.paymentDetails || ''
+                ).trim(),
+            };
+          }
+        );
+
+      const clientRequestId =
+        (
+          globalThis.crypto &&
+          typeof globalThis.crypto.randomUUID ===
+            'function'
+        )
+          ? globalThis.crypto.randomUUID()
+          : (
+              'excel_' +
+              Date.now().toString(36) +
+              '_' +
+              Math.random()
+                .toString(36)
+                .slice(2)
+            );
+
+      const result =
+        await firestoreService
+          .adminBulkImportInvestors({
+            targetCycleId:
+              authoritativePreparingCycleId,
+
+            clientRequestId,
+
+            rows:
+              requestRows,
+          });
+
+      const issues =
+        result.results
+          .filter(
+            (item) =>
+              item.status !== 'CREATED'
+          )
+          .map(
+            (item) => {
+              const name =
+                item.fullName ||
+                `Fila ${item.index + 1}`;
+
+              return (
+                `${name}: ` +
+                `${item.message || item.code}`
+              );
+            }
+          );
+
+      if (issues.length > 0) {
+        setParseErrors(
+          issues.slice(0, 50)
+        );
       }
 
       setImportSuccessMessage(
-        `¡Importación exitosa! Se procesaron ${result.resultsImportedCount} registros: ${result.createdUsersCount} nuevos usuarios creados, ${result.updatedUsersCount} inversionistas actualizados.`
+        '\u00a1Importaci\u00f3n procesada por el servidor! ' +
+        `${result.createdUsersCount} creados, ` +
+        `${result.skippedUsersCount} omitidos y ` +
+        `${result.failedUsersCount} con error. ` +
+        `Ciclo PREPARING: ${result.targetCycleId}.`
       );
 
+      try {
+        confetti({
+          particleCount:
+            result.createdUsersCount > 0
+              ? 80
+              : 20,
+          spread: 70,
+          origin: { y: 0.6 },
+        });
+      } catch {
+        // Confetti es opcional.
+      }
+
+      // Firestore listener actualizara allUsers.
+      // No insertamos usuarios ficticios en memoria.
       setTimeout(() => {
-        if (onSuccess) onSuccess();
-      }, 1200);
+        if (onSuccess) {
+          onSuccess();
+        }
+
+        if (onImportSuccess) {
+          onImportSuccess();
+        }
+      }, 500);
+
     } catch (err: any) {
-      setParseErrors([err.message || 'Error al guardar la importación en el sistema.']);
+      console.error(
+        '[ExcelBulkImport] Error:',
+        err
+      );
+
+      const backendMessage =
+        err?.message ||
+        err?.details ||
+        'No fue posible completar la importacion.';
+
+      setParseErrors([
+        String(backendMessage),
+      ]);
+
+      setImportSuccessMessage(null);
+
     } finally {
       setIsImporting(false);
     }
@@ -220,7 +438,7 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
               </label>
               <select
                 value={selectedCycleId}
-                onChange={(e) => setSelectedCycleId(e.target.value)}
+                onChange={(e) => setSelectedCycleId(e.target.value)} disabled
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
               >
                 {cycles.map((c) => (
@@ -481,7 +699,7 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
           <div className="text-xs text-slate-400 flex items-center gap-1.5">
             <Info className="w-4 h-4 text-blue-400 shrink-0" />
             <span>
-              Los datos se guardarán de forma atómica en los perfiles de usuario y en el ciclo {selectedCycleId}.
+              Los nuevos inversionistas se guardarán en Firestore como pendientes de activación para el ciclo PREPARING {selectedCycleId}. No se crean liquidaciones ni resultados del ciclo desde el Excel.
             </span>
           </div>
 
@@ -496,7 +714,7 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
             <button
               type="button"
               onClick={handleImport}
-              disabled={rows.length === 0 || isImporting}
+              disabled={rows.length === 0 || isImporting || !preparingCycleId || !preparingCycle}
               className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-bold shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition cursor-pointer flex-1 sm:flex-none"
             >
               <Sparkles className="w-4 h-4" />

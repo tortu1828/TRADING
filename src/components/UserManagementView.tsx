@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Users,
   UserPlus,
@@ -146,6 +146,12 @@ export const UserManagementView: React.FC = () => {
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Participación financiera del SuperAdmin Juanes
+  const [selfAdminCapital, setSelfAdminCapital] = useState('');
+  const [isConfiguringSelfAdmin, setIsConfiguringSelfAdmin] = useState(false);
+  const [selfAdminConfigError, setSelfAdminConfigError] = useState<string | null>(null);
+  const [selfAdminConfigSuccess, setSelfAdminConfigSuccess] = useState<string | null>(null);
+
   const config = dataStore.getConfig();
   const preparingCycleId = config?.preparingCycleId;
   const preparingCycle = preparingCycleId ? dataStore.getCycleById(preparingCycleId) : null;
@@ -158,8 +164,62 @@ export const UserManagementView: React.FC = () => {
   const detectedCategory = getCategoryForCapital(numericCapital);
   const adminSplit = 100 - (parseFloat(formUserSplit) || 50);
 
+  // -------------------------------------------------------
+  // SuperAdmin Juanes como participante financiero.
+  //
+  // El rol ADMIN se conserva. La inversión es una dimensión
+  // financiera independiente.
+  // -------------------------------------------------------
+
+  const juanesFinancialAdmin =
+    allUsers.find(
+      (user) =>
+        (user.email || '')
+          .trim()
+          .toLowerCase() ===
+        'juanes9802@gmail.com'
+    ) || null;
+
+  const selfAdminCapitalNumber =
+    Number(selfAdminCapital || 0);
+
+  const selfAdminCapitalValid =
+    Number.isFinite(selfAdminCapitalNumber) &&
+    selfAdminCapitalNumber >= 4_000_000 &&
+    selfAdminCapitalNumber <= Number.MAX_SAFE_INTEGER;
+
+  const selfAdminCategory =
+    selfAdminCapitalValid
+      ? getCategoryForCapital(selfAdminCapitalNumber)
+      : null;
+
+  const selfAdminTargetCycleId =
+    preparingCycleId || '';
+
+  const selfAdminPreparingCycleValid =
+    !!preparingCycle &&
+    preparingCycle.status === 'OPEN' &&
+    preparingCycle.operationalStatus === 'PREPARING' &&
+    !!selfAdminTargetCycleId;
+
+  const selfAdminTargetUid =
+    juanesFinancialAdmin?.uid ||
+    juanesFinancialAdmin?.id ||
+    '';
+
+  const canConfigureSelfAdmin =
+    isSuperAdmin &&
+    !!selfAdminTargetUid &&
+    selfAdminCapitalValid &&
+    selfAdminPreparingCycleValid;
+
   const filteredUsers = allUsers.filter((u) => {
-    if (u.role === 'ADMIN') return false; // Hide system admin from client table
+    if (
+      u.role === 'ADMIN' &&
+      u.participatesInTrading !== true
+    ) {
+      return false;
+    }
     if (selectedCategory !== 'ALL' && u.category !== selectedCategory) return false;
     if (selectedStatus !== 'ALL') {
       if (selectedStatus === 'PENDING_CLAIM') {
@@ -179,6 +239,133 @@ export const UserManagementView: React.FC = () => {
     }
     return true;
   });
+
+  // Precargar capital de Juanes cuando ya tenga
+  // participación financiera configurada.
+  useEffect(() => {
+    if (
+      juanesFinancialAdmin?.participatesInTrading === true &&
+      !selfAdminCapital
+    ) {
+      setSelfAdminCapital(
+        String(
+          juanesFinancialAdmin.currentCapital || ''
+        )
+      );
+    }
+  }, [
+    juanesFinancialAdmin?.participatesInTrading,
+    juanesFinancialAdmin?.currentCapital,
+  ]);
+
+  const handleConfigureSelfAdminInvestment = async () => {
+    setSelfAdminConfigError(null);
+    setSelfAdminConfigSuccess(null);
+
+    if (!isSuperAdmin) {
+      setSelfAdminConfigError(
+        'Solo SuperAdmin puede configurar esta participación financiera.'
+      );
+      return;
+    }
+
+    if (!juanesFinancialAdmin) {
+      setSelfAdminConfigError(
+        'No se encontró la cuenta de juanes9802@gmail.com dentro de los usuarios cargados.'
+      );
+      return;
+    }
+
+    if (!selfAdminTargetUid) {
+      setSelfAdminConfigError(
+        'La cuenta de Juanes no tiene un UID válido.'
+      );
+      return;
+    }
+
+    if (!selfAdminPreparingCycleValid) {
+      setSelfAdminConfigError(
+        'No existe un ciclo PREPARING autoritativo disponible.'
+      );
+      return;
+    }
+
+    if (!selfAdminCapitalValid) {
+      setSelfAdminConfigError(
+        'El capital debe ser igual o superior a $4.000.000 COP.'
+      );
+      return;
+    }
+
+    const category =
+      getCategoryForCapital(
+        selfAdminCapitalNumber
+      );
+
+    const cycleName =
+      preparingCycle?.name ||
+      selfAdminTargetCycleId;
+
+    const confirmMessage =
+      `Configurar participación financiera de Juanes\n\n` +
+      `Capital: ${formatCOP(selfAdminCapitalNumber)}\n` +
+      `Bitácora: ${category}\n` +
+      `Ciclo: ${cycleName}\n` +
+      `Distribución: 100% Juanes / 0% administración\n` +
+      `Modo: SELF_ADMIN\n\n` +
+      `El rol ADMIN / SuperAdmin NO cambiar?.\n\n` +
+      `¿Confirmar configuración?`;
+
+    if (
+      !window.confirm(confirmMessage)
+    ) {
+      return;
+    }
+
+    setIsConfiguringSelfAdmin(true);
+
+    try {
+      const response =
+        await firestoreService
+          .adminConfigureTradingParticipant({
+            targetUid:
+              selfAdminTargetUid,
+
+            currentCapital:
+              selfAdminCapitalNumber,
+
+            targetCycleId:
+              selfAdminTargetCycleId,
+          });
+
+      setSelfAdminCapital(
+        String(
+          response.participant.currentCapital
+        )
+      );
+
+      setSelfAdminConfigSuccess(
+        response.message ||
+        'Participación financiera configurada correctamente.'
+      );
+    } catch (error: any) {
+      console.error(
+        '[SELF_ADMIN] Error configurando participación financiera:',
+        error
+      );
+
+      const rawMessage =
+        error?.message ||
+        error?.details ||
+        'No fue posible configurar la participación financiera.';
+
+      setSelfAdminConfigError(
+        String(rawMessage)
+      );
+    } finally {
+      setIsConfiguringSelfAdmin(false);
+    }
+  };
 
   const handleOpenAdd = () => {
     setCreateMode('PENDING');
@@ -585,7 +772,7 @@ ${directLink}
             className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-bold text-xs text-slate-400 hover:text-slate-100 transition cursor-pointer"
           >
             <Users className="w-4 h-4 text-blue-400" />
-            <span>Inversionistas Registrados ({allUsers.filter((u) => u.role === 'USER').length})</span>
+            <span>Inversionistas Registrados ({allUsers.filter((u) => u.role === 'USER' || u.participatesInTrading === true).length})</span>
           </button>
           <button
             onClick={() => setSubTab('queue')}
@@ -630,6 +817,231 @@ ${directLink}
           )}
         </button>
       </div>
+
+      {/* PARTICIPACIÓN FINANCIERA SUPERADMIN */}
+      {isSuperAdmin && (
+        <div className="rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-950/60 via-slate-900 to-slate-950 shadow-xl overflow-hidden">
+          <div className="p-4 sm:p-5 border-b border-violet-500/20">
+            <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-violet-500/10 border border-violet-500/30 flex items-center justify-center shrink-0">
+                  <ShieldCheck className="w-5 h-5 text-violet-300" />
+                </div>
+
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm sm:text-base font-black text-slate-100">
+                      Participación financiera de Juanes
+                    </h3>
+
+                    <span className="px-2 py-0.5 rounded-full border border-violet-500/30 bg-violet-500/10 text-violet-300 text-[10px] font-black">
+                      SELF_ADMIN
+                    </span>
+
+                    {juanesFinancialAdmin?.participatesInTrading === true && (
+                      <span className="px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-[10px] font-black">
+                        ACTIVA
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="mt-1 text-xs text-slate-400 max-w-2xl">
+                    Juanes conserva su rol ADMIN / SuperAdmin y además participa como inversionista.
+                    Su resultado financiero es 100% propio y genera 0% de comisión administrativa.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center shrink-0">
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2">
+                  <p className="text-[9px] uppercase font-bold text-slate-500">
+                    Rol
+                  </p>
+                  <p className="text-xs font-black text-violet-300">
+                    ADMIN
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2">
+                  <p className="text-[9px] uppercase font-bold text-slate-500">
+                    Juanes
+                  </p>
+                  <p className="text-xs font-black text-emerald-300">
+                    100%
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2">
+                  <p className="text-[9px] uppercase font-bold text-slate-500">
+                    Admin
+                  </p>
+                  <p className="text-xs font-black text-slate-300">
+                    0%
+                  </p>
+                </div>
+
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2">
+                  <p className="text-[9px] uppercase font-bold text-slate-500">
+                    Bitácora
+                  </p>
+                  <p
+                    className={`text-xs font-black ${
+                      selfAdminCategory === 'NEGRA'
+                        ? 'text-slate-100'
+                        : selfAdminCategory === 'VERDE'
+                        ? 'text-emerald-300'
+                        : selfAdminCategory === 'AZUL'
+                        ? 'text-blue-300'
+                        : 'text-slate-500'
+                    }`}
+                  >
+                    {selfAdminCategory || '?'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-4 sm:p-5 grid grid-cols-1 xl:grid-cols-[1.2fr_1fr_auto] gap-4 items-end">
+            <div>
+              <label className="block text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5">
+                Capital de Juanes (COP)
+              </label>
+
+              <input
+                type="text"
+                inputMode="numeric"
+                value={selfAdminCapital}
+                onChange={(e) => {
+                  const clean =
+                    e.target.value.replace(/[^\d]/g, '');
+
+                  setSelfAdminCapital(clean);
+                  setSelfAdminConfigError(null);
+                  setSelfAdminConfigSuccess(null);
+                }}
+                placeholder="Ej: 10500000000"
+                className="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-slate-100 font-mono text-sm focus:outline-none focus:border-violet-500"
+              />
+
+              <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px]">
+                <span className="text-slate-500">
+                  Mínimo: $4.000.000
+                </span>
+
+                {selfAdminCapitalNumber > 0 && (
+                  <span className="text-violet-300 font-mono">
+                    {formatCOP(selfAdminCapitalNumber)}
+                  </span>
+                )}
+
+                {selfAdminCapitalNumber > 60_000_000 && (
+                  <span className="text-slate-300 font-bold">
+                    NEGRA · sin tope comercial
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5">
+                Ciclo de ingreso
+              </p>
+
+              <div
+                className={`min-h-[42px] px-3 py-2.5 rounded-xl border ${
+                  selfAdminPreparingCycleValid
+                    ? 'border-emerald-500/30 bg-emerald-500/5'
+                    : 'border-amber-500/30 bg-amber-500/5'
+                }`}
+              >
+                {selfAdminPreparingCycleValid ? (
+                  <>
+                    <p className="text-xs font-black text-emerald-300">
+                      {preparingCycle?.name || 'Ciclo en preparación'}
+                    </p>
+
+                    <p className="text-[9px] font-mono text-slate-500 truncate">
+                      {selfAdminTargetCycleId}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs font-bold text-amber-300">
+                    No hay ciclo PREPARING disponible
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleConfigureSelfAdminInvestment}
+              disabled={
+                !canConfigureSelfAdmin ||
+                isConfiguringSelfAdmin
+              }
+              className="h-[42px] px-4 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white text-xs font-black transition flex items-center justify-center gap-2 whitespace-nowrap"
+            >
+              <ShieldCheck className="w-4 h-4" />
+
+              {isConfiguringSelfAdmin
+                ? 'CONFIGURANDO...'
+                : juanesFinancialAdmin?.participatesInTrading === true
+                ? 'ACTUALIZAR INVERSIÓN'
+                : 'CONFIGURAR INVERSIÓN'}
+            </button>
+          </div>
+
+          {!juanesFinancialAdmin && (
+            <div className="mx-4 sm:mx-5 mb-4 px-3 py-2 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs">
+              No se encontró en memoria la cuenta juanes9802@gmail.com.
+            </div>
+          )}
+
+          {selfAdminConfigError && (
+            <div className="mx-4 sm:mx-5 mb-4 px-3 py-2 rounded-xl border border-red-500/30 bg-red-500/10 text-red-300 text-xs break-words">
+              {selfAdminConfigError}
+            </div>
+          )}
+
+          {selfAdminConfigSuccess && (
+            <div className="mx-4 sm:mx-5 mb-4 px-3 py-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 text-xs">
+              {selfAdminConfigSuccess}
+            </div>
+          )}
+
+          {juanesFinancialAdmin?.participatesInTrading === true && (
+            <div className="mx-4 sm:mx-5 mb-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+                <p className="text-[9px] uppercase text-slate-500 font-bold">
+                  Capital actual
+                </p>
+                <p className="mt-1 text-xs text-slate-100 font-mono font-black">
+                  {formatCOP(juanesFinancialAdmin.currentCapital || 0)}
+                </p>
+              </div>
+
+              <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+                <p className="text-[9px] uppercase text-slate-500 font-bold">
+                  Categoría
+                </p>
+                <p className="mt-1 text-xs text-slate-100 font-black">
+                  {juanesFinancialAdmin.category || '?'}
+                </p>
+              </div>
+
+              <div className="rounded-xl bg-slate-950/70 border border-slate-800 p-3">
+                <p className="text-[9px] uppercase text-slate-500 font-bold">
+                  Ciclo asignado
+                </p>
+                <p className="mt-1 text-[10px] text-slate-300 font-mono truncate">
+                  {juanesFinancialAdmin.entryCycleId || '?'}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Header */}
       <div className="p-4 sm:p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
@@ -703,7 +1115,7 @@ ${directLink}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
         {/* Ventana Azul */}
         {(() => {
-          const azulUsers = allUsers.filter((u) => u.role === 'USER' && u.category === 'AZUL');
+          const azulUsers = allUsers.filter((u) => (u.role === 'USER' || u.participatesInTrading === true) && u.category === 'AZUL');
           const azulCap = azulUsers.reduce((sum, u) => sum + u.currentCapital, 0);
           const isSelected = selectedCategory === 'AZUL';
           return (
@@ -725,14 +1137,14 @@ ${directLink}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(azulCap)}</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">$4.000.000 a &lt;$10.000.000 COP</p>
+              <p className="text-[10px] text-slate-500 mt-0.5">$4.000.000 a $10.000.000 COP</p>
             </button>
           );
         })()}
 
         {/* Ventana Verde */}
         {(() => {
-          const verdeUsers = allUsers.filter((u) => u.role === 'USER' && u.category === 'VERDE');
+          const verdeUsers = allUsers.filter((u) => (u.role === 'USER' || u.participatesInTrading === true) && u.category === 'VERDE');
           const verdeCap = verdeUsers.reduce((sum, u) => sum + u.currentCapital, 0);
           const isSelected = selectedCategory === 'VERDE';
           return (
@@ -754,14 +1166,14 @@ ${directLink}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(verdeCap)}</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">$10.000.000 a &lt;$60.000.000 COP</p>
+              <p className="text-[10px] text-slate-500 mt-0.5">&gt;$10.000.000 a $60.000.000 COP</p>
             </button>
           );
         })()}
 
         {/* Ventana Negra */}
         {(() => {
-          const negraUsers = allUsers.filter((u) => u.role === 'USER' && u.category === 'NEGRA');
+          const negraUsers = allUsers.filter((u) => (u.role === 'USER' || u.participatesInTrading === true) && u.category === 'NEGRA');
           const negraCap = negraUsers.reduce((sum, u) => sum + u.currentCapital, 0);
           const isSelected = selectedCategory === 'NEGRA';
           return (
@@ -783,14 +1195,14 @@ ${directLink}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(negraCap)}</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">$60.000.000 a $4.000.000.000 COP</p>
+              <p className="text-[10px] text-slate-500 mt-0.5">&gt;$60.000.000 COP ? sin tope</p>
             </button>
           );
         })()}
 
         {/* Todas las Ventanas */}
         {(() => {
-          const totalUsers = allUsers.filter((u) => u.role === 'USER');
+          const totalUsers = allUsers.filter((u) => u.role === 'USER' || u.participatesInTrading === true);
           const totalCap = totalUsers.reduce((sum, u) => sum + u.currentCapital, 0);
           const isSelected = selectedCategory === 'ALL';
           return (
@@ -1506,7 +1918,7 @@ ${directLink}
                       type="number"
                       step="100000"
                       min="4000000"
-                      max="4000000000"
+                      max={Number.MAX_SAFE_INTEGER}
                       value={formCapital}
                       onChange={(e) => setFormCapital(e.target.value)}
                       placeholder="8000000"

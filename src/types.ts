@@ -46,6 +46,18 @@ export interface UserProfile {
   role: UserRole;
   status: UserStatus;
   permissions?: UserPermissions;
+
+  // Seguridad y participación financiera son independientes.
+  participatesInTrading?: boolean;
+
+  // STANDARD = split contractual normal.
+  // SELF_ADMIN = 100% participante / 0% comisión administrativa.
+  commissionMode?: 'STANDARD' | 'SELF_ADMIN';
+
+  tradingConfiguredAt?: string | null;
+  tradingConfiguredByUid?: string | null;
+  tradingConfiguredByName?: string | null;
+
   currentCapital: number; // Capital operativo COP
   baseCapital?: number; // Capital aportado inicial
   currency: 'COP';

@@ -814,14 +814,74 @@ async function getNextAtomicUserCode() {
  */
 function getCanonicalCategoryForCapital(capital) {
   const cap = Number(capital) || 0;
-  if (cap >= 60000000) {
+
+  if (cap > 60000000) {
     return "NEGRA";
   }
-  if (cap >= 10000000) {
+
+  if (cap > 10000000) {
     return "VERDE";
   }
+
   return "AZUL";
 }
+
+/**
+ * El rol administrativo y la participación financiera
+ * son conceptos independientes.
+ */
+function isTradingParticipantProfile(profile) {
+  if (!profile || typeof profile !== "object") {
+    return false;
+  }
+
+  return (
+    profile.role === "USER" ||
+    profile.participatesInTrading === true
+  );
+}
+
+/**
+ * Obtiene el split financiero efectivo.
+ *
+ * SELF_ADMIN siempre debe ser 100 / 0.
+ */
+function getTradingSplitForProfile(profile) {
+  if (
+    profile &&
+    profile.commissionMode === "SELF_ADMIN"
+  ) {
+    return {
+      userPercentage: 100,
+      adminPercentage: 0,
+    };
+  }
+
+  const userPercentage =
+    profile &&
+    profile.userPercentage !== undefined
+      ? Number(profile.userPercentage)
+      : 75;
+
+  const adminPercentage =
+    profile &&
+    profile.adminPercentage !== undefined
+      ? Number(profile.adminPercentage)
+      : 25;
+
+  return {
+    userPercentage:
+      Number.isFinite(userPercentage)
+        ? userPercentage
+        : 75,
+
+    adminPercentage:
+      Number.isFinite(adminPercentage)
+        ? adminPercentage
+        : 25,
+  };
+}
+
 
 /**
  * Normaliza createdAt a un Firestore Timestamp válido.
@@ -1183,6 +1243,885 @@ exports.adminCreatePendingInvestor = onCall(
       success: true,
       user: pendingUserDoc,
       message: `Inversionista registrado exitosamente en estado PENDIENTE. Código: ${userCode}`,
+    };
+  }
+);
+
+
+/**
+ * Bulk import autoritativo de inversionistas desde Excel.
+ *
+ * Reglas:
+ * - Exclusivo SuperAdmin canonico.
+ * - Solo registra usuarios NUEVOS.
+ * - Nunca altera capital de usuarios existentes.
+ * - Siempre asigna entryCycleId al PREPARING autoritativo.
+ * - Los nuevos usuarios quedan PENDING_CLAIM.
+ * - NO crea cycleUserResults ni calculos financieros.
+ * - START sigue siendo la unica autoridad que congela cohortes.
+ */
+exports.adminBulkImportInvestorsCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+    timeoutSeconds: 540,
+    memory: "512MiB",
+  },
+  async (request) => {
+    const {
+      authUid,
+      authEmail,
+      createdByName,
+    } = await verifySuperAdminPrivileges(request);
+
+    // Hardening adicional:
+    // este flujo masivo no confia solamente en role === ADMIN.
+    const cleanAuthEmail = String(
+      authEmail || ""
+    )
+      .trim()
+      .toLowerCase();
+
+    const canonicalSuperAdmin =
+      authUid === "lpx4NLEEMkeh9EJFcG68oPMVdXF2" ||
+      cleanAuthEmail === "juanes9802@gmail.com" ||
+      cleanAuthEmail === "elcocalombiano1828@gmail.com";
+
+    if (!canonicalSuperAdmin) {
+      throw new HttpsError(
+        "permission-denied",
+        "BULK_IMPORT_SUPERADMIN_ONLY"
+      );
+    }
+
+    const data = request.data || {};
+
+    const rows = Array.isArray(data.rows)
+      ? data.rows
+      : [];
+
+    const targetCycleId =
+      typeof data.targetCycleId === "string"
+        ? data.targetCycleId.trim()
+        : "";
+
+    const clientRequestId =
+      typeof data.clientRequestId === "string"
+        ? data.clientRequestId.trim().slice(0, 160)
+        : "";
+
+    if (!targetCycleId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "TARGET_CYCLE_REQUIRED"
+      );
+    }
+
+    if (rows.length === 0) {
+      throw new HttpsError(
+        "invalid-argument",
+        "ROWS_REQUIRED"
+      );
+    }
+
+    if (rows.length > 150) {
+      throw new HttpsError(
+        "invalid-argument",
+        "BULK_IMPORT_MAX_150_ROWS"
+      );
+    }
+
+    let entryCycleId;
+
+    try {
+      entryCycleId =
+        await validateTargetCycleForUserEntry({
+          db,
+          targetCycleId,
+        });
+    } catch (err) {
+      if (
+        err &&
+        err.code === "not-found"
+      ) {
+        throw new HttpsError(
+          "not-found",
+          err.message
+        );
+      }
+
+      throw new HttpsError(
+        "failed-precondition",
+        err && err.message
+          ? err.message
+          : "TARGET_CYCLE_NOT_PREPARING"
+      );
+    }
+
+    if (
+      !entryCycleId ||
+      entryCycleId !== targetCycleId
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "TARGET_CYCLE_NOT_AUTHORITATIVE_PREPARING"
+      );
+    }
+
+    const cycleRef =
+      db
+        .collection("monthlyCycles")
+        .doc(entryCycleId);
+
+    const cycleSnap =
+      await cycleRef.get();
+
+    if (!cycleSnap.exists) {
+      throw new HttpsError(
+        "not-found",
+        "TARGET_CYCLE_NOT_FOUND"
+      );
+    }
+
+    const cycleData =
+      cycleSnap.data() || {};
+
+    if (
+      cycleData.status !== "OPEN" ||
+      cycleData.operationalStatus !== "PREPARING"
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "TARGET_CYCLE_NOT_PREPARING"
+      );
+    }
+
+    const settingsSnap =
+      await db
+        .collection("settings")
+        .doc("global_config")
+        .get();
+
+    const settings =
+      settingsSnap.exists
+        ? settingsSnap.data() || {}
+        : {};
+
+    if (
+      settings.preparingCycleId !==
+      entryCycleId
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "TARGET_CYCLE_NOT_AUTHORITATIVE_PREPARING"
+      );
+    }
+
+    if (cycleData.isStarting === true) {
+      throw new HttpsError(
+        "failed-precondition",
+        "TARGET_CYCLE_START_IN_PROGRESS"
+      );
+    }
+
+    const normalizeName = (value) =>
+      String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim()
+        .replace(/\s+/g, " ");
+
+    const cleanCode = (value) =>
+      String(value || "")
+        .trim()
+        .toUpperCase();
+
+    const existingUsersSnap =
+      await db
+        .collection("users")
+        .get();
+
+    const existingByName =
+      new Map();
+
+    const existingByCode =
+      new Map();
+
+    const existingByEmail =
+      new Map();
+
+    existingUsersSnap.forEach(
+      (docSnap) => {
+        const user =
+          docSnap.data() || {};
+
+        // MIGRATED es un documento historico.
+        if (
+          user.status === "MIGRATED"
+        ) {
+          return;
+        }
+
+        const normName =
+          normalizeName(
+            user.fullName
+          );
+
+        const code =
+          cleanCode(
+            user.userCode
+          );
+
+        const email =
+          String(
+            user.email || ""
+          )
+            .trim()
+            .toLowerCase();
+
+        if (
+          normName &&
+          !existingByName.has(normName)
+        ) {
+          existingByName.set(
+            normName,
+            {
+              id: docSnap.id,
+              ...user,
+            }
+          );
+        }
+
+        if (
+          code &&
+          !existingByCode.has(code)
+        ) {
+          existingByCode.set(
+            code,
+            {
+              id: docSnap.id,
+              ...user,
+            }
+          );
+        }
+
+        if (
+          email &&
+          !existingByEmail.has(email)
+        ) {
+          existingByEmail.set(
+            email,
+            {
+              id: docSnap.id,
+              ...user,
+            }
+          );
+        }
+      }
+    );
+
+    const results = [];
+
+    const candidates = [];
+
+    const fileNames =
+      new Set();
+
+    const fileEmails =
+      new Set();
+
+    for (
+      let index = 0;
+      index < rows.length;
+      index += 1
+    ) {
+      const raw =
+        rows[index] || {};
+
+      const fullName =
+        String(
+          raw.fullName ||
+          raw.clientName ||
+          ""
+        ).trim();
+
+      const normalizedName =
+        normalizeName(fullName);
+
+      const matchedUserCode =
+        cleanCode(
+          raw.matchedUserCode
+        );
+
+      const suppliedEmail =
+        String(
+          raw.email || ""
+        )
+          .trim()
+          .toLowerCase();
+
+      const phone =
+        String(
+          raw.phone || ""
+        ).trim();
+
+      const capital =
+        Number(
+          raw.currentCapital ??
+          raw.capitalCop
+        );
+
+      const rawId =
+        String(
+          raw.rawId ??
+          raw.id ??
+          index + 1
+        );
+
+      if (!fullName) {
+        results.push({
+          index,
+          rawId,
+          status: "FAILED",
+          code: "FULL_NAME_REQUIRED",
+          message:
+            "La fila no tiene nombre.",
+        });
+        continue;
+      }
+
+      if (
+        !Number.isFinite(capital) ||
+        capital < 4000000 ||
+        capital >
+          Number.MAX_SAFE_INTEGER
+      ) {
+        results.push({
+          index,
+          rawId,
+          fullName,
+          status: "FAILED",
+          code:
+            "INVALID_TRADING_CAPITAL",
+          message:
+            "El capital debe ser igual o superior a 4.000.000 COP.",
+        });
+        continue;
+      }
+
+      if (
+        matchedUserCode &&
+        existingByCode.has(
+          matchedUserCode
+        )
+      ) {
+        const existing =
+          existingByCode.get(
+            matchedUserCode
+          );
+
+        results.push({
+          index,
+          rawId,
+          fullName,
+          status: "SKIPPED",
+          code:
+            "EXISTING_USER_CODE",
+          existingUserId:
+            existing.id,
+          existingUserCode:
+            existing.userCode || "",
+          message:
+            "El usuario ya existe. No se modifico su capital.",
+        });
+        continue;
+      }
+
+      if (
+        normalizedName &&
+        existingByName.has(
+          normalizedName
+        )
+      ) {
+        const existing =
+          existingByName.get(
+            normalizedName
+          );
+
+        results.push({
+          index,
+          rawId,
+          fullName,
+          status: "SKIPPED",
+          code:
+            "EXISTING_USER_NAME",
+          existingUserId:
+            existing.id,
+          existingUserCode:
+            existing.userCode || "",
+          message:
+            "Ya existe un usuario con este nombre. No se duplico.",
+        });
+        continue;
+      }
+
+      if (
+        normalizedName &&
+        fileNames.has(
+          normalizedName
+        )
+      ) {
+        results.push({
+          index,
+          rawId,
+          fullName,
+          status: "SKIPPED",
+          code:
+            "DUPLICATE_NAME_IN_FILE",
+          message:
+            "Nombre duplicado dentro del archivo.",
+        });
+        continue;
+      }
+
+      if (suppliedEmail) {
+        if (
+          !suppliedEmail.includes("@") ||
+          suppliedEmail.length > 254
+        ) {
+          results.push({
+            index,
+            rawId,
+            fullName,
+            status: "FAILED",
+            code: "INVALID_EMAIL",
+            message:
+              "El correo de la fila no es valido.",
+          });
+          continue;
+        }
+
+        if (
+          existingByEmail.has(
+            suppliedEmail
+          )
+        ) {
+          const existing =
+            existingByEmail.get(
+              suppliedEmail
+            );
+
+          results.push({
+            index,
+            rawId,
+            fullName,
+            status: "SKIPPED",
+            code:
+              "EXISTING_USER_EMAIL",
+            existingUserId:
+              existing.id,
+            existingUserCode:
+              existing.userCode || "",
+            message:
+              "Ya existe un perfil con este correo.",
+          });
+          continue;
+        }
+
+        if (
+          fileEmails.has(
+            suppliedEmail
+          )
+        ) {
+          results.push({
+            index,
+            rawId,
+            fullName,
+            status: "SKIPPED",
+            code:
+              "DUPLICATE_EMAIL_IN_FILE",
+            message:
+              "Correo duplicado dentro del archivo.",
+          });
+          continue;
+        }
+      }
+
+      // Regla financiera fija para importacion Excel:
+      // 50% inversionista / 50% administracion.
+      // El backend ignora cualquier porcentaje enviado
+      // por el archivo o por el cliente.
+      const userPercentage = 50;
+      const adminPercentage = 50;
+
+      if (normalizedName) {
+        fileNames.add(
+          normalizedName
+        );
+      }
+
+      if (suppliedEmail) {
+        fileEmails.add(
+          suppliedEmail
+        );
+      }
+
+      candidates.push({
+        index,
+        rawId,
+        fullName,
+        normalizedName,
+        suppliedEmail,
+        phone,
+        capital:
+          Math.round(capital),
+        userPercentage,
+        adminPercentage,
+        category:
+          getCanonicalCategoryForCapital(
+            Math.round(capital)
+          ),
+        paymentMethod:
+          String(
+            raw.paymentMethod || ""
+          ).trim(),
+        paymentDetails:
+          String(
+            raw.paymentDetails ||
+            "Cuenta Principal"
+          ).trim(),
+      });
+    }
+
+    const authorizedCandidates =
+      [];
+
+    // Si el Excel trae email real,
+    // verificar que tampoco exista en Firebase Auth.
+    for (
+      const candidate
+      of candidates
+    ) {
+      if (
+        !candidate.suppliedEmail
+      ) {
+        authorizedCandidates.push(
+          candidate
+        );
+        continue;
+      }
+
+      try {
+        const existingAuth =
+          await admin
+            .auth()
+            .getUserByEmail(
+              candidate.suppliedEmail
+            );
+
+        if (existingAuth) {
+          results.push({
+            index:
+              candidate.index,
+            rawId:
+              candidate.rawId,
+            fullName:
+              candidate.fullName,
+            status: "SKIPPED",
+            code:
+              "AUTH_EMAIL_EXISTS",
+            message:
+              "El correo ya existe en Firebase Authentication.",
+          });
+
+          continue;
+        }
+      } catch (authErr) {
+        if (
+          authErr &&
+          authErr.code ===
+            "auth/user-not-found"
+        ) {
+          authorizedCandidates.push(
+            candidate
+          );
+
+          continue;
+        }
+
+        throw new HttpsError(
+          "internal",
+          `AUTH_CHECK_FAILED: ${
+            authErr &&
+            authErr.message
+              ? authErr.message
+              : authErr
+          }`
+        );
+      }
+    }
+
+    const batch =
+      db.batch();
+
+    let createdUsersCount = 0;
+
+    for (
+      const candidate
+      of authorizedCandidates
+    ) {
+      let userCode;
+
+      try {
+        userCode =
+          await getNextAtomicUserCode();
+      } catch (err) {
+        results.push({
+          index:
+            candidate.index,
+          rawId:
+            candidate.rawId,
+          fullName:
+            candidate.fullName,
+          status: "FAILED",
+          code:
+            "USER_CODE_ALLOCATION_FAILED",
+          message:
+            "No fue posible reservar el codigo de usuario.",
+        });
+
+        continue;
+      }
+
+      const userRef =
+        db
+          .collection("users")
+          .doc();
+
+      const legacyDocId =
+        userRef.id;
+
+      // El parser historico no siempre contiene email.
+      // Se crea un email tecnico unico SOLO para el perfil pendiente.
+      // El email definitivo se establece al completar la activacion.
+      const effectiveEmail =
+        candidate.suppliedEmail ||
+        `pending.${legacyDocId.toLowerCase()}@easytraders24.app`;
+
+      const pendingUserDoc = {
+        id: legacyDocId,
+        uid: null,
+
+        isClaimed: false,
+        status: "PENDING_CLAIM",
+        role: "USER",
+
+        email:
+          effectiveEmail,
+
+        bulkImportPlaceholderEmail:
+          !candidate.suppliedEmail,
+
+        fullName:
+          candidate.fullName,
+
+        phone:
+          candidate.phone,
+
+        currentCapital:
+          candidate.capital,
+
+        baseCapital:
+          candidate.capital,
+
+        currency: "COP",
+
+        userPercentage:
+          candidate.userPercentage,
+
+        adminPercentage:
+          candidate.adminPercentage,
+
+        category:
+          candidate.category,
+
+        paymentMethod:
+          candidate.paymentMethod,
+
+        paymentDetails:
+          candidate.paymentDetails,
+
+        entryCycleId:
+          entryCycleId,
+
+        entryDate:
+          new Date()
+            .toISOString()
+            .split("T")[0],
+
+        userCode,
+
+        source:
+          "EXCEL_BULK_IMPORT",
+
+        bulkImportClientRequestId:
+          clientRequestId || null,
+
+        createdAt:
+          admin.firestore
+            .FieldValue
+            .serverTimestamp(),
+
+        updatedAt:
+          admin.firestore
+            .FieldValue
+            .serverTimestamp(),
+
+        createdByUid:
+          authUid,
+      };
+
+      batch.set(
+        userRef,
+        pendingUserDoc
+      );
+
+      existingByName.set(
+        candidate.normalizedName,
+        pendingUserDoc
+      );
+
+      existingByCode.set(
+        userCode,
+        pendingUserDoc
+      );
+
+      existingByEmail.set(
+        effectiveEmail,
+        pendingUserDoc
+      );
+
+      createdUsersCount += 1;
+
+      results.push({
+        index:
+          candidate.index,
+        rawId:
+          candidate.rawId,
+        fullName:
+          candidate.fullName,
+        status: "CREATED",
+        code: "CREATED",
+        userId:
+          legacyDocId,
+        userCode,
+        category:
+          candidate.category,
+        currentCapital:
+          candidate.capital,
+        email:
+          effectiveEmail,
+        placeholderEmail:
+          !candidate.suppliedEmail,
+      });
+    }
+
+    const skippedUsersCount =
+      results.filter(
+        (item) =>
+          item.status ===
+          "SKIPPED"
+      ).length;
+
+    const failedUsersCount =
+      results.filter(
+        (item) =>
+          item.status ===
+          "FAILED"
+      ).length;
+
+    if (
+      createdUsersCount > 0
+    ) {
+      const auditRef =
+        db
+          .collection("auditLogs")
+          .doc();
+
+      batch.set(
+        auditRef,
+        {
+          action:
+            "ADMIN_BULK_IMPORT_INVESTORS",
+
+          performedBy:
+            authUid,
+
+          performedByName:
+            createdByName,
+
+          targetCycleId:
+            entryCycleId,
+
+          clientRequestId:
+            clientRequestId || null,
+
+          rowsReceived:
+            rows.length,
+
+          createdUsersCount,
+
+          skippedUsersCount,
+
+          failedUsersCount,
+
+          timestamp:
+            admin.firestore
+              .FieldValue
+              .serverTimestamp(),
+        }
+      );
+
+      await batch.commit();
+    }
+
+    results.sort(
+      (a, b) =>
+        Number(a.index || 0) -
+        Number(b.index || 0)
+    );
+
+    return {
+      success: true,
+
+      partialSuccess:
+        createdUsersCount > 0 &&
+        (
+          skippedUsersCount > 0 ||
+          failedUsersCount > 0
+        ),
+
+      targetCycleId:
+        entryCycleId,
+
+      rowsReceived:
+        rows.length,
+
+      createdUsersCount,
+
+      skippedUsersCount,
+
+      failedUsersCount,
+
+      results,
+
+      message:
+        `Importacion procesada. ` +
+        `Creados: ${createdUsersCount}. ` +
+        `Omitidos: ${skippedUsersCount}. ` +
+        `Errores: ${failedUsersCount}.`,
     };
   }
 );
@@ -2185,10 +3124,14 @@ exports.submitApplicationCallable = onCall(
     }
 
     const numCapital = Number(requestedCapitalCop);
-    if (isNaN(numCapital) || numCapital < 1000000 || numCapital > 10000000000) {
+    if (
+      !Number.isFinite(numCapital) ||
+      numCapital < 4000000 ||
+      numCapital > Number.MAX_SAFE_INTEGER
+    ) {
       throw new HttpsError(
         "invalid-argument",
-        "El capital solicitado debe ser un valor numérico entre $1.000.000 y $10.000.000.000 COP."
+        "El capital solicitado debe ser igual o superior a $4.000.000 COP."
       );
     }
 
@@ -3194,8 +4137,11 @@ exports.adminPurgeTradingTestData = onCall(
  * Helper de categorización de bitácora
  */
 function getCategoryForCapitalLocal(capital) {
-  if (capital >= 60000000) return 'NEGRA';
-  if (capital >= 10000000) return 'VERDE';
+  const cap = Number(capital) || 0;
+
+  if (cap > 60000000) return 'NEGRA';
+  if (cap > 10000000) return 'VERDE';
+
   return 'AZUL';
 }
 
@@ -3314,8 +4260,11 @@ exports.submitReinvestmentRequestCallable = onCall(
         throw new HttpsError("not-found", "Perfil de inversionista no encontrado en Firestore.");
       }
       const userData = userDocSnap.data();
-      if (userData.role !== "USER") {
-        throw new HttpsError("permission-denied", "Solo los inversionistas (USER) pueden radicar solicitudes de reinversión.");
+      if (!isTradingParticipantProfile(userData)) {
+        throw new HttpsError(
+          "permission-denied",
+          "La cuenta no est? habilitada como participante financiero."
+        );
       }
       if (userData.status !== "ACTIVE") {
         throw new HttpsError("failed-precondition", "Tu cuenta debe estar activa para radicar solicitudes.");
@@ -5646,9 +6595,32 @@ exports.onCycleClosureNotificationJobCreated = onDocumentCreated(
             .toUpperCase()
             .startsWith("ADM");
 
-        if (isAdmin) {
+        const isFrozenTradingParticipant =
+          result.participatesInTrading === true ||
+          result.commissionMode === "SELF_ADMIN";
+
+        if (
+          isAdmin &&
+          user.participatesInTrading !== true &&
+          !isFrozenTradingParticipant
+        ) {
           continue;
         }
+
+        const closureParticipantSplit =
+          getTradingSplitForProfile({
+            ...user,
+
+            commissionMode:
+              result.commissionMode ||
+              user.commissionMode,
+
+            userPercentage:
+                result.userPercentage,
+
+            adminPercentage:
+                result.adminPercentage,
+          });
 
         const calc =
           calculateUserFinancialResult(
@@ -5663,10 +6635,10 @@ exports.onCycleClosureNotificationJobCreated = onDocumentCreated(
                 closingTrm,
 
               userPercentage:
-                result.userPercentage,
+                closureParticipantSplit.userPercentage,
 
               adminPercentage:
-                result.adminPercentage,
+                closureParticipantSplit.adminPercentage,
             }
           );
 
@@ -7159,6 +8131,444 @@ exports.adminResolveDisbursementCallable = onCall(
  * Realiza congelamiento atómico de capitales en cycleUserResults y activa aportes externos confirmados.
  * Si requiredStartWrites > 450, aborta estrictamente antes de modificar ningún documento.
  */
+
+/**
+ * Configura una cuenta ADMIN existente como participante financiero.
+ *
+ * IMPORTANTE:
+ * - NO cambia el rol de seguridad.
+ * - Solo permite ciclos PREPARING autoritativos.
+ * - SELF_ADMIN siempre es 100% participante / 0% administración.
+ * - No crea cycleUserResults: eso lo hace adminStartCycleCallable
+ *   al congelar la cohorte del ciclo.
+ */
+exports.adminConfigureTradingParticipantCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const {
+      authUid,
+      createdByName,
+    } = await verifySuperAdminPrivileges(request);
+
+
+    // SELF_ADMIN: esta operacion es exclusiva del
+    // SuperAdmin canonico. No basta con role === ADMIN.
+    const callerUid = request.auth && request.auth.uid
+      ? request.auth.uid
+      : "";
+
+    const callerEmail = (
+      request.auth &&
+      request.auth.token &&
+      request.auth.token.email
+        ? request.auth.token.email
+        : ""
+    )
+      .toString()
+      .trim()
+      .toLowerCase();
+
+    const isCanonicalSelfAdmin =
+      callerUid === "lpx4NLEEMkeh9EJFcG68oPMVdXF2" ||
+      callerEmail === "juanes9802@gmail.com";
+
+    if (!isCanonicalSelfAdmin) {
+      throw new HttpsError(
+        "permission-denied",
+        "SELF_ADMIN_CANONICAL_SUPERADMIN_ONLY"
+      );
+    }
+
+    const {
+      targetUid,
+      currentCapital,
+      targetCycleId,
+    } = request.data || {};
+
+    const cleanTargetUid =
+      typeof targetUid === "string"
+        ? targetUid.trim()
+        : "";
+
+    if (cleanTargetUid !== callerUid) {
+      throw new HttpsError(
+        "permission-denied",
+        "SELF_ADMIN_TARGET_MUST_BE_CALLER"
+      );
+    }
+
+
+    const cleanCycleId =
+      typeof targetCycleId === "string"
+        ? targetCycleId.trim()
+        : "";
+
+    const parsedCapital =
+      Number(currentCapital);
+
+    if (!cleanTargetUid) {
+      throw new HttpsError(
+        "invalid-argument",
+        "TARGET_UID_REQUIRED"
+      );
+    }
+
+    if (!cleanCycleId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "TARGET_CYCLE_REQUIRED"
+      );
+    }
+
+    if (
+      !Number.isFinite(parsedCapital) ||
+      parsedCapital < 4000000 ||
+      parsedCapital > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_TRADING_CAPITAL: El capital debe ser igual o superior a $4.000.000 COP."
+      );
+    }
+
+    const roundedCapital =
+      Math.round(parsedCapital);
+
+    const userRef =
+      db.collection("users").doc(cleanTargetUid);
+
+    const cycleRef =
+      db.collection("monthlyCycles").doc(cleanCycleId);
+
+    const settingsRef =
+      db.collection("settings").doc("global_config");
+
+    const frozenResultRef =
+      db
+        .collection("cycleUserResults")
+        .doc(`${cleanCycleId}_${cleanTargetUid}`);
+
+    const auditRef =
+      db.collection("auditLogs").doc();
+
+    const nowIso =
+      new Date().toISOString();
+
+    let responseParticipant = null;
+
+    await db.runTransaction(
+      async (transaction) => {
+        // Todas las lecturas primero.
+        const userSnap =
+          await transaction.get(userRef);
+
+        const cycleSnap =
+          await transaction.get(cycleRef);
+
+        const settingsSnap =
+          await transaction.get(settingsRef);
+
+        const frozenResultSnap =
+          await transaction.get(frozenResultRef);
+
+        if (!userSnap.exists) {
+          throw new HttpsError(
+            "not-found",
+            "TARGET_USER_NOT_FOUND"
+          );
+        }
+
+        if (!cycleSnap.exists) {
+          throw new HttpsError(
+            "not-found",
+            "TARGET_CYCLE_NOT_FOUND"
+          );
+        }
+
+        if (!settingsSnap.exists) {
+          throw new HttpsError(
+            "failed-precondition",
+            "GLOBAL_CONFIG_NOT_FOUND"
+          );
+        }
+
+        const user =
+          userSnap.data() || {};
+
+        const cycle =
+          cycleSnap.data() || {};
+
+        const settings =
+          settingsSnap.data() || {};
+
+        // --------------------------------------------------
+        // El rol administrativo se conserva.
+        // --------------------------------------------------
+
+        if (
+          user.role !== "ADMIN" &&
+          user.role !== "SUPERADMIN"
+        ) {
+          throw new HttpsError(
+            "failed-precondition",
+            "SELF_ADMIN_REQUIRES_ADMIN_ROLE"
+          );
+        }
+
+        if (user.status !== "ACTIVE") {
+          throw new HttpsError(
+            "failed-precondition",
+            "TARGET_ADMIN_MUST_BE_ACTIVE"
+          );
+        }
+
+        // --------------------------------------------------
+        // Solo se puede ingresar a la cohorte PREPARING.
+        // Nunca a un ciclo STARTED.
+        // --------------------------------------------------
+
+        if (
+          cycle.operationalStatus !== "PREPARING"
+        ) {
+          throw new HttpsError(
+            "failed-precondition",
+            "TARGET_CYCLE_NOT_PREPARING"
+          );
+        }
+
+        if (cycle.status !== "OPEN") {
+          throw new HttpsError(
+            "failed-precondition",
+            "TARGET_CYCLE_NOT_OPEN"
+          );
+        }
+
+        if (
+          settings.preparingCycleId !== cleanCycleId
+        ) {
+          throw new HttpsError(
+            "failed-precondition",
+            "TARGET_CYCLE_NOT_AUTHORITATIVE_PREPARING"
+          );
+        }
+
+        if (cycle.isStarting === true) {
+          throw new HttpsError(
+            "failed-precondition",
+            "TARGET_CYCLE_IS_STARTING"
+          );
+        }
+
+        // Si ya existe snapshot congelado, no se toca.
+        if (frozenResultSnap.exists) {
+          throw new HttpsError(
+            "failed-precondition",
+            "TARGET_USER_ALREADY_FROZEN_IN_CYCLE"
+          );
+        }
+
+        const category =
+          getCanonicalCategoryForCapital(
+            roundedCapital
+          );
+
+        const existingBaseCapital =
+          Number(user.baseCapital || 0);
+
+        const nextBaseCapital =
+          (
+            user.participatesInTrading === true &&
+            existingBaseCapital > 0
+          )
+            ? existingBaseCapital
+            : roundedCapital;
+
+        // --------------------------------------------------
+        // Perfil financiero autoritativo.
+        // --------------------------------------------------
+
+        transaction.update(
+          userRef,
+          {
+            participatesInTrading: true,
+
+            commissionMode:
+              "SELF_ADMIN",
+
+            currentCapital:
+              roundedCapital,
+
+            baseCapital:
+              nextBaseCapital,
+
+            currency:
+              "COP",
+
+            category,
+
+            userPercentage:
+              100,
+
+            adminPercentage:
+              0,
+
+            entryCycleId:
+              cleanCycleId,
+
+            tradingConfiguredAt:
+              nowIso,
+
+            tradingConfiguredByUid:
+              authUid,
+
+            tradingConfiguredByName:
+              createdByName,
+
+            updatedAt:
+              admin.firestore
+                .FieldValue
+                .serverTimestamp(),
+          }
+        );
+
+        // Cambiar la cohorte invalida cualquier preflight
+        // de START que estuviera utilizando una versión vieja.
+        transaction.update(
+          cycleRef,
+          {
+            cohortVersion:
+              admin.firestore
+                .FieldValue
+                .increment(1),
+
+            updatedAt:
+              nowIso,
+          }
+        );
+
+        transaction.set(
+          auditRef,
+          {
+            action:
+              "ADMIN_TRADING_PARTICIPATION_CONFIGURED",
+
+            performedBy:
+              authUid,
+
+            performedByName:
+              createdByName,
+
+            targetEntity:
+              cleanTargetUid,
+
+            cycleId:
+              cleanCycleId,
+
+            timestamp:
+              admin.firestore
+                .FieldValue
+                .serverTimestamp(),
+
+            details: {
+              targetUid:
+                cleanTargetUid,
+
+              email:
+                user.email || "",
+
+              fullName:
+                user.fullName || "",
+
+              securityRole:
+                user.role || "ADMIN",
+
+              roleChanged:
+                false,
+
+              participatesInTrading:
+                true,
+
+              commissionMode:
+                "SELF_ADMIN",
+
+              currentCapital:
+                roundedCapital,
+
+              baseCapital:
+                nextBaseCapital,
+
+              category,
+
+              userPercentage:
+                100,
+
+              adminPercentage:
+                0,
+
+              entryCycleId:
+                cleanCycleId,
+            },
+          }
+        );
+
+        responseParticipant = {
+          uid:
+            cleanTargetUid,
+
+          fullName:
+            user.fullName || "",
+
+          email:
+            user.email || "",
+
+          role:
+            user.role || "ADMIN",
+
+          status:
+            user.status || "ACTIVE",
+
+          participatesInTrading:
+            true,
+
+          commissionMode:
+            "SELF_ADMIN",
+
+          currentCapital:
+            roundedCapital,
+
+          baseCapital:
+            nextBaseCapital,
+
+          category,
+
+          userPercentage:
+            100,
+
+          adminPercentage:
+            0,
+
+          entryCycleId:
+            cleanCycleId,
+        };
+      }
+    );
+
+    return {
+      success: true,
+
+      participant:
+        responseParticipant,
+
+      message:
+        `Participación financiera configurada correctamente. Capital: $${roundedCapital.toLocaleString("es-CO")} COP. Split: 100% / 0%.`,
+    };
+  }
+);
+
+
 exports.adminStartCycleCallable = onCall(
   {
     region: "us-central1",
@@ -7523,6 +8933,7 @@ exports.adminStartCycleCallable = onCall(
         const uProfile = userProfilesMap.get(uid);
         if (!uProfile) continue;
         if (uProfile.status && uProfile.status !== "ACTIVE") continue;
+        if (!isTradingParticipantProfile(uProfile)) continue;
 
         const req = reinvByUserUid[uid];
         const prevRes = prevUserResultsMap.get(uid);
@@ -7576,15 +8987,16 @@ exports.adminStartCycleCallable = onCall(
           finalCapitalCop = Number(uProfile.currentCapital || 0);
         }
 
-        if (finalCapitalCop <= 0) {
+        if (finalCapitalCop < 4000000) {
           await safelyReleaseStartLock();
           throw new HttpsError(
             "failed-precondition",
-            `INVALID_ZERO_CAPITAL_DETECTED: El usuario ${uProfile.userCode || uid} resultó con capital $${finalCapitalCop} COP.`
+            `INVALID_TRADING_CAPITAL: El usuario ${uProfile.userCode || uid} resultó con capital $${finalCapitalCop} COP.`
           );
         }
 
         const finalCategory = getCategoryForCapitalLocal(finalCapitalCop);
+        const participantSplit = getTradingSplitForProfile(uProfile);
         totalInitialCapitalCop += finalCapitalCop;
 
         const cycleResRef = db.collection("cycleUserResults").doc(`${targetCycleId}_${uid}`);
@@ -7604,8 +9016,15 @@ exports.adminStartCycleCallable = onCall(
             totalUsdOperated: 0,
             trmUsed: null,
             totalGrossCop: 0,
-            userPercentage: uProfile.userPercentage !== undefined ? uProfile.userPercentage : 75,
-            adminPercentage: uProfile.adminPercentage !== undefined ? uProfile.adminPercentage : 25,
+            participantRole: uProfile.role || "USER",
+            participatesInTrading: true,
+            commissionMode:
+              uProfile.commissionMode === "SELF_ADMIN"
+                ? "SELF_ADMIN"
+                : "STANDARD",
+
+            userPercentage: participantSplit.userPercentage,
+            adminPercentage: participantSplit.adminPercentage,
             userProfitCop: 0,
             adminCommissionCop: 0,
             userProfitUsd: 0,

@@ -42,6 +42,45 @@ import { auth } from './firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { getAppBaseUrl } from './constants';
 
+function isActiveFinancialParticipant(
+  user: UserProfile
+): boolean {
+  return (
+    user.status === 'ACTIVE' &&
+    (
+      user.role === 'USER' ||
+      user.participatesInTrading === true
+    )
+  );
+}
+
+function getEffectiveFinancialSplit(
+  user: UserProfile
+): {
+  userPercentage: number;
+  adminPercentage: number;
+} {
+  if (user.commissionMode === 'SELF_ADMIN') {
+    return {
+      userPercentage: 100,
+      adminPercentage: 0,
+    };
+  }
+
+  return {
+    userPercentage:
+      user.userPercentage !== undefined
+        ? user.userPercentage
+        : 75,
+
+    adminPercentage:
+      user.adminPercentage !== undefined
+        ? user.adminPercentage
+        : 25,
+  };
+}
+
+
 export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
   trmReference: 4028.50,
   trmConfigured: 4028.50,
@@ -59,25 +98,25 @@ export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
       id: 'AZUL',
       name: '🔵 Azul',
       minCapital: 4_000_000,
-      maxCapital: 9_999_999,
+      maxCapital: 10_000_000,
       color: '#2563eb',
       badgeBg: 'bg-blue-900/40 border-blue-500/30 text-blue-300',
-      badgeText: 'Azul ($4M - $9M COP)',
+      badgeText: 'Azul ($4M - $10M COP)',
     },
     {
       id: 'VERDE',
       name: '🟢 Verde',
-      minCapital: 10_000_000,
-      maxCapital: 59_999_999,
+      minCapital: 10_000_001,
+      maxCapital: 60_000_000,
       color: '#059669',
       badgeBg: 'bg-emerald-900/40 border-emerald-500/30 text-emerald-300',
-      badgeText: 'Verde ($10M - $50M COP)',
+      badgeText: 'Verde (> $10M - $60M COP)',
     },
     {
       id: 'NEGRA',
       name: '⚫ Bitácora Negra',
-      minCapital: 60_000_000,
-      maxCapital: 1_000_000_000,
+      minCapital: 60_000_001,
+      maxCapital: Number.MAX_SAFE_INTEGER,
       color: '#09090b',
       badgeBg: 'bg-zinc-950 border-zinc-700 text-zinc-200',
       badgeText: 'Bitácora Negra (> $60M COP)',
@@ -747,7 +786,9 @@ class DataStore {
   }
 
   public getActiveUsers(): UserProfile[] {
-    return this.users.filter((u) => u.role === 'USER' && u.status === 'ACTIVE');
+    return this.users.filter(
+      (u) => isActiveFinancialParticipant(u)
+    );
   }
 
   public getUserById(id: string): UserProfile | undefined {
@@ -892,7 +933,10 @@ class DataStore {
   }
 
   public getNotificationsForUser(userId: string): NotificationItem[] {
-    const user = this.getUserById(userId) || this.getUserByCode(userId);
+    const user =
+      this.getUserById(userId) ||
+      this.getUserByCode(userId);
+
     const isAdmin =
       user?.role === 'ADMIN' ||
       user?.email === 'elcocalombiano1828@gmail.com' ||
@@ -902,44 +946,210 @@ class DataStore {
       userId === 'ALL_ADMINS' ||
       userId.toUpperCase().includes('ADMIN');
 
-    if (isAdmin) {
+    const adminFinancialParticipant =
+      isAdmin &&
+      user?.participatesInTrading === true;
+
+    // ------------------------------------------------------
+    // ADMIN NORMAL
+    //
+    // Sigue viendo exclusivamente el buzón administrativo.
+    // ------------------------------------------------------
+
+    if (
+      isAdmin &&
+      !adminFinancialParticipant
+    ) {
       return this.getAdminNotifications();
     }
 
-    const list = this.notifications
-      .filter((n) => {
-        if (n.hiddenByUser === true) return false;
+    // ------------------------------------------------------
+    // NOTIFICACIONES PERSONALES
+    //
+    // Este bloque sirve tanto para USER normal como para
+    // ADMIN + participatesInTrading.
+    // ------------------------------------------------------
 
-        // Un inversionista regular solo ve sus notificaciones personales
-        // (no debe ver solicitudes de admisiones generales dirigidas a administradores)
-        if (n.userId === 'ALL_ADMINS' && n.type === 'INVESTMENT_REQUEST') {
-          return false;
-        }
+    const personalList =
+      this.notifications
+        .filter((n) => {
+          if (n.hiddenByUser === true) {
+            return false;
+          }
 
-        const notifEmail = (n.userEmail || n.payload?.userEmail || '').toString().toLowerCase().trim();
-        const notifUid = n.userUid || (n as any).uid || n.payload?.userUid || '';
-        const notifUserId = n.userId || '';
-        const notifCode = (n.userCode || '').toString().toUpperCase().trim();
+          // Una notificación general de admisiones no es
+          // una notificación financiera personal.
+          if (
+            n.userId === 'ALL_ADMINS' &&
+            n.type === 'INVESTMENT_REQUEST'
+          ) {
+            return false;
+          }
 
-        const userEmail = (user?.email || '').toString().toLowerCase().trim();
-        const userUid = user?.uid || '';
-        const userInternalId = user?.id || '';
-        const userCode = (user?.userCode || '').toString().toUpperCase().trim();
+          const notifEmail =
+            (
+              n.userEmail ||
+              n.payload?.userEmail ||
+              ''
+            )
+              .toString()
+              .toLowerCase()
+              .trim();
 
-        return (
-          notifUserId === userId ||
-          notifCode === userId.toUpperCase() ||
-          (user && (
-            (userInternalId && (notifUserId === userInternalId || notifUserId === userCode)) ||
-            (userUid && (notifUid === userUid || notifUserId === userUid)) ||
-            (userCode && notifCode && userCode === notifCode) ||
-            (userEmail && notifEmail && userEmail === notifEmail) ||
-            (user.fullName && n.userName && user.fullName.toLowerCase().trim() === n.userName.toLowerCase().trim())
-          ))
+          const notifUid =
+            n.userUid ||
+            (n as any).uid ||
+            n.payload?.userUid ||
+            '';
+
+          const notifUserId =
+            n.userId || '';
+
+          const notifCode =
+            (n.userCode || '')
+              .toString()
+              .toUpperCase()
+              .trim();
+
+          const userEmail =
+            (user?.email || '')
+              .toString()
+              .toLowerCase()
+              .trim();
+
+          const userUid =
+            user?.uid || '';
+
+          const userInternalId =
+            user?.id || '';
+
+          const userCode =
+            (user?.userCode || '')
+              .toString()
+              .toUpperCase()
+              .trim();
+
+          return (
+            notifUserId === userId ||
+
+            notifCode ===
+              userId.toUpperCase() ||
+
+            (
+              user &&
+              (
+                (
+                  userInternalId &&
+                  (
+                    notifUserId ===
+                      userInternalId ||
+
+                    notifUserId ===
+                      userCode
+                  )
+                ) ||
+
+                (
+                  userUid &&
+                  (
+                    notifUid ===
+                      userUid ||
+
+                    notifUserId ===
+                      userUid
+                  )
+                ) ||
+
+                (
+                  userCode &&
+                  notifCode &&
+                  userCode ===
+                    notifCode
+                ) ||
+
+                (
+                  userEmail &&
+                  notifEmail &&
+                  userEmail ===
+                    notifEmail
+                ) ||
+
+                (
+                  user.fullName &&
+                  n.userName &&
+                  user.fullName
+                    .toLowerCase()
+                    .trim() ===
+                    n.userName
+                      .toLowerCase()
+                      .trim()
+                )
+              )
+            )
+          );
+        })
+        .sort(
+          (a, b) =>
+            new Date(b.sentAt).getTime() -
+            new Date(a.sentAt).getTime()
         );
-      })
-      .sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime());
-    return this.mapSharedReadStates(list);
+
+    const mappedPersonal =
+      this.mapSharedReadStates(
+        personalList
+      );
+
+    // ------------------------------------------------------
+    // USER NORMAL
+    // ------------------------------------------------------
+
+    if (!isAdmin) {
+      return mappedPersonal;
+    }
+
+    // ------------------------------------------------------
+    // ADMIN + PARTICIPANTE FINANCIERO
+    //
+    // Une:
+    // 1. Buzón administrativo
+    // 2. Sus operaciones diarias
+    // 3. Sus cierres mensuales
+    // 4. Sus avisos financieros personales
+    //
+    // Sin duplicar documentos con el mismo ID.
+    // ------------------------------------------------------
+
+    const adminList =
+      this.getAdminNotifications();
+
+    const mergedById =
+      new Map<string, NotificationItem>();
+
+    adminList.forEach(
+      (notification) => {
+        mergedById.set(
+          notification.id,
+          notification
+        );
+      }
+    );
+
+    mappedPersonal.forEach(
+      (notification) => {
+        mergedById.set(
+          notification.id,
+          notification
+        );
+      }
+    );
+
+    return Array.from(
+      mergedById.values()
+    ).sort(
+      (a, b) =>
+        new Date(b.sentAt).getTime() -
+        new Date(a.sentAt).getTime()
+    );
   }
 
   public getAllNotifications(): NotificationItem[] {
@@ -1197,7 +1407,7 @@ class DataStore {
     activeUsers: UserProfile[]
   ): UserProfile[] {
     const eligibleUsers = activeUsers.filter(
-      (u) => u.status === 'ACTIVE' && u.role === 'USER'
+      (u) => isActiveFinancialParticipant(u)
     );
 
     // A. INDIVIDUAL EXPLÍCITO
@@ -2707,7 +2917,11 @@ class DataStore {
         user.userCode?.startsWith('ADM') ||
         user.id === 'admin_root_uid' ||
         user.id === 'usr_admin';
-      return !isAdmin;
+
+      return (
+        !isAdmin ||
+        user.participatesInTrading === true
+      );
     });
 
     nonAdminResults.forEach((res) => {
@@ -2826,12 +3040,33 @@ class DataStore {
     const notificationsToSave: NotificationItem[] = [];
 
     recipients.forEach((user) => {
-      const isAdmin = user.role === 'ADMIN' || user.userCode?.startsWith('ADM');
-      if (isAdmin) return;
+      const isAdmin =
+        user.role === 'ADMIN' ||
+        user.userCode?.startsWith('ADM');
 
-      const userPct = user.userPercentage !== undefined ? user.userPercentage : 75;
-      const adminPct = user.adminPercentage !== undefined ? user.adminPercentage : 25;
-      const calc = calculateUserMonthlyResult(operationUsd, trm, userPct, adminPct);
+      if (
+        isAdmin &&
+        user.participatesInTrading !== true
+      ) {
+        return;
+      }
+
+      const split =
+        getEffectiveFinancialSplit(user);
+
+      const userPct =
+        split.userPercentage;
+
+      const adminPct =
+        split.adminPercentage;
+
+      const calc =
+        calculateUserMonthlyResult(
+          operationUsd,
+          trm,
+          userPct,
+          adminPct
+        );
 
       const isPositive = operationUsd >= 0;
       const signStr = isPositive ? '+' : '-';

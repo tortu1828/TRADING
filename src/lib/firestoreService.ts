@@ -63,6 +63,71 @@ export const firestoreService = {
   },
 
   /**
+   * Configura una cuenta administrativa existente
+   * como participante financiero SELF_ADMIN.
+   *
+   * El rol ADMIN se conserva.
+   */
+  async adminConfigureTradingParticipant(params: {
+    targetUid: string;
+    currentCapital: number;
+    targetCycleId: string;
+  }): Promise<{
+    success: boolean;
+    participant: {
+      uid: string;
+      fullName: string;
+      email: string;
+      role: string;
+      status: string;
+      participatesInTrading: true;
+      commissionMode: 'SELF_ADMIN';
+      currentCapital: number;
+      baseCapital: number;
+      category: BitacoraCategory;
+      userPercentage: 100;
+      adminPercentage: 0;
+      entryCycleId: string;
+    };
+    message: string;
+  }> {
+    const callable = httpsCallable<
+      {
+        targetUid: string;
+        currentCapital: number;
+        targetCycleId: string;
+      },
+      {
+        success: boolean;
+        participant: {
+          uid: string;
+          fullName: string;
+          email: string;
+          role: string;
+          status: string;
+          participatesInTrading: true;
+          commissionMode: 'SELF_ADMIN';
+          currentCapital: number;
+          baseCapital: number;
+          category: BitacoraCategory;
+          userPercentage: 100;
+          adminPercentage: 0;
+          entryCycleId: string;
+        };
+        message: string;
+      }
+    >(
+      functions,
+      'adminConfigureTradingParticipantCallable'
+    );
+
+    const response =
+      await callable(params);
+
+    return response.data;
+  },
+
+  /**
    * Invoca la Cloud Function HTTPS Callable `adminCreatePendingInvestor`
    * para registrar un inversionista pendiente de activación (Solo Firestore, sin cuenta Firebase Auth).
    */
@@ -80,6 +145,68 @@ export const firestoreService = {
     const callable = httpsCallable(functions, 'adminCreatePendingInvestor');
     const response = await callable(params);
     return response.data as { success: boolean; user: UserProfile; message: string };
+  },
+
+  /**
+   * Importacion masiva autoritativa de inversionistas
+   * hacia el ciclo PREPARING.
+   *
+   * No crea cycleUserResults ni modifica usuarios existentes.
+   */
+  async adminBulkImportInvestors(params: {
+    targetCycleId: string;
+    clientRequestId?: string;
+    rows: Array<{
+      rawId?: string;
+      id?: string;
+      clientName?: string;
+      fullName?: string;
+      email?: string;
+      phone?: string;
+      capitalCop?: number;
+      currentCapital?: number;
+      matchedUserCode?: string;
+      userPercentage?: number;
+      adminPercentage?: number;
+      paymentMethod?: string;
+      paymentDetails?: string;
+    }>;
+  }): Promise<{
+    success: boolean;
+    partialSuccess?: boolean;
+    targetCycleId: string;
+    rowsReceived: number;
+    createdUsersCount: number;
+    skippedUsersCount: number;
+    failedUsersCount: number;
+    results: Array<{
+      index: number;
+      rawId?: string;
+      fullName?: string;
+      status: 'CREATED' | 'SKIPPED' | 'FAILED';
+      code: string;
+      message?: string;
+      userId?: string;
+      userCode?: string;
+      existingUserId?: string;
+      existingUserCode?: string;
+      category?: string;
+      currentCapital?: number;
+      email?: string;
+      placeholderEmail?: boolean;
+    }>;
+    message: string;
+  }> {
+    const callable =
+      httpsCallable<any, any>(
+        functions,
+        'adminBulkImportInvestorsCallable'
+      );
+
+    const response =
+      await callable(params);
+
+    return response.data;
   },
 
   /**
