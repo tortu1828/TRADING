@@ -310,8 +310,44 @@ export const firestoreService = {
     return snap.docs.map((d) => d.data() as UserProfile);
   },
 
-  async deleteUser(id: string) {
-    await deleteDoc(doc(db, 'users', id));
+  async deleteUser(
+    id: string,
+    confirmation: string
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    deletedUserId?: string;
+    deletedUserCode?: string;
+  }> {
+    const callable = httpsCallable<
+      {
+        userId: string;
+        confirmation: string;
+      },
+      {
+        success: boolean;
+        message?: string;
+        deletedUserId?: string;
+        deletedUserCode?: string;
+      }
+    >(
+      functions,
+      'adminDeleteUserCallable'
+    );
+
+    const res = await callable({
+      userId: id,
+      confirmation,
+    });
+
+    if (!res.data?.success) {
+      throw new Error(
+        res.data?.message ||
+        'El servidor no confirmo la eliminacion del inversionista.'
+      );
+    }
+
+    return res.data;
   },
 
   // ==========================================

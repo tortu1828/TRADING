@@ -3652,32 +3652,36 @@ class DataStore {
     return updatedUser;
   }
 
-  public deleteUser(
+  public async deleteUser(
     userId: string,
-    adminUid: string = 'admin_root_uid',
-    adminName: string = 'Juan Esteban'
-  ): UserProfile {
-    const userIndex = this.users.findIndex((u) => u.id === userId);
+    confirmation: string
+  ): Promise<UserProfile> {
+    const userIndex = this.users.findIndex(
+      (u) => u.id === userId
+    );
+
     if (userIndex < 0) {
       throw new Error('Usuario no encontrado.');
     }
 
     const removedUser = this.users[userIndex];
-    this.users.splice(userIndex, 1);
-    firestoreService.deleteUser(userId).catch((err) => console.warn('Error deleting user from Firestore:', err));
 
-    this.addAuditLog({
-      action: 'USER_DELETED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      targetEntity: userId,
-      previousValue: removedUser,
-      newValue: null,
-      details: {
-        fullName: removedUser.fullName,
-        userCode: removedUser.userCode,
-      },
-    });
+    // Server-authoritative deletion.
+    // The local list is modified ONLY after the backend confirms success.
+    await firestoreService.deleteUser(
+      userId,
+      confirmation
+    );
+
+    // Firestore listeners may already have removed the user
+    // while the callable was completing.
+    const freshIndex = this.users.findIndex(
+      (u) => u.id === userId
+    );
+
+    if (freshIndex >= 0) {
+      this.users.splice(freshIndex, 1);
+    }
 
     this.recalculateCycleMetrics();
     this.notify();

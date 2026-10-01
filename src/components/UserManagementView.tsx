@@ -86,6 +86,7 @@ export const UserManagementView: React.FC = () => {
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [userToDelete, setUserToDelete] = useState<UserProfile | null>(null);
   const [isDeletingUser, setIsDeletingUser] = useState(false);
+  const [deleteConfirmationInput, setDeleteConfirmationInput] = useState('');
   const [generatingTokenUserId, setGeneratingTokenUserId] = useState<string | null>(null);
   const [generatedTokenModal, setGeneratedTokenModal] = useState<{
     token: string;
@@ -238,6 +239,20 @@ export const UserManagementView: React.FC = () => {
       );
     }
     return true;
+  }).sort((a, b) => {
+    const capitalDifference =
+      (Number(a.currentCapital) || 0) -
+      (Number(b.currentCapital) || 0);
+
+    if (capitalDifference !== 0) {
+      return capitalDifference;
+    }
+
+    return String(a.fullName || '').localeCompare(
+      String(b.fullName || ''),
+      'es',
+      { sensitivity: 'base' }
+    );
   });
 
   // Precargar capital de Juanes cuando ya tenga
@@ -712,10 +727,72 @@ ${directLink}
     }
   };
 
+  const handleOpenDelete = (user: UserProfile) => {
+    setDeleteConfirmationInput('');
+    setUserToDelete(user);
+  };
+
   const handleConfirmDelete = async () => {
     if (!userToDelete) return;
-    alert("La eliminación individual directa vía SDK está deshabilitada por reglas de seguridad. Por favor utiliza la acción 'LIMPIAR USUARIOS DE PRUEBA' para purgar cuentas o ejecuta la Cloud Function correspondiente.");
-    setUserToDelete(null);
+
+    const requiredConfirmation =
+      `ELIMINAR ${userToDelete.userCode}`;
+
+    if (
+      deleteConfirmationInput.trim() !==
+      requiredConfirmation
+    ) {
+      alert(
+        `Para confirmar, escribe exactamente: ${requiredConfirmation}`
+      );
+      return;
+    }
+
+    setIsDeletingUser(true);
+
+    try {
+      await dataStore.deleteUser(
+        userToDelete.id,
+        requiredConfirmation
+      );
+
+      setUserToDelete(null);
+      setDeleteConfirmationInput('');
+    } catch (err: any) {
+      const rawMessage =
+        String(
+          err?.message ||
+          err?.details ||
+          'No fue posible eliminar el inversionista.'
+        );
+
+      if (
+        rawMessage.includes(
+          'USER_HAS_ACTIVE_FINANCIAL_DEPENDENCIES'
+        )
+      ) {
+        alert(
+          'No se puede eliminar este inversionista porque tiene dependencias financieras activas. Deben resolverse primero.'
+        );
+      } else if (
+        rawMessage.toLowerCase().includes(
+          'permission-denied'
+        ) ||
+        rawMessage.toLowerCase().includes(
+          'permission denied'
+        )
+      ) {
+        alert(
+          'La eliminacion individual es exclusiva del SuperAdmin autenticado.'
+        );
+      } else {
+        alert(
+          `No se pudo eliminar el inversionista: ${rawMessage}`
+        );
+      }
+    } finally {
+      setIsDeletingUser(false);
+    }
   };
 
   const runPurgePreview = async (delFinancial: boolean, resetCounter: boolean) => {
@@ -1433,7 +1510,7 @@ ${directLink}
                       <Edit2 className="w-3 h-3" />
                     </button>
                     <button
-                      onClick={() => setUserToDelete(user)}
+                      onClick={() => handleOpenDelete(user)}
                       className="p-1 rounded-lg bg-rose-950/60 hover:bg-rose-900/80 text-rose-400 border border-rose-800/40 transition cursor-pointer"
                       title="Eliminar inversionista"
                     >
@@ -1670,7 +1747,7 @@ ${directLink}
                       </button>
 
                       <button
-                        onClick={() => setUserToDelete(user)}
+                        onClick={() => handleOpenDelete(user)}
                         className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/80 text-rose-400 hover:text-rose-300 border border-rose-800/50 transition cursor-pointer"
                         title="Eliminar inversionista"
                       >
@@ -2166,18 +2243,50 @@ ${directLink}
               </p>
             </div>
 
+            <div className="space-y-2 rounded-xl border border-rose-500/30 bg-rose-950/20 p-3">
+              <label className="block text-xs font-semibold text-slate-300">
+                Confirmación requerida
+              </label>
+
+              <p className="text-[11px] text-slate-400">
+                Escribe exactamente
+                <strong className="text-rose-300 font-mono ml-1">
+                  ELIMINAR {userToDelete.userCode}
+                </strong>
+              </p>
+
+              <input
+                type="text"
+                value={deleteConfirmationInput}
+                onChange={(e) =>
+                  setDeleteConfirmationInput(e.target.value)
+                }
+                placeholder={`ELIMINAR ${userToDelete.userCode}`}
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-slate-100 placeholder-slate-600 font-mono text-xs focus:outline-none focus:border-rose-500"
+                disabled={isDeletingUser}
+                autoComplete="off"
+              />
+            </div>
+
             <div className="flex items-center gap-3 pt-2">
               <button
                 type="button"
                 disabled={isDeletingUser}
-                onClick={() => setUserToDelete(null)}
+                onClick={() => {
+                  setUserToDelete(null);
+                  setDeleteConfirmationInput('');
+                }}
                 className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button
                 type="button"
-                disabled={isDeletingUser}
+                disabled={
+                  isDeletingUser ||
+                  deleteConfirmationInput.trim() !==
+                    `ELIMINAR ${userToDelete.userCode}`
+                }
                 onClick={handleConfirmDelete}
                 className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition shadow-lg shadow-rose-600/30 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
               >
