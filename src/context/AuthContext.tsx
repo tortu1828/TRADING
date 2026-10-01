@@ -28,6 +28,7 @@ interface AuthContextType {
   claimAccount: (
     identifier: string,
     activationToken: string,
+    email: string,
     password: string
   ) => Promise<{ success: boolean; user?: UserProfile; message: string }>;
   allUsers: UserProfile[];
@@ -382,6 +383,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const claimAccount = async (
     identifier: string,
     activationToken: string,
+    email: string,
     password: string
   ): Promise<{ success: boolean; user?: UserProfile; message: string }> => {
     if (!password || password.length < 6) {
@@ -394,10 +396,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return { success: false, message: 'El código de usuario o documento es obligatorio.' };
     }
 
+    const cleanEmail =
+      String(email || '')
+        .trim()
+        .toLowerCase();
+
+    const emailRegex =
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (
+      !cleanEmail ||
+      !emailRegex.test(cleanEmail)
+    ) {
+      return {
+        success: false,
+        message:
+          'Ingresa un correo electr?nico v?lido para activar tu cuenta.',
+      };
+    }
+
     try {
       const res = await firestoreService.claimAccountCallable({
         identifier: identifier.trim(),
         activationToken: activationToken.trim(),
+        email: cleanEmail,
         password,
       });
 

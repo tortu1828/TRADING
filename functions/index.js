@@ -2510,6 +2510,7 @@ exports.claimAccountCallable = onCall(
     const {
       identifier,
       activationToken,
+      email,
       password,
       clientRequestId,
     } = data;
@@ -2525,8 +2526,30 @@ exports.claimAccountCallable = onCall(
       throw new HttpsError("invalid-argument", "La contraseña debe tener al menos 6 caracteres.");
     }
 
-    const cleanIdentifier = identifier.trim();
-    const cleanToken = activationToken.trim();
+    const cleanIdentifier =
+      identifier.trim();
+
+    const cleanToken =
+      activationToken.trim();
+
+    const requestedEmail =
+      String(email || '')
+        .trim()
+        .toLowerCase();
+
+    const requestedEmailRegex =
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (
+      !requestedEmail ||
+      !requestedEmailRegex.test(requestedEmail) ||
+      requestedEmail.length > 100
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Ingresa un correo electr?nico v?lido para activar tu cuenta."
+      );
+    }
 
     // 2. Localizar el perfil legacy sin confiar en el cliente
     let legacyUserDoc = null;
@@ -2662,16 +2685,38 @@ exports.claimAccountCallable = onCall(
     }
 
     // 7. Extraer y validar el email canónico exclusivamente desde el perfil PENDING de Firestore
-    const canonicalEmail = String(legacyData.email || "").trim().toLowerCase();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!canonicalEmail || !emailRegex.test(canonicalEmail) || canonicalEmail.length > 100) {
+    const canonicalEmail =
+      requestedEmail;
+
+    // El token v?lido permite definir el correo real.
+    // El correo placeholder del Excel no es autoridad.
+    const existingEmailSnap =
+      await db
+        .collection("users")
+        .where("email", "==", canonicalEmail)
+        .limit(5)
+        .get();
+
+    const conflictingEmailProfile =
+      existingEmailSnap.docs.find((docSnap) => {
+        if (docSnap.id === legacyDocId) {
+          return false;
+        }
+
+        const existing =
+          docSnap.data() || {};
+
+        return existing.status !== "MIGRATED";
+      });
+
+    if (conflictingEmailProfile) {
       throw new HttpsError(
-        "failed-precondition",
-        "El perfil registrado no cuenta con un correo electrónico válido asignado. Contacta al administrador."
+        "already-exists",
+        "Este correo electr?nico ya est? asociado a otro perfil."
       );
     }
 
-    // 8. Detección y Recuperación de COMPENSATION_FAILED (CLAIM-11 / CLAIM-12)
+    // Recuperaci?n de intentos anteriores fallidos
     const isCompensationFailed =
       (opData && opData.status === "COMPENSATION_FAILED") ||
       legacyData.claimStatus === "COMPENSATION_FAILED";
@@ -2806,6 +2851,7 @@ exports.claimAccountCallable = onCall(
           userCode: freshLegacyData.userCode || "",
           fullName: freshLegacyData.fullName || "",
           email: canonicalEmail,
+          bulkImportPlaceholderEmail: false,
           phone: freshLegacyData.phone || "",
           documentId: freshLegacyData.documentId || "",
           role: "USER",
@@ -2840,6 +2886,8 @@ exports.claimAccountCallable = onCall(
           status: "MIGRATED",
           isClaimed: true,
           migratedToUid: firebaseAuthUid,
+          claimedEmail: canonicalEmail,
+          bulkImportPlaceholderEmail: false,
           claimStatus: "COMPLETED",
           orphanedAuthUid: null,
           orphanedEmail: null,

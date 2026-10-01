@@ -222,12 +222,13 @@ export const firestoreService = {
   /**
    * FASE 1B: Invoca la Cloud Function HTTPS Callable `claimAccountCallable`
    * para activar un perfil legacy en Firebase Auth y crear la identidad canónica /users/{firebaseAuthUid}.
-   * El cliente suministra exclusivamente identifier, activationToken y password.
+   * El cliente suministra identifier, activationToken, email y password.
    * El email y el identificador de operación se determinan de manera autoritativa en el servidor.
    */
   async claimAccountCallable(payload: {
     identifier: string;
     activationToken: string;
+    email: string;
     password: string;
     clientRequestId?: string;
   }): Promise<{ success: boolean; message: string; uid?: string; email?: string }> {

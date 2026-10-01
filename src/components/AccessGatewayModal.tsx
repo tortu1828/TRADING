@@ -122,7 +122,20 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
     }
 
     setFoundUser(user);
-    setClaimEmail(user.email || '');
+
+    const currentEmail =
+      String(user.email || '').trim();
+
+    const isPlaceholderEmail =
+      /^pending\..+@easytraders24\.app$/i.test(
+        currentEmail
+      );
+
+    setClaimEmail(
+      isPlaceholderEmail
+        ? ''
+        : currentEmail
+    );
   };
 
   // Confirmar activación (Paso 2 del Claim)
@@ -146,13 +159,34 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
       return;
     }
 
-    const tokenToSubmit = claimActivationToken.trim();
-    // Limpieza inmediata de memoria del token y contraseñas
+    const tokenToSubmit =
+      claimActivationToken.trim();
+
+    const emailToSubmit =
+      claimEmail
+        .trim()
+        .toLowerCase();
+
+    const passwordToSubmit =
+      claimPassword;
+
+    if (passwordToSubmit.length < 6) {
+      setClaimError(
+        'La contrase?a debe tener al menos 6 caracteres.'
+      );
+      return;
+    }
+
     setClaimActivationToken('');
     setClaimPassword('');
     setClaimConfirmPassword('');
 
-    const res = await claimAccount(foundUser.userCode, tokenToSubmit, claimEmail, claimPassword);
+    const res = await claimAccount(
+      foundUser.userCode,
+      tokenToSubmit,
+      emailToSubmit,
+      passwordToSubmit
+    );
     if (res.success) {
       setClaimSuccess(true);
       setTimeout(() => {
