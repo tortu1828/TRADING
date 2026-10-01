@@ -24,6 +24,7 @@ import {
   Trash2,
   KeyRound,
   ShieldCheck,
+  Lock,
 } from 'lucide-react';
 import { dataStore } from '../lib/dataStore';
 import { useAuth } from '../context/AuthContext';

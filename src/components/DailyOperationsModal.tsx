@@ -177,17 +177,17 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
 
     if (activeOps.length === 0) {
       setError(
-        'No hay operaciones activas pendientes en esta sesi?n.'
+        'No hay operaciones activas pendientes en esta sesión.'
       );
       return;
     }
 
     if (
       !window.confirm(
-        `?Confirmas CERRAR esta sesi?n por ${formatUSD(activeUsd)}?\n\n` +
-        `? El mostrador de esta bit?cora volver? a $0.\n` +
-        `? Las operaciones seguir?n pendientes del Cierre Global.\n` +
-        `? No se duplicar?n las ganancias del ciclo.`
+        `¿Confirmas CERRAR esta sesión por ${formatUSD(activeUsd)}?\n\n` +
+        `• El mostrador de esta bitácora volverá a $0.\n` +
+        `• Las operaciones seguirán pendientes del Cierre Global.\n` +
+        `• No se duplicarán las ganancias del ciclo.`
       )
     ) {
       return;
@@ -218,7 +218,7 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
 
       setError(
         err.message ||
-        'Error al cerrar la sesi?n diaria.'
+        'Error al cerrar la sesión diaria.'
       );
     }
   };

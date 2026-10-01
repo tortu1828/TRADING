@@ -2270,16 +2270,16 @@ class DataStore {
             'SYSTEM',
 
           title:
-            `?? Operaci?n Registrada: ${formattedUsd}`,
+            `${opUsd >= 0 ? '📈' : '📉'} Operación Registrada: ${formattedUsd}`,
 
           message:
-            `Hola ${tradeName}, se ejecut? una operaci?n de trading por ${formattedUsd} el ${
+            `Hola ${tradeName}, se ejecutó una operación de trading por ${formattedUsd} el ${
               op.date ||
-              'd?a de hoy'
-            } en tu Bit?cora ${
+              'día de hoy'
+            } en tu Bitácora ${
               user.category ||
               op.category
-            }. Tu resultado para esta operaci?n es de ${formattedProfit}.`,
+            }. Tu resultado para esta operación es de ${formattedProfit}.`,
 
           payload: {
             cycleId,
