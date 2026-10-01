@@ -4208,111 +4208,21 @@ class DataStore {
         this.notify();
         return created;
       }
-    } catch (callError: any) {
-      console.warn('[DataStore] Error en submitReinvestmentRequestCallable, aplicando validación local segura:', callError);
-      // Si falla por ya existir en backend, propagar error
-      if (callError?.message?.includes('already-exists') || callError?.code === 'already-exists') {
-        throw new Error('Ya tienes una solicitud pendiente para este ciclo.');
-      }
+    } catch (callError) {
+      console.error(
+        '[DataStore] REINVESTMENT_SERVER_AUTHORITATIVE: el servidor rechazo o no pudo procesar la solicitud; no se creara una solicitud local.',
+        callError
+      );
+      throw callError instanceof Error
+        ? callError
+        : new Error(
+            'No se pudo radicar la solicitud de reinversion en el servidor. Intenta nuevamente.'
+          );
     }
 
-    // 3. Fallback Local Canónico Seguro (para entorno offline / demo con idénticas reglas)
-    const userResult = this.getUserResultForUser(userId, sourceCycleId);
-    const cycleProfitSnapshotCop = userResult ? userResult.userProfitCop : 0;
-    const currentCapitalSnapshotCop = user.currentCapital;
-    const positiveProfit = Math.max(cycleProfitSnapshotCop, 0);
-    const reinvestableProfitCop = Math.floor(positiveProfit / 1_000_000) * 1_000_000;
-
-    let profitAppliedCop = 0;
-    let cashInjectionCop = 0;
-    let totalIncreaseCop = 0;
-    let profitToDisburseCop = 0;
-    let projectedCapitalCop = currentCapitalSnapshotCop;
-    let desiredIncrease: number | null = null;
-
-    if (modality === 'PROFIT_REINVESTMENT') {
-      if (reinvestableProfitCop < 1_000_000) {
-        throw new Error('Tus ganancias todavía no alcanzan el mínimo de $1.000.000 necesario para reinvertir.');
-      }
-      const selected = Number(selectedReinvestmentCop || 0);
-      if (selected < 1_000_000 || selected > reinvestableProfitCop || selected % 1_000_000 !== 0) {
-        throw new Error(`El monto a reinvertir debe ser múltiplo de $1.000.000 COP hasta $${reinvestableProfitCop.toLocaleString('es-CO')}.`);
-      }
-      profitAppliedCop = selected;
-      cashInjectionCop = 0;
-      totalIncreaseCop = profitAppliedCop;
-      profitToDisburseCop = Math.max(cycleProfitSnapshotCop - profitAppliedCop, 0);
-      projectedCapitalCop = currentCapitalSnapshotCop + profitAppliedCop;
-    } else {
-      const desired = Number(desiredCapitalIncreaseCop || 0);
-      if (desired <= 0 || desired % 1_000_000 !== 0) {
-        throw new Error('El aumento de capital debe ser mayor a cero y múltiplo de $1.000.000 COP.');
-      }
-      desiredIncrease = desired;
-      profitAppliedCop = Math.min(reinvestableProfitCop, desired);
-      cashInjectionCop = Math.max(desired - profitAppliedCop, 0);
-      totalIncreaseCop = desired;
-      projectedCapitalCop = currentCapitalSnapshotCop + desired;
-      profitToDisburseCop = Math.max(cycleProfitSnapshotCop - profitAppliedCop, 0);
-    }
-
-    const projectedCategory = getCategoryForCapital(projectedCapitalCop);
-    const newId = `reinv_${Date.now()}_${userId.slice(0, 6)}`;
-    const nowIso = new Date().toISOString();
-
-    const newRequest: ReinvestmentRequest = {
-      id: newId,
-      userId,
-      userUid: userId,
-      userCode: user.userCode,
-      userName: user.fullName,
-      userEmail: user.email,
-      sourceCycleId,
-      modality,
-      clientRequestId: clientRequestId || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`),
-
-      currentCapitalSnapshotCop,
-      cycleProfitSnapshotCop,
-      reinvestableProfitCop,
-      desiredCapitalIncreaseCop: desiredIncrease,
-      profitAppliedCop,
-      cashInjectionCop,
-      totalIncreaseCop,
-      profitToDisburseCop,
-      projectedCapitalCop,
-      projectedCategory,
-
-      // Retrocompatibilidad con esquemas heredados
-      availableProfitCop: cycleProfitSnapshotCop,
-      reinvestAmountCop: profitAppliedCop, // Ganancia del ciclo efectivamente reinvertida (semántica histórica canónica)
-      withdrawAmountCop: profitToDisburseCop,
-      newCapitalTargetCop: projectedCapitalCop,
-      newCategoryTarget: projectedCategory,
-
-      status: 'PENDING',
-      createdAt: nowIso,
-      resolvedAt: null,
-      resolvedBy: null,
-      resolvedByUid: null,
-      rejectionReason: undefined,
-      appliedAtCycleClosure: false,
-    };
-
-    this.reinvestments.unshift(newRequest);
-    this.knownReinvestmentIds.add(newRequest.id);
-
-    firestoreService.saveReinvestment(newRequest).catch((err) => {
-      console.warn('[DataStore] Error al guardar reinversión en Firestore:', err);
-    });
-
-    notifyNewReinvestmentToAdmin({
-      userName: user.fullName,
-      userCode: user.userCode,
-      newCapitalTargetCop: projectedCapitalCop,
-    });
-
-    this.notify();
-    return newRequest;
+    throw new Error(
+      'REINVESTMENT_SERVER_RESPONSE_INVALID: el servidor no devolvio una solicitud valida.'
+    );
   }
 
   public createReinvestmentRequest(

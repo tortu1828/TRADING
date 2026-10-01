@@ -92,6 +92,203 @@ export const ReinvestmentsView: React.FC = () => {
   const [isResolvingRecon, setIsResolvingRecon] = useState(false);
 
   const reinvestments = dataStore.getReinvestments();
+
+  // ADMIN_REINVESTMENT_FINANCIAL_SUMMARY
+  // Los valores mostrados aqui provienen exclusivamente de los snapshots
+  // financieros almacenados en la solicitud por el backend.
+  const renderFinancialSummary = (req: ReinvestmentRequest) => {
+    const currentCapital = Number(
+      req.currentCapitalSnapshotCop ?? 0
+    );
+
+    const cycleProfit = Number(
+      req.cycleProfitSnapshotCop ??
+      req.availableProfitCop ??
+      0
+    );
+
+    const reinvestableProfit = Number(
+      req.reinvestableProfitCop ?? 0
+    );
+
+    const profitApplied = Number(
+      req.profitAppliedCop ??
+      req.reinvestAmountCop ??
+      0
+    );
+
+    const cashInjection = Number(
+      req.cashInjectionCop ?? 0
+    );
+
+    const totalIncrease = Number(
+      req.totalIncreaseCop ??
+      req.reinvestAmountCop ??
+      0
+    );
+
+    const profitToDisburse = Number(
+      req.profitToDisburseCop ??
+      req.withdrawAmountCop ??
+      0
+    );
+
+    const projectedCapital = Number(
+      req.projectedCapitalCop ??
+      req.newCapitalTargetCop ??
+      0
+    );
+
+    const projectedCategory =
+      req.projectedCategory ??
+      req.newCategoryTarget ??
+      '-';
+
+    return (
+      <div
+        data-admin-reinvestment-financial-summary="true"
+        className="mt-4 rounded-xl border border-slate-700/70 bg-slate-950/50 p-4"
+      >
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
+              Resumen financiero
+            </p>
+
+            <p className="text-xs font-semibold text-slate-300">
+              Valores congelados al momento de la solicitud
+            </p>
+          </div>
+
+          <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-[10px] font-bold uppercase text-slate-300">
+            {req.modality === 'CAPITAL_INJECTION'
+              ? 'Inyección de Capital'
+              : 'Reinversión de Ganancias'}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-[10px] font-bold uppercase text-slate-500">
+              Capital actual
+            </p>
+            <p className="mt-1 font-mono text-sm font-bold text-slate-100">
+              {formatCOP(currentCapital)}
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-[10px] font-bold uppercase text-slate-500">
+              Ganancia del ciclo
+            </p>
+            <p className="mt-1 font-mono text-sm font-bold text-emerald-300">
+              {formatCOP(cycleProfit)}
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-[10px] font-bold uppercase text-slate-500">
+              Ganancia reinvertible
+            </p>
+            <p className="mt-1 font-mono text-sm font-bold text-slate-100">
+              {formatCOP(reinvestableProfit)}
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-[10px] font-bold uppercase text-slate-500">
+              Ganancia que reinvierte
+            </p>
+            <p className="mt-1 font-mono text-sm font-bold text-cyan-300">
+              {formatCOP(profitApplied)}
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-[10px] font-bold uppercase text-slate-500">
+              Dinero nuevo a inyectar
+            </p>
+            <p
+              className={`mt-1 font-mono text-sm font-bold ${
+                cashInjection > 0
+                  ? 'text-amber-300'
+                  : 'text-slate-400'
+              }`}
+            >
+              {formatCOP(cashInjection)}
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-[10px] font-bold uppercase text-slate-500">
+              Saldo a desembolsar
+            </p>
+            <p className="mt-1 font-mono text-sm font-bold text-violet-300">
+              {formatCOP(profitToDisburse)}
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-emerald-900/50 bg-emerald-950/20 p-3">
+            <p className="text-[10px] font-bold uppercase text-emerald-500/80">
+              Aumento total
+            </p>
+            <p className="mt-1 font-mono text-sm font-black text-emerald-300">
+              +{formatCOP(totalIncrease)}
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-cyan-900/50 bg-cyan-950/20 p-3">
+            <p className="text-[10px] font-bold uppercase text-cyan-500/80">
+              Nuevo capital proyectado
+            </p>
+            <p className="mt-1 font-mono text-sm font-black text-cyan-200">
+              {formatCOP(projectedCapital)}
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-slate-700 bg-slate-900/70 p-3">
+            <p className="text-[10px] font-bold uppercase text-slate-500">
+              Nueva categoría
+            </p>
+            <p className="mt-1 text-sm font-black text-slate-100">
+              {projectedCategory}
+            </p>
+          </div>
+
+        </div>
+
+        {req.modality === 'CAPITAL_INJECTION' && cashInjection > 0 && (
+          <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-950/20 px-3 py-2">
+            <p className="text-xs text-amber-200">
+              El inversionista debe aportar externamente{' '}
+              <strong className="font-mono">
+                {formatCOP(cashInjection)}
+              </strong>
+              {' '}antes de completar el proceso administrativo correspondiente.
+            </p>
+          </div>
+        )}
+
+        <div className="mt-3 grid grid-cols-1 gap-2 text-[10px] text-slate-500 sm:grid-cols-2">
+          <p>
+            Ciclo origen:{' '}
+            <span className="font-mono text-slate-300">
+              {req.sourceCycleId}
+            </span>
+          </p>
+
+          <p>
+            Ciclo destino:{' '}
+            <span className="font-mono text-slate-300">
+              {req.targetCycleId || 'No definido'}
+            </span>
+          </p>
+        </div>
+      </div>
+    );
+  };
+
   const waitlist = dataStore.getInvestments();
 
   const reconciliationNeedsReviewRequests = useMemo(() => {
@@ -947,7 +1144,9 @@ export const ReinvestmentsView: React.FC = () => {
                                           ✓ Dinero verificado por {req.cashReceivedByName || 'Admin'} el {formatDateSafe(req.cashReceivedAt, true)}
                                         </p>
                                       )}
-                                      {(req.rejectionReason || req.notes) && (
+                                      {renderFinancialSummary(req)}
+
+                              {(req.rejectionReason || req.notes) && (
                                         <div className="mt-1 p-2 rounded bg-slate-950 border border-slate-800 text-amber-300 text-[10px]">
                                           <strong>Nota / Motivo:</strong> {req.rejectionReason || req.notes}
                                         </div>
@@ -1293,6 +1492,8 @@ export const ReinvestmentsView: React.FC = () => {
                                   ✓ Dinero verificado por {req.cashReceivedByName || 'Admin'} el {formatDateSafe(req.cashReceivedAt, true)}
                                 </p>
                               )}
+                              {renderFinancialSummary(req)}
+
                               {(req.rejectionReason || req.notes) && (
                                 <div className="mt-1 p-2 rounded bg-slate-950 border border-slate-800 text-amber-300 text-[10px]">
                                   <strong>Nota / Motivo:</strong> {req.rejectionReason || req.notes}
