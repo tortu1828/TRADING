@@ -57,7 +57,8 @@ export const LoginView: React.FC<LoginViewProps> = ({ onSuccess, initialMode = '
     setCurrentMode(mode);
     setLoginError(null);
     setClaimError(null);
-    setClaimToken(''); // Limpieza inmediata de token plaintext en memoria React
+    setClaimToken('');
+    setClaimEmail(''); // Limpieza inmediata de token plaintext en memoria React
     setApplyError(null);
     setRecoveryError(null);
     setRecoverySuccess(null);
@@ -93,6 +94,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onSuccess, initialMode = '
   // Claim account state (existing bitácora user)
   const [claimCode, setClaimCode] = useState('');
   const [claimToken, setClaimToken] = useState('');
+  const [claimEmail, setClaimEmail] = useState('');
   const [claimPassword, setClaimPassword] = useState('');
   const [claimConfirmPassword, setClaimConfirmPassword] = useState('');
   const [showClaimPassword, setShowClaimPassword] = useState(false);
@@ -210,6 +212,24 @@ export const LoginView: React.FC<LoginViewProps> = ({ onSuccess, initialMode = '
       setClaimError('Ingresa el token de activación que te fue asignado.');
       return;
     }
+    const cleanClaimEmail =
+      claimEmail
+        .trim()
+        .toLowerCase();
+
+    const claimEmailRegex =
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (
+      !cleanClaimEmail ||
+      !claimEmailRegex.test(cleanClaimEmail)
+    ) {
+      setClaimError(
+        'Ingresa un correo electrónico válido para activar tu cuenta.'
+      );
+      return;
+    }
+
     if (claimPassword.length < 6) {
       setClaimError('La contraseña debe contener al menos 6 caracteres.');
       return;
@@ -222,6 +242,10 @@ export const LoginView: React.FC<LoginViewProps> = ({ onSuccess, initialMode = '
     setClaimLoading(true);
     const codeToSubmit = claimCode.trim();
     const tokenToSubmit = claimToken.trim();
+    const emailToSubmit =
+      claimEmail
+        .trim()
+        .toLowerCase();
     const passToSubmit = claimPassword;
     // Limpieza inmediata del token en texto claro y contraseñas de la memoria del componente
     setClaimToken('');
@@ -229,7 +253,12 @@ export const LoginView: React.FC<LoginViewProps> = ({ onSuccess, initialMode = '
     setClaimConfirmPassword('');
 
     try {
-      const res = await claimAccount(codeToSubmit, tokenToSubmit, passToSubmit);
+      const res = await claimAccount(
+        codeToSubmit,
+        tokenToSubmit,
+        emailToSubmit,
+        passToSubmit
+      );
       if (res.success) {
         setClaimSuccessMsg(res.message || 'Cuenta activada exitosamente.');
         if (onSuccess) onSuccess();
@@ -549,6 +578,27 @@ export const LoginView: React.FC<LoginViewProps> = ({ onSuccess, initialMode = '
                 className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:border-emerald-500 transition font-mono"
                 required
               />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5 text-emerald-400" />
+                Correo Electrónico Personal
+              </label>
+
+              <input
+                type="email"
+                value={claimEmail}
+                onChange={(e) => setClaimEmail(e.target.value)}
+                placeholder="ej. inversionista@gmail.com"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:border-emerald-500 transition"
+                required
+                autoComplete="email"
+              />
+
+              <p className="text-[10px] text-slate-500 leading-relaxed">
+                Este será el correo definitivo que usarás para iniciar sesión.
+              </p>
             </div>
 
             <div className="space-y-1.5">
