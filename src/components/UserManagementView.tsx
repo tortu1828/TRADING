@@ -580,12 +580,86 @@ export const UserManagementView: React.FC = () => {
           });
 
           if (result && result.user) {
-            const userWithAlias = { ...result.user, tradeNotificationAlias: trimmedAlias };
-            dataStore.registerRemoteUserLocally(userWithAlias);
+            const userWithAlias = {
+              ...result.user,
+              tradeNotificationAlias: trimmedAlias,
+            };
+
+            dataStore.registerRemoteUserLocally(
+              userWithAlias
+            );
+
             if (trimmedAlias) {
-              await firestoreService.saveUser(userWithAlias);
+              await firestoreService.saveUser(
+                userWithAlias
+              );
             }
+
+            // AUTO_TOKEN_AFTER_CREATE
+            // El inversionista ya existe como PENDING_CLAIM.
+            // Generamos inmediatamente su token seguro y
+            // abrimos el mismo modal usado desde la tabla.
+            const pendingUserId =
+              userWithAlias.id ||
+              userWithAlias.userCode;
+
+            if (!pendingUserId) {
+              throw new Error(
+                'El inversionista fue creado, pero no se pudo resolver su identificador para generar el token.'
+              );
+            }
+
+            const tokenResult =
+              await firestoreService
+                .adminGenerateActivationToken(
+                  pendingUserId
+                );
+
+            if (
+              !tokenResult?.success ||
+              !tokenResult?.token
+            ) {
+              throw new Error(
+                'El inversionista fue creado, pero no se pudo generar el token de activacion.'
+              );
+            }
+
+            const directLink =
+              `${window.location.origin}/?mode=claim&code=${encodeURIComponent(
+                userWithAlias.userCode
+              )}`;
+
+            const whatsappMessage =
+              `?? *?Hola ${userWithAlias.fullName}!*
+
+Te compartimos tus credenciales y token de activaci?n seguro para tu portal de inversionista en *EasyTraders*:
+
+?? *C?digo de Inversionista:* \`${userWithAlias.userCode}\`
+??? *Token de Activaci?n Seguro:* \`${tokenResult.token}\`
+?? *Capital Registrado:* ${formatCOP(userWithAlias.currentCapital)}
+?? *Bit?cora Asignada:* ${userWithAlias.category}
+? *Vigencia:* 7 d?as (un solo uso)
+
+?? *Enlace Directo al Portal:*
+${directLink}
+
+?? *Instrucciones:*
+1. Abre el enlace directo o ingresa a la plataforma.
+2. Pega manualmente el *Token de Activaci?n Seguro*.
+3. Confirma tu correo personal y define tu contrase?a segura.
+
+?? *Seguridad:* Este token es personal e intransferible. Una vez activada la cuenta quedar? invalidado.`;
+
+            setGeneratedTokenModal({
+              token: tokenResult.token,
+              expiresAt: tokenResult.expiresAt,
+              userCode: userWithAlias.userCode,
+              fullName: userWithAlias.fullName,
+              directUrl: directLink,
+              whatsappMessage,
+            });
           }
+
           setFormTargetCycleId('');
           setIsAddModalOpen(false);
         } else {
