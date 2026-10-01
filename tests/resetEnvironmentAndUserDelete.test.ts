@@ -715,6 +715,214 @@ describe('SUITE 40 CASOS REALES: testEnvironmentResetCore.js', () => {
     }
   });
 
+  // DELETE_PREPARING_PROVISIONAL_ENTRY_TESTS
+  it('20A. delete PREPARING con capital positivo permitido antes de START', async () => {
+    const uid = 'user_preparing_delete';
+    const cycleId = 'cyc_delete_preparing';
+
+    auth.addUser({
+      uid,
+      email: 'preparing-delete@test.com',
+    });
+
+    db.store.set('settings/global_config', {
+      operationalCycleId: null,
+      activeCycleId: null,
+      preparingCycleId: cycleId,
+    });
+
+    db.store.set(`monthlyCycles/${cycleId}`, {
+      id: cycleId,
+      cycleId,
+      status: 'OPEN',
+      operationalStatus: 'PREPARING',
+    });
+
+    db.store.set(`users/${uid}`, {
+      uid,
+      userCode: 'USR-PREP-DELETE',
+      email: 'preparing-delete@test.com',
+      role: 'USER',
+      status: 'ACTIVE',
+      currentCapital: 8_000_000,
+      baseCapital: 8_000_000,
+      entryCycleId: cycleId,
+    });
+
+    const res = await deleteIndividualUserCore({
+      authUid: rootAdminUid,
+      authEmail: superAdminEmail,
+      createdByName: 'Super Admin',
+      targetId: uid,
+      confirmation: 'ELIMINAR USR-PREP-DELETE',
+      db: db as any,
+      auth: auth as any,
+      FieldValue: null,
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.authDeleted).toBe(true);
+    expect(res.firestoreDocDeleted).toBe(true);
+    expect(auth.users.has(uid)).toBe(false);
+    expect(db.store.has(`users/${uid}`)).toBe(false);
+
+    const cycleSnap = await db
+      .collection('monthlyCycles')
+      .doc(cycleId)
+      .get();
+
+    expect(cycleSnap.exists).toBe(true);
+    expect(cycleSnap.data()?.operationalStatus).toBe('PREPARING');
+  });
+
+  it('20B. delete PREPARING sigue bloqueado por reinversion activa', async () => {
+    const uid = 'user_preparing_reinv';
+    const cycleId = 'cyc_delete_preparing_reinv';
+
+    auth.addUser({
+      uid,
+      email: 'preparing-reinv@test.com',
+    });
+
+    db.store.set('settings/global_config', {
+      operationalCycleId: null,
+      activeCycleId: null,
+      preparingCycleId: cycleId,
+    });
+
+    db.store.set(`monthlyCycles/${cycleId}`, {
+      id: cycleId,
+      cycleId,
+      status: 'OPEN',
+      operationalStatus: 'PREPARING',
+    });
+
+    db.store.set(`users/${uid}`, {
+      uid,
+      userCode: 'USR-PREP-REINV',
+      email: 'preparing-reinv@test.com',
+      role: 'USER',
+      status: 'ACTIVE',
+      currentCapital: 8_000_000,
+      entryCycleId: cycleId,
+    });
+
+    db.store.set('reinvestments/reinv_preparing_block', {
+      id: 'reinv_preparing_block',
+      userUid: uid,
+      userId: uid,
+      targetCycleId: cycleId,
+      status: 'PENDING',
+    });
+
+    await expect(
+      deleteIndividualUserCore({
+        authUid: rootAdminUid,
+        authEmail: superAdminEmail,
+        createdByName: 'Super Admin',
+        targetId: uid,
+        confirmation: 'ELIMINAR USR-PREP-REINV',
+        db: db as any,
+        auth: auth as any,
+        FieldValue: null,
+      })
+    ).rejects.toThrow('USER_HAS_ACTIVE_FINANCIAL_DEPENDENCIES');
+
+    expect(auth.users.has(uid)).toBe(true);
+    expect(db.store.has(`users/${uid}`)).toBe(true);
+  });
+
+  it('20C. delete no permite excepcion si el ciclo ya esta STARTED', async () => {
+    const uid = 'user_started_delete_block';
+    const cycleId = 'cyc_delete_started';
+
+    auth.addUser({
+      uid,
+      email: 'started-delete@test.com',
+    });
+
+    db.store.set('settings/global_config', {
+      operationalCycleId: cycleId,
+      activeCycleId: cycleId,
+      preparingCycleId: cycleId,
+    });
+
+    db.store.set(`monthlyCycles/${cycleId}`, {
+      id: cycleId,
+      cycleId,
+      status: 'OPEN',
+      operationalStatus: 'STARTED',
+    });
+
+    db.store.set(`users/${uid}`, {
+      uid,
+      userCode: 'USR-STARTED-BLOCK',
+      email: 'started-delete@test.com',
+      role: 'USER',
+      status: 'ACTIVE',
+      currentCapital: 8_000_000,
+      entryCycleId: cycleId,
+    });
+
+    await expect(
+      deleteIndividualUserCore({
+        authUid: rootAdminUid,
+        authEmail: superAdminEmail,
+        createdByName: 'Super Admin',
+        targetId: uid,
+        confirmation: 'ELIMINAR USR-STARTED-BLOCK',
+        db: db as any,
+        auth: auth as any,
+        FieldValue: null,
+      })
+    ).rejects.toThrow('USER_HAS_ACTIVE_FINANCIAL_DEPENDENCIES');
+
+    expect(auth.users.has(uid)).toBe(true);
+    expect(db.store.has(`users/${uid}`)).toBe(true);
+  });
+
+  it('20D. delete falla cerrado si entryCycleId apunta a PREPARING inexistente', async () => {
+    const uid = 'user_missing_preparing';
+    const cycleId = 'cyc_missing_preparing';
+
+    auth.addUser({
+      uid,
+      email: 'missing-preparing@test.com',
+    });
+
+    db.store.set('settings/global_config', {
+      operationalCycleId: null,
+      activeCycleId: null,
+      preparingCycleId: cycleId,
+    });
+
+    db.store.set(`users/${uid}`, {
+      uid,
+      userCode: 'USR-MISSING-PREP',
+      email: 'missing-preparing@test.com',
+      role: 'USER',
+      status: 'ACTIVE',
+      currentCapital: 8_000_000,
+      entryCycleId: cycleId,
+    });
+
+    await expect(
+      deleteIndividualUserCore({
+        authUid: rootAdminUid,
+        authEmail: superAdminEmail,
+        createdByName: 'Super Admin',
+        targetId: uid,
+        confirmation: 'ELIMINAR USR-MISSING-PREP',
+        db: db as any,
+        auth: auth as any,
+        FieldValue: null,
+      })
+    ).rejects.toThrow('USER_HAS_ACTIVE_FINANCIAL_DEPENDENCIES');
+
+    expect(auth.users.has(uid)).toBe(true);
+    expect(db.store.has(`users/${uid}`)).toBe(true);
+  });
+
   // 21 delete usuario sin dependencias permitido
   it('21. delete usuario sin dependencias permitido: elimina correctamente usuario limpio', async () => {
     auth.addUser({ uid: 'user_clean_3', email: 'clean3@test.com' });

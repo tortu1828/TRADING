@@ -632,16 +632,77 @@ async function auditUserActiveFinancialDependencies(userId, userDoc, resolvedUid
   const operationalCycleId = configData.operationalCycleId || configData.activeCycleId;
   const preparingCycleId = configData.preparingCycleId;
 
-  // 2. Perfil de usuario: currentCapital o entryCycleId en ciclo preparando
+  // DELETE_PREPARING_PROVISIONAL_ENTRY_ALLOWED
+  // A user assigned only to the authoritative PREPARING cycle has not
+  // entered operational trading yet. Positive capital in that provisional
+  // profile is therefore not, by itself, an active financial dependency.
+  //
+  // This exception is deliberately narrow and fail-closed:
+  // - entryCycleId must equal settings/global_config.preparingCycleId
+  // - the referenced monthlyCycles document must exist
+  // - status must be OPEN
+  // - operationalStatus must be PREPARING
+  //
+  // All real financial dependencies checked below remain blocking.
+  let isValidProvisionalPreparingEntry = false;
+
+  if (
+    userDoc &&
+    userDoc.entryCycleId &&
+    preparingCycleId &&
+    userDoc.entryCycleId === preparingCycleId
+  ) {
+    let preparingCycleSnap;
+
+    try {
+      preparingCycleSnap = await db
+        .collection("monthlyCycles")
+        .doc(preparingCycleId)
+        .get();
+    } catch (err) {
+      throw new Error(
+        `[FAIL_CLOSED] Error al consultar monthlyCycles/${preparingCycleId} para validar borrado de usuario PREPARING: ${err.message}`
+      );
+    }
+
+    if (preparingCycleSnap.exists) {
+      const preparingCycleData = preparingCycleSnap.data
+        ? preparingCycleSnap.data()
+        : preparingCycleSnap;
+
+      isValidProvisionalPreparingEntry =
+        preparingCycleData.status === "OPEN" &&
+        preparingCycleData.operationalStatus === "PREPARING";
+    }
+  }
+
+  // 2. Perfil de usuario
   if (userDoc) {
-    if (userDoc.entryCycleId && userDoc.entryCycleId === preparingCycleId) {
-      activeDependencies.push({ type: "PREPARING_CYCLE_ENTRY", entryCycleId: userDoc.entryCycleId });
+    if (
+      userDoc.entryCycleId &&
+      userDoc.entryCycleId === preparingCycleId &&
+      !isValidProvisionalPreparingEntry
+    ) {
+      activeDependencies.push({
+        type: "PREPARING_CYCLE_ENTRY",
+        entryCycleId: userDoc.entryCycleId,
+      });
     }
-    if (Number(userDoc.currentCapital) > 0) {
-      activeDependencies.push({ type: "POSITIVE_CAPITAL", currentCapital: userDoc.currentCapital });
+
+    if (
+      Number(userDoc.currentCapital) > 0 &&
+      !isValidProvisionalPreparingEntry
+    ) {
+      activeDependencies.push({
+        type: "POSITIVE_CAPITAL",
+        currentCapital: userDoc.currentCapital,
+      });
     }
+
     if (userDoc.externalFundingStatus === "PENDING") {
-      activeDependencies.push({ type: "EXTERNAL_FUNDING_PENDING" });
+      activeDependencies.push({
+        type: "EXTERNAL_FUNDING_PENDING",
+      });
     }
   }
 
