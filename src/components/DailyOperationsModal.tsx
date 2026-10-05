@@ -120,9 +120,31 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
   );
 
   // Obtener usuarios reales del grupo (quienes tienen este capital exacto en esta categoría)
-  const usersInGroup: UserProfile[] = group.users && group.users.length > 0
-    ? group.users
-    : dataStore.getActiveUsers().filter((u) => u.currentCapital === group.groupCapitalCop);
+  const usersInGroup: UserProfile[] = (
+    group.users && group.users.length > 0
+      ? [...group.users]
+      : dataStore
+          .getActiveUsers()
+          .filter(
+            (u) =>
+              u.currentCapital ===
+              group.groupCapitalCop
+          )
+  ).sort((a, b) => {
+    const capitalDifference =
+      Number(a.currentCapital || 0) -
+      Number(b.currentCapital || 0);
+
+    if (capitalDifference !== 0) {
+      return capitalDifference;
+    }
+
+    return String(
+      a.userCode || ''
+    ).localeCompare(
+      String(b.userCode || '')
+    );
+  });
 
   // Totales consolidados del grupo
   const groupTotalGrossCop = totalGrossCopPerUser * usersInGroup.length;

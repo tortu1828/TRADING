@@ -187,7 +187,7 @@ export const UserManagementView: React.FC = () => {
 
   const selfAdminCapitalValid =
     Number.isFinite(selfAdminCapitalNumber) &&
-    selfAdminCapitalNumber >= 4_000_000 &&
+    selfAdminCapitalNumber >= 2_000_000 &&
     selfAdminCapitalNumber <= Number.MAX_SAFE_INTEGER;
 
   const selfAdminCategory =
@@ -308,7 +308,7 @@ export const UserManagementView: React.FC = () => {
 
     if (!selfAdminCapitalValid) {
       setSelfAdminConfigError(
-        'El capital debe ser igual o superior a $4.000.000 COP.'
+        'El capital debe ser igual o superior a $2.000.000 COP.'
       );
       return;
     }
@@ -466,15 +466,11 @@ export const UserManagementView: React.FC = () => {
     const cap = parseFloat(formCapital);
     const split = parseFloat(formUserSplit);
 
-    if (isNaN(cap) || cap < 4_000_000) {
-      setFormError('El capital mínimo de inversión es de $4.000.000 COP (Bitácora Azul).');
+    if (isNaN(cap) || cap < 2_000_000) {
+      setFormError('El capital mínimo de inversión es de $2.000.000 COP (Bitácora Azul).');
       return;
     }
 
-    if (cap > 4_000_000_000) {
-      setFormError('El capital excede el límite máximo de $4.000.000.000 COP.');
-      return;
-    }
 
     if (isNaN(split) || split <= 0 || split > 100) {
       setFormError('El porcentaje del inversionista debe ser entre 1% y 100%.');
@@ -1078,7 +1074,7 @@ ${directLink}
 
               <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px]">
                 <span className="text-slate-500">
-                  Mínimo: $4.000.000
+                  Mínimo: $2.000.000
                 </span>
 
                 {selfAdminCapitalNumber > 0 && (
@@ -1087,7 +1083,7 @@ ${directLink}
                   </span>
                 )}
 
-                {selfAdminCapitalNumber > 60_000_000 && (
+                {selfAdminCapitalNumber >= 60_000_000 && (
                   <span className="text-slate-300 font-bold">
                     NEGRA · sin tope comercial
                   </span>
@@ -1289,7 +1285,7 @@ ${directLink}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(azulCap)}</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">$4.000.000 a $10.000.000 COP</p>
+              <p className="text-[10px] text-slate-500 mt-0.5">$2.000.000 a $9.999.999 COP</p>
             </button>
           );
         })()}
@@ -1318,7 +1314,7 @@ ${directLink}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(verdeCap)}</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">&gt;$10.000.000 a $60.000.000 COP</p>
+              <p className="text-[10px] text-slate-500 mt-0.5">$10.000.000 a $59.999.999 COP</p>
             </button>
           );
         })()}
@@ -1347,7 +1343,7 @@ ${directLink}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-1 font-mono">{formatCOP(negraCap)}</p>
-              <p className="text-[10px] text-slate-500 mt-0.5">&gt;$60.000.000 COP ? sin tope</p>
+              <p className="text-[10px] text-slate-500 mt-0.5">$60.000.000 COP en adelante</p>
             </button>
           );
         })()}
@@ -2069,7 +2065,7 @@ ${directLink}
                     <input
                       type="number"
                       step="100000"
-                      min="4000000"
+                      min="2000000"
                       max={Number.MAX_SAFE_INTEGER}
                       value={formCapital}
                       onChange={(e) => setFormCapital(e.target.value)}
@@ -2091,9 +2087,9 @@ ${directLink}
                       }`}
                     >
                       {detectedCategory === 'AZUL'
-                        ? '🔵 Azul ($4M - <$10M)'
+                        ? '🔵 Azul ($2M - $9.999.999)'
                         : detectedCategory === 'VERDE'
-                        ? '🟢 Verde ($10M - <$60M)'
+                        ? '🟢 Verde ($10M - $59.999.999)'
                         : '⚫ Negra ($60M+)'}
                     </span>
                   </div>

@@ -399,10 +399,25 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
     });
   });
 
+  // BITACORA_OPERATED_USERS_CAPITAL_ASC
   const operatedUsersList =
     Array.from(
       operatedUsersMap.values()
-    );
+    ).sort((a, b) => {
+      const capitalDifference =
+        Number(a.groupCapitalCop || 0) -
+        Number(b.groupCapitalCop || 0);
+
+      if (capitalDifference !== 0) {
+        return capitalDifference;
+      }
+
+      return String(
+        a.user.userCode || ''
+      ).localeCompare(
+        String(b.user.userCode || '')
+      );
+    });
 
   const globalActiveGrossCopTotal =
     operatedUsersList.reduce(
@@ -629,8 +644,8 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
     const capital = parseFloat(newGroupCapitalCop.replace(/[^0-9]/g, ''));
     const usd = parseFloat(newGroupInitialUsd.replace(/[^0-9.]/g, ''));
 
-    if (isNaN(capital) || capital < 1_000_000) {
-      setErrorToast('Ingresa un valor de capital válido (mínimo $1.000.000 COP).');
+    if (isNaN(capital) || capital < 2_000_000) {
+      setErrorToast('Ingresa un valor de capital válido (mínimo $2.000.000 COP).');
       return;
     }
 
@@ -686,7 +701,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
       key: 'AZUL' as const,
       label: 'Bitácora Azul',
       badgeLabel: 'Azul',
-      rangeText: '$4M - $9M COP',
+      rangeText: '$2M - $9.999.999 COP',
       icon: Activity,
       count: blueGroups.length,
       usersCount: blueUsersCount,
@@ -698,7 +713,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
       key: 'VERDE' as const,
       label: 'Bitácora Verde',
       badgeLabel: 'Verde',
-      rangeText: '$10M - $50M COP',
+      rangeText: '$10M - $59.999.999 COP',
       icon: Activity,
       count: greenGroups.length,
       usersCount: greenUsersCount,
@@ -710,7 +725,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
       key: 'NEGRA' as const,
       label: 'Bitácora Negra',
       badgeLabel: 'Negra',
-      rangeText: '> $60M COP',
+      rangeText: '$60M+ COP',
       icon: Activity,
       count: blackGroups.length,
       usersCount: blackUsersCount,
@@ -990,7 +1005,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
           <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
           <input
             type="text"
-            placeholder="Buscar por monto (ej: $4M), cédula o cliente..."
+            placeholder="Buscar por monto (ej: $2M), cédula o cliente..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500"
@@ -1047,19 +1062,19 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
               switch (cat) {
                 case 'AZUL':
                   return {
-                    label: 'Bitácora Azul ($4M - $9M)',
+                    label: 'Bitácora Azul ($2M - $9.999.999)',
                     badge: 'bg-blue-950 text-blue-300 border-blue-500/40',
                     border: 'border-blue-500/30',
                   };
                 case 'VERDE':
                   return {
-                    label: 'Bitácora Verde ($10M - $50M)',
+                    label: 'Bitácora Verde ($10M - $59.999.999)',
                     badge: 'bg-emerald-950 text-emerald-300 border-emerald-500/40',
                     border: 'border-emerald-500/30',
                   };
                 case 'NEGRA':
                   return {
-                    label: 'Bitácora Negra (> $60M)',
+                    label: 'Bitácora Negra ($60M+)',
                     badge: 'bg-zinc-950 text-zinc-200 border-zinc-700',
                     border: 'border-zinc-800',
                   };
@@ -1390,13 +1405,13 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                 <input
                   type="text"
                   required
-                  placeholder="Ej: 4000000 o 10000000"
+                  placeholder="Ej: 2000000 o 10000000"
                   value={newGroupCapitalCop}
                   onChange={(e) => setNewGroupCapitalCop(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 font-mono focus:outline-none focus:border-blue-500"
                 />
                 <span className="text-[10px] text-slate-500 mt-0.5 block">
-                  Bitácoras: Azul ($4M - $9M) • Verde ($10M - $50M) • Negra (&gt; $60M)
+                  Bitácoras: Azul ($2M - $9.999.999) • Verde ($10M - $59.999.999) • Negra ($60M+)
                 </span>
               </div>
 

@@ -591,9 +591,9 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
             className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-300 focus:outline-none focus:border-amber-500/50 cursor-pointer"
           >
             <option value="ALL">Todas las Categorías</option>
-            <option value="AZUL">🔵 Bitácora Azul ($7M - $9.9M)</option>
-            <option value="VERDE">🟢 Bitácora Verde ($10M - $49.9M)</option>
-            <option value="NEGRA">⚫ Bitácora Negra ($50M+)</option>
+            <option value="AZUL">🔵 Bitácora Azul ($2M - $9.999.999)</option>
+            <option value="VERDE">🟢 Bitácora Verde ($10M - $59.999.999)</option>
+            <option value="NEGRA">⚫ Bitácora Negra ($60M+)</option>
           </select>
         </div>
       </div>
@@ -1003,9 +1003,9 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                     onChange={(e) => setApprovalCategory(e.target.value as BitacoraCategory)}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-amber-500"
                   >
-                    <option value="AZUL">🔵 Azul ($7M - $9.9M)</option>
-                    <option value="VERDE">🟢 Verde ($10M - $49.9M)</option>
-                    <option value="NEGRA">⚫ Bitácora Negra (&gt; $60M)</option>
+                    <option value="AZUL">🔵 Azul ($2M - $9.999.999)</option>
+                    <option value="VERDE">🟢 Verde ($10M - $59.999.999)</option>
+                    <option value="NEGRA">⚫ Bitácora Negra ($60M+)</option>
                   </select>
                 </div>
               </div>

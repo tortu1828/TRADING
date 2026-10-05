@@ -191,12 +191,39 @@ exports.adminExecuteDailyOperation = onCall(
     }
 
     // Validación estricta de consistencia categoría / capital para CUSTOM_GROUP
+    let expectedCustomGroupCategory = null;
+    let legacyBoundaryCandidate = false;
+
     if (targetType === "CUSTOM_GROUP") {
-      const expectedCategory = getCategoryForCapitalLocal(Number(groupCapitalCop));
-      if (category !== expectedCategory) {
+      // CUSTOM_GROUP_MIN_CAPITAL
+      if (
+        !Number.isFinite(Number(groupCapitalCop)) ||
+        Number(groupCapitalCop) < 2000000 ||
+        Number(groupCapitalCop) > Number.MAX_SAFE_INTEGER
+      ) {
         throw new HttpsError(
           "invalid-argument",
-          `CATEGORY_CAPITAL_MISMATCH: La categoría '${category}' no corresponde al capital nominal $${Number(groupCapitalCop).toLocaleString("es-CO")} COP (categoría esperada: '${expectedCategory}').`
+          "INVALID_GROUP_CAPITAL: El capital nominal del grupo debe ser igual o superior a $2.000.000 COP."
+        );
+      }
+
+      expectedCustomGroupCategory =
+        getCategoryForCapitalLocal(
+          Number(groupCapitalCop)
+        );
+
+      // Solo estas dos fronteras pueden provenir de snapshots antiguos.
+      legacyBoundaryCandidate =
+        (Number(groupCapitalCop) === 10000000 && category === "AZUL") ||
+        (Number(groupCapitalCop) === 60000000 && category === "VERDE");
+
+      if (
+        category !== expectedCustomGroupCategory &&
+        !legacyBoundaryCandidate
+      ) {
+        throw new HttpsError(
+          "invalid-argument",
+          `CATEGORY_CAPITAL_MISMATCH: La categoría '${category}' no corresponde al capital nominal $${Number(groupCapitalCop).toLocaleString("es-CO")} COP (categoría esperada: '${expectedCustomGroupCategory}').`
         );
       }
     }
@@ -411,6 +438,45 @@ exports.adminExecuteDailyOperation = onCall(
         } else if (targetType === "CUSTOM_GROUP") {
           targetUsersListSnap = await transaction.get(
             db.collection("users").where("currentCapital", "==", Number(groupCapitalCop))
+          );
+        }
+      }
+
+      // BITACORA_BOUNDARY_LEGACY_COMPAT
+      // Una categoría antigua en 10M/60M solo es válida si:
+      // 1. existe el snapshot congelado exacto en un ciclo STARTED, o
+      // 2. se trata de un ciclo legacy real sin operationalStatus que ya
+      //    superó el guard de operaciones históricas.
+      if (
+        targetType === "CUSTOM_GROUP" &&
+        legacyBoundaryCandidate &&
+        category !== expectedCustomGroupCategory
+      ) {
+        const frozenLegacyBoundaryMatch =
+          isCycleStarted &&
+          targetResultsListSnap &&
+          !targetResultsListSnap.empty &&
+          targetResultsListSnap.docs.some((docSnap) => {
+            const frozen = docSnap.data() || {};
+
+            return (
+              frozen.isFrozen === true &&
+              frozen.cycleCategory === category &&
+              Number(frozen.groupCapitalCop) ===
+                Number(groupCapitalCop)
+            );
+          });
+
+        const trueLegacyCycleBoundaryMatch =
+          !opStatus;
+
+        if (
+          !frozenLegacyBoundaryMatch &&
+          !trueLegacyCycleBoundaryMatch
+        ) {
+          throw new HttpsError(
+            "invalid-argument",
+            `CATEGORY_CAPITAL_MISMATCH: La categoría legacy '${category}' para $${Number(groupCapitalCop).toLocaleString("es-CO")} COP no está respaldada por un snapshot congelado del ciclo. La categoría canónica actual es '${expectedCustomGroupCategory}'.`
           );
         }
       }
@@ -808,18 +874,18 @@ async function getNextAtomicUserCode() {
 /**
  * Determina la categoría canónica del inversionista a partir de su capital operativo (COP).
  * Rangos canónicos del sistema:
- * - AZUL: < $10.000.000 COP (típicamente $4.000.000 - $9.999.999 COP)
+ * - AZUL: < $10.000.000 COP (típicamente $2.000.000 - $9.999.999 COP)
  * - VERDE: >= $10.000.000 COP y < $60.000.000 COP (ej. $18.000.000 COP)
  * - NEGRA / WHALE: >= $60.000.000 COP (ej. >= $60M COP)
  */
 function getCanonicalCategoryForCapital(capital) {
   const cap = Number(capital) || 0;
 
-  if (cap > 60000000) {
+  if (cap >= 60000000) {
     return "NEGRA";
   }
 
-  if (cap > 10000000) {
+  if (cap >= 10000000) {
     return "VERDE";
   }
 
@@ -954,6 +1020,36 @@ exports.adminCreateUser = onCall(
     const cleanPaymentDetails = String(paymentDetails || "Cuenta Principal").trim();
 
     const capNum = Number(currentCapital) || 0;
+
+    // ADMIN_CREATE_USER_CAPITAL_GUARD
+    if (
+      role !== "ADMIN" &&
+      (
+        !Number.isFinite(capNum) ||
+        capNum < 2000000 ||
+        capNum > Number.MAX_SAFE_INTEGER
+      )
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_TRADING_CAPITAL: El capital del inversionista debe ser igual o superior a $2.000.000 COP."
+      );
+    }
+
+    if (
+      role === "ADMIN" &&
+      (
+        !Number.isFinite(capNum) ||
+        capNum < 0 ||
+        capNum > Number.MAX_SAFE_INTEGER
+      )
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_ADMIN_CAPITAL: El capital administrativo suministrado no es válido."
+      );
+    }
+
     const userPctNum = Number(userPercentage) !== undefined ? Number(userPercentage) : 75;
     const adminPctNum = Number(adminPercentage) !== undefined ? Number(adminPercentage) : 25;
 
@@ -1131,6 +1227,19 @@ exports.adminCreatePendingInvestor = onCall(
     const cleanPaymentDetails = String(paymentDetails || "Cuenta Principal").trim();
 
     const capNum = Number(currentCapital) || 0;
+
+    // ADMIN_CREATE_PENDING_INVESTOR_CAPITAL_GUARD
+    if (
+      !Number.isFinite(capNum) ||
+      capNum < 2000000 ||
+      capNum > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_TRADING_CAPITAL: El capital del inversionista debe ser igual o superior a $2.000.000 COP."
+      );
+    }
+
     const userPctNum = Number(userPercentage) !== undefined ? Number(userPercentage) : 75;
     const adminPctNum = Number(adminPercentage) !== undefined ? Number(adminPercentage) : 25;
 
@@ -1594,7 +1703,7 @@ exports.adminBulkImportInvestorsCallable = onCall(
 
       if (
         !Number.isFinite(capital) ||
-        capital < 4000000 ||
+        capital < 2000000 ||
         capital >
           Number.MAX_SAFE_INTEGER
       ) {
@@ -3174,12 +3283,12 @@ exports.submitApplicationCallable = onCall(
     const numCapital = Number(requestedCapitalCop);
     if (
       !Number.isFinite(numCapital) ||
-      numCapital < 4000000 ||
+      numCapital < 2000000 ||
       numCapital > Number.MAX_SAFE_INTEGER
     ) {
       throw new HttpsError(
         "invalid-argument",
-        "El capital solicitado debe ser igual o superior a $4.000.000 COP."
+        "El capital solicitado debe ser igual o superior a $2.000.000 COP."
       );
     }
 
@@ -4187,8 +4296,8 @@ exports.adminPurgeTradingTestData = onCall(
 function getCategoryForCapitalLocal(capital) {
   const cap = Number(capital) || 0;
 
-  if (cap > 60000000) return 'NEGRA';
-  if (cap > 10000000) return 'VERDE';
+  if (cap >= 60000000) return 'NEGRA';
+  if (cap >= 10000000) return 'VERDE';
 
   return 'AZUL';
 }
@@ -8273,12 +8382,12 @@ exports.adminConfigureTradingParticipantCallable = onCall(
 
     if (
       !Number.isFinite(parsedCapital) ||
-      parsedCapital < 4000000 ||
+      parsedCapital < 2000000 ||
       parsedCapital > Number.MAX_SAFE_INTEGER
     ) {
       throw new HttpsError(
         "invalid-argument",
-        "INVALID_TRADING_CAPITAL: El capital debe ser igual o superior a $4.000.000 COP."
+        "INVALID_TRADING_CAPITAL: El capital debe ser igual o superior a $2.000.000 COP."
       );
     }
 
@@ -9035,7 +9144,7 @@ exports.adminStartCycleCallable = onCall(
           finalCapitalCop = Number(uProfile.currentCapital || 0);
         }
 
-        if (finalCapitalCop < 4000000) {
+        if (finalCapitalCop < 2000000) {
           await safelyReleaseStartLock();
           throw new HttpsError(
             "failed-precondition",

@@ -145,9 +145,9 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
         const updated = { ...r, [field]: value };
         if (field === 'capitalCop') {
           const cap = Number(value) || 0;
-          if (cap > 60000000) {
+          if (cap >= 60000000) {
             updated.category = 'NEGRA';
-          } else if (cap > 10000000) {
+          } else if (cap >= 10000000) {
             updated.category = 'VERDE';
           } else {
             updated.category = 'AZUL';
@@ -460,9 +460,9 @@ export const ExcelBitacoraImportModal: React.FC<ExcelBitacoraImportModalProps> =
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
               >
                 <option value="ALL">Auto-clasificar por Capital (Azul, Verde, Negra)</option>
-                <option value="AZUL">Forzar a Bitácora Azul ($4M - $9M COP)</option>
-                <option value="VERDE">Forzar a Bitácora Verde ($10M - $50M COP)</option>
-                <option value="NEGRA">Forzar a Bitácora Negra (&gt; $60M COP)</option>
+                <option value="AZUL">Forzar a Bitácora Azul ($2M - $9.999.999 COP)</option>
+                <option value="VERDE">Forzar a Bitácora Verde ($10M - $59.999.999 COP)</option>
+                <option value="NEGRA">Forzar a Bitácora Negra ($60M+ COP)</option>
               </select>
             </div>
 

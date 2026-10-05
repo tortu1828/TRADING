@@ -97,29 +97,29 @@ export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
     {
       id: 'AZUL',
       name: '🔵 Azul',
-      minCapital: 4_000_000,
-      maxCapital: 10_000_000,
+      minCapital: 2_000_000,
+      maxCapital: 9_999_999,
       color: '#2563eb',
       badgeBg: 'bg-blue-900/40 border-blue-500/30 text-blue-300',
-      badgeText: 'Azul ($4M - $10M COP)',
+      badgeText: 'Azul ($2M - $9.999.999 COP)',
     },
     {
       id: 'VERDE',
       name: '🟢 Verde',
-      minCapital: 10_000_001,
-      maxCapital: 60_000_000,
+      minCapital: 10_000_000,
+      maxCapital: 59_999_999,
       color: '#059669',
       badgeBg: 'bg-emerald-900/40 border-emerald-500/30 text-emerald-300',
-      badgeText: 'Verde (> $10M - $60M COP)',
+      badgeText: 'Verde ($10M - $59.999.999 COP)',
     },
     {
       id: 'NEGRA',
       name: '⚫ Bitácora Negra',
-      minCapital: 60_000_001,
+      minCapital: 60_000_000,
       maxCapital: Number.MAX_SAFE_INTEGER,
       color: '#09090b',
       badgeBg: 'bg-zinc-950 border-zinc-700 text-zinc-200',
-      badgeText: 'Bitácora Negra (> $60M COP)',
+      badgeText: 'Bitácora Negra ($60M+ COP)',
     },
   ],
   updatedAt: new Date().toISOString(),
@@ -1305,7 +1305,31 @@ class DataStore {
       const groupInfo: CategoryGroupInfo = {
         category: item.category,
         groupCapitalCop: item.groupCapitalCop,
-        users: item.users,
+        // BITACORA_USERS_CAPITAL_ASC
+        users: [...item.users].sort((a, b) => {
+          const capitalDifference =
+            (Number(a.currentCapital) || 0) -
+            (Number(b.currentCapital) || 0);
+
+          if (capitalDifference !== 0) {
+            return capitalDifference;
+          }
+
+          const codeDifference =
+            String(a.userCode || '').localeCompare(
+              String(b.userCode || '')
+            );
+
+          if (codeDifference !== 0) {
+            return codeDifference;
+          }
+
+          return String(
+            a.fullName || ''
+          ).localeCompare(
+            String(b.fullName || '')
+          );
+        }),
         calculation,
         isCalculated: !!calculation && calculation.status === 'CALCULATED',
         totalUsdApplied: dailyOps.length > 0 ? dailySumUsd : (calculation?.totalUsdApplied || 0),

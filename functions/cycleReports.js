@@ -734,7 +734,30 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
     allUsers.push(doc.data());
   });
 
-  allUsers.sort((a, b) => (a.userCode || "").localeCompare(b.userCode || ""));
+  // BITACORA_REPORT_CAPITAL_ASC
+  allUsers.sort((a, b) => {
+    const capitalDifference =
+      Number(
+        a.cycleCapitalCop ||
+        a.groupCapitalCop ||
+        0
+      ) -
+      Number(
+        b.cycleCapitalCop ||
+        b.groupCapitalCop ||
+        0
+      );
+
+    if (capitalDifference !== 0) {
+      return capitalDifference;
+    }
+
+    return String(
+      a.userCode || ""
+    ).localeCompare(
+      String(b.userCode || "")
+    );
+  });
 
   const usersByBitacora = {
     AZUL: allUsers.filter((u) => u.cycleCategory === "AZUL"),

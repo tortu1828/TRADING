@@ -1102,13 +1102,13 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
           {/* Category Range Legend Badges from Mockup */}
           <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
             <span className="px-2.5 py-1 rounded-lg bg-blue-950/70 border border-blue-500/30 text-blue-300">
-              🔵 AZUL: $7.000.000 - $9.999.999
+              🔵 AZUL: $2.000.000 - $9.999.999
             </span>
             <span className="px-2.5 py-1 rounded-lg bg-emerald-950/70 border border-emerald-500/30 text-emerald-300">
-              🟢 VERDE: $10.000.000 - $49.999.999
+              🟢 VERDE: $10.000.000 - $59.999.999
             </span>
             <span className="px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-600/40 text-slate-300">
-              ⚫ NEGRA / WHALE: $50.000.000 - $1.000.000.000
+              ⚫ NEGRA / WHALE: $60.000.000+
             </span>
           </div>
         </div>

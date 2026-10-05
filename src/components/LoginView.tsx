@@ -295,8 +295,8 @@ export const LoginView: React.FC<LoginViewProps> = ({ onSuccess, initialMode = '
     }
 
     const numericCapital = parseInt(applyCapitalStr.replace(/[^0-9]/g, ''), 10) || 0;
-    if (numericCapital < 4_000_000) {
-      setApplyError('El capital mínimo de inversión es de $4.000.000 COP (Bitácora Azul).');
+    if (numericCapital < 2_000_000) {
+      setApplyError('El capital mínimo de inversión es de $2.000.000 COP (Bitácora Azul).');
       return;
     }
 

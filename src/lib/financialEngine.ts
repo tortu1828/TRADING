@@ -2,34 +2,34 @@ import { BitacoraCategory } from '../types';
 
 export const BITACORA_RANGES: Record<BitacoraCategory, { min: number; max: number; name: string }> = {
   AZUL: {
-    min: 4_000_000,
-    max: 9_999_999.99,
-    name: '🔵 Azul ($4M - $9M)',
+    min: 2_000_000,
+    max: 9_999_999,
+    name: '🔵 Azul ($2M - $9.999.999)',
   },
   VERDE: {
     min: 10_000_000,
-    max: 59_999_999.99,
-    name: '🟢 Verde ($10M - $50M)',
+    max: 59_999_999,
+    name: '🟢 Verde ($10M - $59.999.999)',
   },
   NEGRA: {
     min: 60_000_000,
-    max: 1_000_000_000,
-    name: '⚫ Bitácora Negra (> $60M)',
+    max: Number.MAX_SAFE_INTEGER,
+    name: '⚫ Bitácora Negra ($60M+)',
   },
 };
 
 /**
  * Determina automáticamente la categoría (bitácora) según el capital operativo.
  * Regla:
- * - AZUL: >= $4.000.000 y < $10.000.000
+ * - AZUL: >= $2.000.000 y < $10.000.000
  * - VERDE: >= $10.000.000 y < $60.000.000
- * - NEGRA / WHALE: >= $60.000.000 y <= $1.000.000.000
+ * - NEGRA / WHALE: >= $60.000.000 sin limite comercial
  */
 export function getCategoryForCapital(capital: number): BitacoraCategory {
-  if (capital > 60_000_000) {
+  if (capital >= 60_000_000) {
     return 'NEGRA';
   }
-  if (capital > 10_000_000) {
+  if (capital >= 10_000_000) {
     return 'VERDE';
   }
   return 'AZUL';
@@ -37,13 +37,13 @@ export function getCategoryForCapital(capital: number): BitacoraCategory {
 
 export function validateCapitalForCategory(capital: number, category: BitacoraCategory): boolean {
   if (category === 'AZUL') {
-    return capital >= 4_000_000 && capital < 10_000_000;
+    return capital >= 2_000_000 && capital < 10_000_000;
   }
   if (category === 'VERDE') {
-    return capital > 10_000_000 && capital < 60_000_000;
+    return capital >= 10_000_000 && capital < 60_000_000;
   }
   if (category === 'NEGRA') {
-    return capital > 60_000_000 && capital <= 1_000_000_000;
+    return capital >= 60_000_000 && capital <= Number.MAX_SAFE_INTEGER;
   }
   return false;
 }
