@@ -8394,19 +8394,27 @@ exports.adminConfigureTradingParticipantCallable = onCall(
     const roundedCapital =
       Math.round(parsedCapital);
 
-    const userRef =
+    // El target puede llegar como:
+    // 1. ID documental canónico de /users
+    // 2. Firebase Auth UID almacenado en el campo users.uid
+    //
+    // Caso real SuperAdmin:
+    // documento: users/usr_admin
+    // uid: Firebase Auth UID
+    const directUserRef =
       db.collection("users").doc(cleanTargetUid);
+
+    const userByUidQuery =
+      db
+        .collection("users")
+        .where("uid", "==", cleanTargetUid)
+        .limit(2);
 
     const cycleRef =
       db.collection("monthlyCycles").doc(cleanCycleId);
 
     const settingsRef =
       db.collection("settings").doc("global_config");
-
-    const frozenResultRef =
-      db
-        .collection("cycleUserResults")
-        .doc(`${cleanCycleId}_${cleanTargetUid}`);
 
     const auditRef =
       db.collection("auditLogs").doc();
@@ -8419,8 +8427,16 @@ exports.adminConfigureTradingParticipantCallable = onCall(
     await db.runTransaction(
       async (transaction) => {
         // Todas las lecturas primero.
-        const userSnap =
-          await transaction.get(userRef);
+        // --------------------------------------------------
+        // RESOLUCION CANONICA DE CUENTA ADMIN
+        // --------------------------------------------------
+        // Primero intentamos /users/{targetUid}.
+        // Si no existe, resolvemos por el campo uid.
+        //
+        // Esto permite conservar IDs legacy como usr_admin
+        // sin romper la identidad real de Firebase Auth.
+        const directUserSnap =
+          await transaction.get(directUserRef);
 
         const cycleSnap =
           await transaction.get(cycleRef);
@@ -8428,15 +8444,52 @@ exports.adminConfigureTradingParticipantCallable = onCall(
         const settingsSnap =
           await transaction.get(settingsRef);
 
+        let userSnap =
+          directUserSnap;
+
+        let userRef =
+          directUserRef;
+
+        let resolvedUserDocId =
+          cleanTargetUid;
+
+        if (!directUserSnap.exists) {
+          const userByUidSnap =
+            await transaction.get(userByUidQuery);
+
+          if (userByUidSnap.empty) {
+            throw new HttpsError(
+              "not-found",
+              "TARGET_USER_NOT_FOUND"
+            );
+          }
+
+          if (userByUidSnap.size !== 1) {
+            throw new HttpsError(
+              "failed-precondition",
+              "TARGET_USER_UID_AMBIGUOUS"
+            );
+          }
+
+          userSnap =
+            userByUidSnap.docs[0];
+
+          userRef =
+            userSnap.ref;
+
+          resolvedUserDocId =
+            userSnap.id;
+        }
+
+        const frozenResultRef =
+          db
+            .collection("cycleUserResults")
+            .doc(
+              `${cleanCycleId}_${resolvedUserDocId}`
+            );
+
         const frozenResultSnap =
           await transaction.get(frozenResultRef);
-
-        if (!userSnap.exists) {
-          throw new HttpsError(
-            "not-found",
-            "TARGET_USER_NOT_FOUND"
-          );
-        }
 
         if (!cycleSnap.exists) {
           throw new HttpsError(
@@ -8633,6 +8686,9 @@ exports.adminConfigureTradingParticipantCallable = onCall(
               targetUid:
                 cleanTargetUid,
 
+              resolvedUserDocId:
+                resolvedUserDocId,
+
               email:
                 user.email || "",
 
@@ -8673,7 +8729,7 @@ exports.adminConfigureTradingParticipantCallable = onCall(
 
         responseParticipant = {
           uid:
-            cleanTargetUid,
+            user.uid || cleanTargetUid,
 
           fullName:
             user.fullName || "",
