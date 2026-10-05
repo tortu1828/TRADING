@@ -1077,9 +1077,23 @@ describe('SUITE 40 CASOS REALES: testEnvironmentResetCore.js', () => {
     expect(Array.from(auth.users.keys())).toEqual(initialAuthUsers);
   });
 
-  // 28 lastClosedCycleId permanece intacto
-  it('28. lastClosedCycleId permanece intacto: reset total limpia active/operational pero mantiene lastClosedCycleId', async () => {
-    const { previewHash } = await buildTestEnvironmentResetPlan(rootAdminUid, superAdminEmail, db, auth);
+  // 28 reset total limpia todos los punteros de ciclo
+  it('28. reset total limpia active/operational/preparing/lastClosed para permitir un nuevo Genesis', async () => {
+    const { plan, previewHash } = await buildTestEnvironmentResetPlan(
+      rootAdminUid,
+      superAdminEmail,
+      db,
+      auth
+    );
+
+    expect(plan.settingsResetFields).toEqual(
+      expect.arrayContaining([
+        'operationalCycleId',
+        'activeCycleId',
+        'preparingCycleId',
+        'lastClosedCycleId',
+      ])
+    );
 
     await executeTestEnvironmentResetCore({
       authUid: rootAdminUid,
@@ -1093,10 +1107,11 @@ describe('SUITE 40 CASOS REALES: testEnvironmentResetCore.js', () => {
     });
 
     const cfg = db.store.get('settings/global_config');
-    expect(cfg.lastClosedCycleId).toBe('2026-08');
+
     expect(cfg.operationalCycleId).toBeNull();
     expect(cfg.activeCycleId).toBeNull();
     expect(cfg.preparingCycleId).toBeNull();
+    expect(cfg.lastClosedCycleId).toBeNull();
   });
 
   // 29 todas las notificaciones se purgan en reset total del entorno

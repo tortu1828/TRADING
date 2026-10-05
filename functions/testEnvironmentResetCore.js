@@ -602,7 +602,12 @@ async function buildTestEnvironmentResetPlan(authUid, authEmail, db, auth) {
     preservedClaimOperations,
     bitacorasToDelete,
     preservedBitacoras,
-    settingsResetFields: ["operationalCycleId", "activeCycleId", "preparingCycleId"],
+    settingsResetFields: [
+      "operationalCycleId",
+      "activeCycleId",
+      "preparingCycleId",
+      "lastClosedCycleId",
+    ],
     counterTargetDoc: null,
     counterPreserved: true,
   };
@@ -1071,6 +1076,11 @@ async function executeTestEnvironmentResetCore({
         operationalCycleId: null,
         activeCycleId: null,
         preparingCycleId: null,
+
+        // PRODUCTION_CLEAN_BOOTSTRAP
+        // Un reset total elimina también la referencia al último
+        // ciclo cerrado para permitir un nuevo Ciclo Génesis real.
+        lastClosedCycleId: null,
       },
       { merge: true }
     );
