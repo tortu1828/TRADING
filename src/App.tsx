@@ -125,7 +125,10 @@ const MainLayout: React.FC = () => {
       <Sidebar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        onOpenNotifications={() => setShowNotifModal(true)}
+        onOpenNotifications={() => {
+          setShowNotifModal(true);
+          setIsMobileSidebarOpen(false);
+        }}
         onOpenSettings={() => setShowTrmModal(true)}
         isOpenMobile={isMobileSidebarOpen}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
