@@ -102,9 +102,44 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
 
   if (!isOpen || !group) return null;
 
-  const currentOpTrm = liveMarketTrm || cycle.trmApplied || 4028.5;
-  const trm = currentOpTrm;
   const isClosed = cycle.status === 'CLOSED';
+
+  const currentOpTrm =
+    isClosed
+      ? Number(cycle.trmApplied || 0)
+      : Number(liveMarketTrm || 0);
+
+  const trm =
+    Number.isFinite(currentOpTrm) &&
+    currentOpTrm > 0
+      ? currentOpTrm
+      : 0;
+
+  const resolveOperationGrossCop = (
+    op: DailyGroupOperation
+  ): number => {
+    const persistedGross =
+      Number(op.grossCop);
+
+    if (Number.isFinite(persistedGross)) {
+      return persistedGross;
+    }
+
+    const persistedTrm =
+      Number(op.trmUsed);
+
+    if (
+      Number.isFinite(persistedTrm) &&
+      persistedTrm > 0
+    ) {
+      return (
+        Number(op.amountUsd || 0) *
+        persistedTrm
+      );
+    }
+
+    return 0;
+  };
   const operations = dataStore.getDailyOperations(cycle.cycleId, group.category, group.groupCapitalCop);
 
   // Separación de operaciones activas vs consolidadas
@@ -114,10 +149,18 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
   const consolidatedUsd = consolidatedOps.reduce((sum, op) => sum + op.amountUsd, 0);
 
   const totalUsdAccumulated = operations.reduce((sum, op) => sum + op.amountUsd, 0);
-  const totalGrossCopPerUser = operations.reduce(
-    (sum, op) => sum + (op.grossCop ?? (op.amountUsd * (op.trmUsed || trm))),
-    0
-  );
+  const totalGrossCopPerUser =
+    operations.reduce(
+      (sum, op) =>
+        sum + resolveOperationGrossCop(op),
+      0
+    );
+
+  const effectiveTrmForTotals =
+    totalUsdAccumulated !== 0
+      ? totalGrossCopPerUser /
+        totalUsdAccumulated
+      : 0;
 
   // Obtener usuarios reales del grupo (quienes tienen este capital exacto en esta categoría)
   const usersInGroup: UserProfile[] = (
@@ -1003,7 +1046,7 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
 
                       const calc = calculateUserMonthlyResult(
                         totalUsdAccumulated,
-                        trm,
+                        effectiveTrmForTotals,
                         userPct,
                         adminPct
                       );

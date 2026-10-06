@@ -3,6 +3,9 @@ const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
 const {
+  fetchDolarColombiaTrm,
+} = require("./trmProvider");
+const {
   createCycleReportSnapshot,
   supersedeCurrentCycleReport,
   generateCycleReportPdfBuffer,
@@ -25,6 +28,45 @@ const db = admin.firestore();
 function computeSha256(text) {
   return crypto.createHash("sha256").update(text).digest("hex");
 }
+
+/**
+ * Fuente única de TRM de mercado para frontend.
+ * El navegador nunca consulta proveedores externos directamente.
+ */
+exports.getLiveTrmCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Se requiere autenticación para consultar la TRM."
+      );
+    }
+
+    try {
+      const trm =
+        await fetchDolarColombiaTrm();
+
+      return {
+        success: true,
+        ...trm,
+      };
+    } catch (err) {
+      console.error(
+        "[getLiveTrmCallable] Dolar-Colombia no disponible:",
+        err
+      );
+
+      throw new HttpsError(
+        "unavailable",
+        "TRM_SOURCE_UNAVAILABLE: No fue posible validar la TRM vigente desde Dolar-Colombia.com."
+      );
+    }
+  }
+);
 
 /**
  * Helper Puro Canónico: Cálculo financiero de resultados mensuales por usuario.
@@ -274,6 +316,24 @@ exports.adminExecuteDailyOperation = onCall(
     const opRef = db.collection("dailyOperations").doc(operationIntentId);
     const cycleRef = db.collection("monthlyCycles").doc(cycleId);
 
+    // DOLAR_COLOMBIA_SERVER_AUTHORITY
+    let authoritativeTrm;
+
+    try {
+      authoritativeTrm =
+        await fetchDolarColombiaTrm();
+    } catch (err) {
+      console.error(
+        "[adminExecuteDailyOperation] Falló fuente TRM:",
+        err
+      );
+
+      throw new HttpsError(
+        "unavailable",
+        "TRM_SOURCE_UNAVAILABLE: No se pudo obtener y validar la TRM vigente desde Dolar-Colombia.com. La operación financiera no fue ejecutada."
+      );
+    }
+
     // 3. TRANSACCIÓN ATÓMICA CON SECUENCIA STRICT: ALL READS -> ALL CALCS -> ALL WRITES
     const txResult = await db.runTransaction(async (transaction) => {
       // === FASE DE LECTURAS (READ PHASE) ===
@@ -341,31 +401,25 @@ exports.adminExecuteDailyOperation = onCall(
         }
       }
 
-      // Resolución de TRM operativa para el trade:
-      // Para ciclo moderno STARTED es obligatorio suministrar una TRM en vivo válida (trmUsed > 0, trmSource, trmCapturedAt).
-      // Prohibido SYSTEM_FALLBACK, 4028.5 y cycleData.trmApplied para ciclos modernos.
-      const isModernCycle = opStatus === "STARTED" || opStatus === "PREPARING";
-      let trm = null;
-      let trmSource = null;
-      let trmCapturedAt = new Date().toISOString();
+      // Resolución de TRM operativa AUTHORITATIVE.
+      // El valor se obtuvo en servidor directamente desde Dolar-Colombia.com.
+      const trm =
+        authoritativeTrm.rate;
 
-      const candidateTrm = Number(reqTrmUsed);
-      if (Number.isFinite(candidateTrm) && candidateTrm > 0) {
-        trm = candidateTrm;
-        trmSource = (typeof reqTrmSource === "string" && reqTrmSource.trim()) ? reqTrmSource.trim() : "LIVE_MARKET";
-        if (typeof reqTrmCapturedAt === "string" && reqTrmCapturedAt.trim()) {
-          trmCapturedAt = reqTrmCapturedAt.trim();
-        }
-      } else if (!isModernCycle && Number.isFinite(Number(cycleData.trmApplied)) && Number(cycleData.trmApplied) > 0) {
-        // Compatibilidad ÚNICAMENTE para ciclos identificados inequívocamente como legacy
-        trm = Number(cycleData.trmApplied);
-        trmSource = "CYCLE_DEFAULT";
-      } else {
-        throw new HttpsError(
-          "failed-precondition",
-          "LIVE_TRM_UNAVAILABLE: Para ciclos modernos iniciados (STARTED), es obligatorio suministrar una TRM en vivo válida (trmUsed > 0, trmSource y trmCapturedAt)."
-        );
-      }
+      const trmSource =
+        authoritativeTrm.source;
+
+      const trmCapturedAt =
+        authoritativeTrm.capturedAt;
+
+      const trmEffectiveDate =
+        authoritativeTrm.effectiveDate;
+
+      const trmSourceUrl =
+        authoritativeTrm.sourceUrl;
+
+      const trmRateCents =
+        authoritativeTrm.rateCents;
 
       // 3. Lectura de operaciones existentes del grupo en este ciclo
       const opsQuery = db.collection("dailyOperations")
@@ -733,6 +787,9 @@ exports.adminExecuteDailyOperation = onCall(
         trmUsed: trm,
         trmSource,
         trmCapturedAt,
+        trmEffectiveDate,
+        trmSourceUrl,
+        trmRateCents,
         grossCop: Number(amountUsd) * trm,
         notes: cleanNotes,
         createdAt: new Date().toISOString(),
@@ -5542,20 +5599,54 @@ exports.adminCloseCycleCallable = onCall(
       throw new HttpsError("permission-denied", "Solo administradores autorizados pueden cerrar ciclos y aplicar reinversiones.");
     }
 
-    const { cycleId, adminNotes, closingTrm, observedMarketTrmAtClose, clientRequestId } = request.data || {};
-    if (!cycleId || typeof cycleId !== "string" || !cycleId.trim()) {
-      throw new HttpsError("invalid-argument", "cycleId es obligatorio.");
-    }
+    const {
+      cycleId,
+      adminNotes,
+      closingTrm,
+      clientRequestId,
+    } = request.data || {};
 
-    const parsedClosingTrm = Number(closingTrm);
-    if (!parsedClosingTrm || !Number.isFinite(parsedClosingTrm) || parsedClosingTrm <= 0) {
+    if (
+      !cycleId ||
+      typeof cycleId !== "string" ||
+      !cycleId.trim()
+    ) {
       throw new HttpsError(
         "invalid-argument",
-        "INVALID_CLOSING_TRM: closingTrm es obligatorio y debe ser un número positivo mayor a cero para liquidación definitiva al cierre."
+        "cycleId es obligatorio."
       );
     }
 
-    const targetCycleId = cycleId.trim();
+    const targetCycleId =
+      cycleId.trim();
+
+    let authoritativeClosingTrm =
+      null;
+
+    const parsedClosingTrm =
+      Number(closingTrm);
+
+    const parsedClosingTrmCents =
+      Math.round(parsedClosingTrm * 100);
+
+    if (
+      !Number.isFinite(parsedClosingTrm) ||
+      parsedClosingTrm < 1000 ||
+      parsedClosingTrm > 10000 ||
+      Math.abs(
+        parsedClosingTrm * 100 -
+        parsedClosingTrmCents
+      ) > 0.000001
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_CLOSING_TRM: La TRM definitiva de cierre es obligatoria, debe estar entre 1.000 y 10.000 COP/USD y tener máximo 2 decimales."
+      );
+    }
+
+    let observedMarketTrmAtClose =
+      null;
+
     const cycleRef = db.collection("monthlyCycles").doc(targetCycleId);
     const nowIso = new Date().toISOString();
 
@@ -5588,8 +5679,43 @@ exports.adminCloseCycleCallable = onCall(
           alreadyClosed: true,
           cycleClosed: true,
           cycleId: targetCycleId,
-          closedAt: cycleData.closedAt,
-          appliedReinvestmentsCount: cycleData.appliedReinvestmentsCount || 0,
+          closedAt:
+            cycleData.closedAt,
+
+          closingTrm:
+            Number(
+              cycleData.closingTrm ||
+              cycleData.trmApplied ||
+              0
+            ),
+
+          closingTrmSource:
+            cycleData.closingTrmSource ||
+            cycleData.trmSource ||
+            null,
+
+          closingTrmSourceUrl:
+            cycleData.closingTrmSourceUrl ||
+            cycleData.trmSourceUrl ||
+            null,
+
+          closingTrmEffectiveDate:
+            cycleData.closingTrmEffectiveDate ||
+            cycleData.trmEffectiveDate ||
+            null,
+
+          closingTrmCapturedAt:
+            cycleData.closingTrmCapturedAt ||
+            cycleData.trmCapturedAt ||
+            null,
+
+          closingTrmRateCents:
+            cycleData.closingTrmRateCents ||
+            cycleData.trmRateCents ||
+            null,
+
+          appliedReinvestmentsCount:
+            cycleData.appliedReinvestmentsCount || 0,
           closureNotes: cycleData.closureNotes || "",
           lastClosureAttemptId: cycleData.lastClosureAttemptId || cycleData.closureAttemptId || null,
         };
@@ -5688,7 +5814,26 @@ exports.adminCloseCycleCallable = onCall(
           alreadyClosed: true,
           reportVersionId: existingVer.versionId,
           appliedCount: gate1Result.appliedReinvestmentsCount,
-          closedAt: gate1Result.closedAt,
+          closedAt:
+          gate1Result.closedAt,
+
+        closingTrm:
+          gate1Result.closingTrm,
+
+        closingTrmSource:
+          gate1Result.closingTrmSource,
+
+        closingTrmSourceUrl:
+          gate1Result.closingTrmSourceUrl,
+
+        closingTrmEffectiveDate:
+          gate1Result.closingTrmEffectiveDate,
+
+        closingTrmCapturedAt:
+          gate1Result.closingTrmCapturedAt,
+
+        closingTrmRateCents:
+          gate1Result.closingTrmRateCents,
           message: `El ciclo ${targetCycleId} ya se encuentra cerrado con informe oficial vigente (${existingVer.versionId}). No se realizaron modificaciones financieras adicionales.`,
         };
       }
@@ -5719,7 +5864,26 @@ exports.adminCloseCycleCallable = onCall(
         reportVersionId: recoveredVersionId,
         recoveredSnapshot: true,
         appliedCount: gate1Result.appliedReinvestmentsCount,
-        closedAt: gate1Result.closedAt,
+        closedAt:
+          gate1Result.closedAt,
+
+        closingTrm:
+          gate1Result.closingTrm,
+
+        closingTrmSource:
+          gate1Result.closingTrmSource,
+
+        closingTrmSourceUrl:
+          gate1Result.closingTrmSourceUrl,
+
+        closingTrmEffectiveDate:
+          gate1Result.closingTrmEffectiveDate,
+
+        closingTrmCapturedAt:
+          gate1Result.closingTrmCapturedAt,
+
+        closingTrmRateCents:
+          gate1Result.closingTrmRateCents,
         message: `El ciclo ${targetCycleId} ya estaba cerrado financieramente. Se recuperó y generó exitosamente el snapshot oficial de informe (${recoveredVersionId || "pendiente"}).`,
       };
     }
@@ -5766,6 +5930,46 @@ exports.adminCloseCycleCallable = onCall(
         console.warn("[adminCloseCycleCallable] Error liberando lock:", releaseErr);
       }
     };
+
+    // =========================================================================
+    // =========================================================
+    // CLOSING_TRM_MANUAL_FINAL_AUTHORITY
+    // =========================================================
+    //
+    // REGLA FINANCIERA:
+    //
+    // - Durante el ciclo: TRM automática Dolar-Colombia.
+    // - Cierre definitivo: TRM manual ingresada por el administrador.
+    // - La TRM automática al cerrar es SOLO referencia de mercado.
+    //
+    // =========================================================
+
+    authoritativeClosingTrm = {
+      rate: parsedClosingTrm,
+      rateCents: parsedClosingTrmCents,
+      source: "MANUAL_SUPERADMIN",
+      sourceLabel:
+        "TRM manual definitiva de cierre",
+      sourceUrl: null,
+      effectiveDate: null,
+      capturedAt: nowIso,
+      isLive: false,
+    };
+
+    // Captura informativa de la TRM automática en el momento del cierre.
+    // IMPORTANTE: esta tasa NO modifica parsedClosingTrm.
+    try {
+      const marketReferenceAtClose =
+        await fetchDolarColombiaTrm();
+
+      observedMarketTrmAtClose =
+        marketReferenceAtClose.rate;
+    } catch (err) {
+      console.warn(
+        "[adminCloseCycleCallable] No fue posible obtener la referencia de mercado de Dolar-Colombia al cerrar. Se conserva la TRM manual definitiva:",
+        err
+      );
+    }
 
     // =========================================================================
     // GATE 2 — PRE-FLIGHT FINANCIERO GLOBAL (LIQUIDACIÓN DEFINITIVA CON CLOSING TRM)
@@ -6253,6 +6457,11 @@ exports.adminCloseCycleCallable = onCall(
           lastCloseRequestId: clientRequestId || null,
           appliedReinvestmentsCount: pendingItemsToApply.length + alreadyAppliedCount,
           closingTrm: parsedClosingTrm,
+          closingTrmSource: authoritativeClosingTrm.source,
+          closingTrmSourceUrl: authoritativeClosingTrm.sourceUrl,
+          closingTrmEffectiveDate: authoritativeClosingTrm.effectiveDate,
+          closingTrmCapturedAt: authoritativeClosingTrm.capturedAt,
+          closingTrmRateCents: authoritativeClosingTrm.rateCents,
           closingTrmSetAt: nowIso,
           closingTrmSetByUid: authUid,
           closingTrmSetByName: adminName,
@@ -6302,6 +6511,11 @@ exports.adminCloseCycleCallable = onCall(
           {
             cycleId: targetCycleId,
             closingTrm: parsedClosingTrm,
+            closingTrmSource: authoritativeClosingTrm.source,
+            closingTrmSourceUrl: authoritativeClosingTrm.sourceUrl,
+            closingTrmEffectiveDate: authoritativeClosingTrm.effectiveDate,
+            closingTrmCapturedAt: authoritativeClosingTrm.capturedAt,
+            closingTrmRateCents: authoritativeClosingTrm.rateCents,
             trmApplied: parsedClosingTrm,
             totalGrossUsd: totalGrossUsdAtClose,
             totalGrossCop: totalGrossCopAtClose,
@@ -6337,6 +6551,16 @@ exports.adminCloseCycleCallable = onCall(
             closureVersion: newClosureVersion,
 
             closingTrm: parsedClosingTrm,
+
+            closingTrmSource: authoritativeClosingTrm.source,
+
+            closingTrmSourceUrl: authoritativeClosingTrm.sourceUrl,
+
+            closingTrmEffectiveDate: authoritativeClosingTrm.effectiveDate,
+
+            closingTrmCapturedAt: authoritativeClosingTrm.capturedAt,
+
+            closingTrmRateCents: authoritativeClosingTrm.rateCents,
 
             createdByUid: authUid,
             createdByName: adminName,
@@ -6451,6 +6675,11 @@ exports.adminCloseCycleCallable = onCall(
         alreadyAppliedCount,
         adminNotes: adminNotes || "",
         closingTrm: parsedClosingTrm,
+        closingTrmSource: authoritativeClosingTrm.source,
+        closingTrmSourceUrl: authoritativeClosingTrm.sourceUrl,
+        closingTrmEffectiveDate: authoritativeClosingTrm.effectiveDate,
+        closingTrmCapturedAt: authoritativeClosingTrm.capturedAt,
+        closingTrmRateCents: authoritativeClosingTrm.rateCents,
         closingTrmSetAt: nowIso,
         closingTrmSetByUid: authUid,
         closingTrmSetByName: adminName,
@@ -6489,6 +6718,11 @@ exports.adminCloseCycleCallable = onCall(
       cycleClosed: true,
       closedAt: nowIso,
       closingTrm: parsedClosingTrm,
+      closingTrmSource: authoritativeClosingTrm.source,
+      closingTrmSourceUrl: authoritativeClosingTrm.sourceUrl,
+      closingTrmEffectiveDate: authoritativeClosingTrm.effectiveDate,
+      closingTrmCapturedAt: authoritativeClosingTrm.capturedAt,
+      closingTrmRateCents: authoritativeClosingTrm.rateCents,
       closingTrmSetAt: nowIso,
       closingTrmSetByUid: authUid,
       closingTrmSetByName: adminName,
@@ -10444,36 +10678,74 @@ exports.adminUpdateCycleTrmCallable = onCall(
     const { authUid, authEmail, createdByName } = await verifySuperAdminPrivileges(request);
 
     // 2. VALIDACIÓN DE ENTRADA
-    const { cycleId, newTrm, clientRequestId, reason } = request.data || {};
+    const {
+      cycleId,
+      clientRequestId,
+      reason,
+    } = request.data || {};
 
-    if (!cycleId || typeof cycleId !== "string" || !cycleId.trim()) {
-      throw new HttpsError("invalid-argument", "El parámetro 'cycleId' es obligatorio.");
+    if (
+      !cycleId ||
+      typeof cycleId !== "string" ||
+      !cycleId.trim()
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "El parámetro 'cycleId' es obligatorio."
+      );
     }
-    const targetCycleId = cycleId.trim();
 
-    const parsedTrm = Number(newTrm);
-    if (isNaN(parsedTrm) || parsedTrm <= 0) {
-      throw new HttpsError("invalid-argument", "El parámetro 'newTrm' debe ser un número positivo mayor a cero.");
+    const targetCycleId =
+      cycleId.trim();
+
+    if (
+      !clientRequestId ||
+      typeof clientRequestId !== "string" ||
+      !clientRequestId.trim()
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "El parámetro 'clientRequestId' es obligatorio para garantizar idempotencia."
+      );
     }
 
-    if (!clientRequestId || typeof clientRequestId !== "string" || !clientRequestId.trim()) {
-      throw new HttpsError("invalid-argument", "El parámetro 'clientRequestId' es obligatorio para garantizar idempotencia.");
-    }
-    const cleanRequestId = clientRequestId.trim();
+    const cleanRequestId =
+      clientRequestId.trim();
 
-    const auditDocId = `audit_trm_${targetCycleId}_${cleanRequestId}`;
-    const auditRef = db.collection("auditLogs").doc(auditDocId);
+    const auditDocId =
+      `audit_trm_${targetCycleId}_${cleanRequestId}`;
 
-    // 3. IDEMPOTENCIA ESTRICTA: Consultar si este clientRequestId ya fue ejecutado previamente
-    const existingAuditSnap = await auditRef.get();
+    const auditRef =
+      db.collection("auditLogs").doc(
+        auditDocId
+      );
+
+    // ------------------------------------------------------
+    // IDEMPOTENCIA
+    // ------------------------------------------------------
+
+    const existingAuditSnap =
+      await auditRef.get();
+
     if (existingAuditSnap.exists) {
-      const existingAudit = existingAuditSnap.data() || {};
-      const auditDetails = existingAudit.details || {};
-      // Verificar si intentan reutilizar el requestId con una TRM diferente
-      if (auditDetails.newTrm !== undefined && Number(auditDetails.newTrm) !== parsedTrm) {
+      const existingAudit =
+        existingAuditSnap.data() || {};
+
+      const auditDetails =
+        existingAudit.details || {};
+
+      const replayTrm =
+        Number(
+          auditDetails.newTrm
+        );
+
+      if (
+        !Number.isFinite(replayTrm) ||
+        replayTrm <= 0
+      ) {
         throw new HttpsError(
-          "already-exists",
-          `Conflicto de idempotencia: El clientRequestId '${cleanRequestId}' ya fue procesado con una TRM de $${auditDetails.newTrm}. No se puede reutilizar para TRM $${parsedTrm}.`
+          "data-loss",
+          "TRM_IDEMPOTENCY_AUDIT_INVALID"
         );
       }
 
@@ -10481,14 +10753,71 @@ exports.adminUpdateCycleTrmCallable = onCall(
         success: true,
         idempotentReplay: true,
         cycleId: targetCycleId,
-        newTrm: parsedTrm,
-        affectedUsersCount: auditDetails.affectedUsersCount || 0,
-        affectedGroupsCount: auditDetails.affectedGroupsCount || 0,
-        affectedReinvestmentsCount: auditDetails.affectedReinvestmentsCount || 0,
-        needsReviewCount: auditDetails.needsReviewCount || 0,
-        message: "Operación idempotente: La TRM del ciclo y sus liquidaciones ya fueron recalculadas previamente para este intento.",
+
+        previousTrm:
+          auditDetails.previousTrm ?? null,
+
+        newTrm:
+          replayTrm,
+
+        trmSource:
+          auditDetails.trmSource || null,
+
+        trmSourceUrl:
+          auditDetails.trmSourceUrl || null,
+
+        trmEffectiveDate:
+          auditDetails.trmEffectiveDate || null,
+
+        trmCapturedAt:
+          auditDetails.trmCapturedAt || null,
+
+        trmRateCents:
+          auditDetails.trmRateCents ||
+          Math.round(
+            replayTrm * 100
+          ),
+
+        affectedUsersCount:
+          auditDetails.affectedUsersCount || 0,
+
+        affectedGroupsCount:
+          auditDetails.affectedGroupsCount || 0,
+
+        affectedReinvestmentsCount:
+          auditDetails.affectedReinvestmentsCount || 0,
+
+        needsReviewCount:
+          auditDetails.needsReviewCount || 0,
+
+        message:
+          "Operación idempotente: la TRM ya fue aplicada.",
       };
     }
+
+    // ------------------------------------------------------
+    // TRM_UPDATE_SERVER_AUTHORITY
+    // ------------------------------------------------------
+
+    let authoritativeTrm;
+
+    try {
+      authoritativeTrm =
+        await fetchDolarColombiaTrm();
+    } catch (err) {
+      console.error(
+        "[adminUpdateCycleTrmCallable] Dolar-Colombia no disponible:",
+        err
+      );
+
+      throw new HttpsError(
+        "unavailable",
+        "TRM_SOURCE_UNAVAILABLE: No se pudo obtener y validar la TRM vigente desde Dolar-Colombia.com."
+      );
+    }
+
+    const parsedTrm =
+      authoritativeTrm.rate;
 
     const cycleRef = db.collection("monthlyCycles").doc(targetCycleId);
     const closureAttemptId = `trm_recalc_${crypto.randomUUID()}`;
@@ -10557,7 +10886,18 @@ exports.adminUpdateCycleTrmCallable = onCall(
     try {
       // 5. FASE B: LECTURA COMPLETA Y PRE-FLIGHT DE TODAS LAS ENTIDADES
       const cycleDoc = (await cycleRef.get()).data() || {};
-      const previousTrm = Number(cycleDoc.trmApplied) || 4028.5;
+      const previousTrmRaw =
+        Number(
+          cycleDoc.trmApplied
+        );
+
+      const previousTrm =
+        Number.isFinite(
+          previousTrmRaw
+        ) &&
+        previousTrmRaw > 0
+          ? previousTrmRaw
+          : null;
 
       // A. Validar regla estricta de reinversiones APPLIED
       const allReinvestmentsSnap = await db
@@ -10626,6 +10966,11 @@ exports.adminUpdateCycleTrmCallable = onCall(
           ref: urDoc.ref,
           data: {
             trmUsed: parsedTrm,
+            trmSource: authoritativeTrm.source,
+            trmSourceUrl: authoritativeTrm.sourceUrl,
+            trmEffectiveDate: authoritativeTrm.effectiveDate,
+            trmCapturedAt: authoritativeTrm.capturedAt,
+            trmRateCents: authoritativeTrm.rateCents,
             totalGrossCop: calc.totalGrossCop,
             userProfitCop: calc.userProfitCop,
             adminCommissionCop: calc.adminCommissionCop,
@@ -10650,6 +10995,11 @@ exports.adminUpdateCycleTrmCallable = onCall(
           ref: gcDoc.ref,
           data: {
             trmUsed: parsedTrm,
+            trmSource: authoritativeTrm.source,
+            trmSourceUrl: authoritativeTrm.sourceUrl,
+            trmEffectiveDate: authoritativeTrm.effectiveDate,
+            trmCapturedAt: authoritativeTrm.capturedAt,
+            trmRateCents: authoritativeTrm.rateCents,
             totalCopPerUser: newCopPerUser,
             totalGroupCop: newGroupGrossCop,
             accumulatedGrossCop: newGroupGrossCop,
@@ -10886,6 +11236,11 @@ exports.adminUpdateCycleTrmCallable = onCall(
       // A. monthlyCycles
       batch.update(cycleRef, {
         trmApplied: parsedTrm,
+        trmSource: authoritativeTrm.source,
+        trmSourceUrl: authoritativeTrm.sourceUrl,
+        trmEffectiveDate: authoritativeTrm.effectiveDate,
+        trmCapturedAt: authoritativeTrm.capturedAt,
+        trmRateCents: authoritativeTrm.rateCents,
         totalGrossCop,
         totalUsersProfitCop,
         totalAdminCommissionCop,
@@ -10914,6 +11269,11 @@ exports.adminUpdateCycleTrmCallable = onCall(
         {
           cycleId: targetCycleId,
           trmApplied: parsedTrm,
+          trmSource: authoritativeTrm.source,
+          trmSourceUrl: authoritativeTrm.sourceUrl,
+          trmEffectiveDate: authoritativeTrm.effectiveDate,
+          trmCapturedAt: authoritativeTrm.capturedAt,
+          trmRateCents: authoritativeTrm.rateCents,
           totalGrossUsd,
           totalGrossCop,
           totalUsersProfitCop,
@@ -10944,10 +11304,25 @@ exports.adminUpdateCycleTrmCallable = onCall(
         changedByName: createdByName,
         changedAt: nowIso,
         clientRequestId: cleanRequestId,
-        reason: (reason || "").trim() || "Ajuste oficial de TRM de liquidación",
+        reason: (reason || "").trim() || "Sincronización automática TRM desde Dolar-Colombia.com",
         details: {
           previousTrm,
           newTrm: parsedTrm,
+
+          trmSource:
+            authoritativeTrm.source,
+
+          trmSourceUrl:
+            authoritativeTrm.sourceUrl,
+
+          trmEffectiveDate:
+            authoritativeTrm.effectiveDate,
+
+          trmCapturedAt:
+            authoritativeTrm.capturedAt,
+
+          trmRateCents:
+            authoritativeTrm.rateCents,
           affectedUsersCount: userResultUpdates.length,
           affectedGroupsCount: groupCalculationUpdates.length,
           affectedReinvestmentsCount: reinvestmentUpdates.length,
@@ -10968,6 +11343,21 @@ exports.adminUpdateCycleTrmCallable = onCall(
         cycleId: targetCycleId,
         previousTrm,
         newTrm: parsedTrm,
+
+        trmSource:
+          authoritativeTrm.source,
+
+        trmSourceUrl:
+          authoritativeTrm.sourceUrl,
+
+        trmEffectiveDate:
+          authoritativeTrm.effectiveDate,
+
+        trmCapturedAt:
+          authoritativeTrm.capturedAt,
+
+        trmRateCents:
+          authoritativeTrm.rateCents,
         affectedUsersCount: userResultUpdates.length,
         affectedGroupsCount: groupCalculationUpdates.length,
         affectedReinvestmentsCount: reinvestmentUpdates.length,

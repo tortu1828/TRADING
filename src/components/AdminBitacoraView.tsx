@@ -106,9 +106,71 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
     );
   }
 
-  const trm = currentCycle.trmApplied || 4028.50;
   const isClosed = currentCycle.status === 'CLOSED';
   const config = dataStore.getConfig();
+
+  const marketTrmCandidate =
+    Number(config.trmMarketRate);
+
+  const marketSource =
+    String(config.trmSource || '')
+      .trim()
+      .toLowerCase();
+
+  const hasAuthoritativeMarketTrm =
+    Number.isFinite(marketTrmCandidate) &&
+    marketTrmCandidate > 1000 &&
+    marketTrmCandidate < 10000 &&
+    (
+      marketSource === 'dolar-colombia.com' ||
+      marketSource === 'dolar_colombia'
+    );
+
+  const closedCycleTrmCandidate =
+    Number(currentCycle.trmApplied);
+
+  const trm =
+    isClosed &&
+    Number.isFinite(closedCycleTrmCandidate) &&
+    closedCycleTrmCandidate > 0
+      ? closedCycleTrmCandidate
+      : hasAuthoritativeMarketTrm
+        ? marketTrmCandidate
+        : 0;
+
+  // Cada operaci?n diaria conserva la TRM con la que
+  // fue procesada por el backend.
+  const resolveOperationGrossCop = (
+    op: {
+      amountUsd?: number;
+      grossCop?: number;
+      trmUsed?: number;
+    }
+  ): number => {
+    const persistedGross =
+      Number(op.grossCop);
+
+    if (Number.isFinite(persistedGross)) {
+      return persistedGross;
+    }
+
+    const persistedTrm =
+      Number(op.trmUsed);
+
+    if (
+      Number.isFinite(persistedTrm) &&
+      persistedTrm > 0
+    ) {
+      return (
+        Number(op.amountUsd || 0) *
+        persistedTrm
+      );
+    }
+
+    // Fail-closed:
+    // jam?s reconstruir con una TRM inventada.
+    return 0;
+  };
   const hasOperationalCycle = !!config.operationalCycleId;
 
   // Get categorized groups
@@ -182,19 +244,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
             ops.reduce(
               (sum, op) =>
                 sum +
-                Number(
-                  op.grossCop ??
-                  (
-                    Number(
-                      op.amountUsd ||
-                      0
-                    ) *
-                    Number(
-                      op.trmUsed ||
-                      trm
-                    )
-                  )
-                ),
+                resolveOperationGrossCop(op),
               0
             ),
 
@@ -456,7 +506,32 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
   }, 0);
 
   const totalInvestorsInGroups = allGroups.reduce((acc, g) => acc + g.users.length, 0);
-  const totalGrossCopGenerated = totalUsdAcrossGroups * trm;
+  const totalGrossCopGenerated =
+    allGroups.reduce(
+      (acc, group) => {
+        const ops =
+          dataStore.getDailyOperations(
+            currentCycle.cycleId,
+            group.category,
+            group.groupCapitalCop
+          );
+
+        const grossCopPerUser =
+          ops.reduce(
+            (sum, op) =>
+              sum +
+              resolveOperationGrossCop(op),
+            0
+          );
+
+        return (
+          acc +
+          grossCopPerUser *
+            group.users.length
+        );
+      },
+      0
+    );
 
   // Handlers para purga de datos de prueba (SuperAdmin)
   const handleOpenPurgeModal = async () => {
@@ -1037,7 +1112,19 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
             const isExpanded = !!expandedGroupKeys[groupKey];
             const operations = dataStore.getDailyOperations(currentCycle.cycleId, group.category, group.groupCapitalCop);
             const totalUsdAccumulated = operations.reduce((sum, op) => sum + op.amountUsd, 0);
-            const totalGrossCopPerUser = totalUsdAccumulated * trm;
+            const totalGrossCopPerUser =
+              operations.reduce(
+                (sum, op) =>
+                  sum +
+                  resolveOperationGrossCop(op),
+                0
+              );
+
+            const effectiveGroupTrm =
+              totalUsdAccumulated !== 0
+                ? totalGrossCopPerUser /
+                  totalUsdAccumulated
+                : 0;
             const isNotifyingThis = notifyingKey === groupKey;
 
             // Inversionistas del grupo
@@ -1244,7 +1331,12 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                                 const rawAdminPct = user.adminPercentage !== undefined ? user.adminPercentage : 25;
                                 const userPct = rawUserPct <= 1 ? rawUserPct * 100 : rawUserPct;
                                 const adminPct = rawAdminPct <= 1 ? rawAdminPct * 100 : rawAdminPct;
-                                const calc = calculateUserMonthlyResult(totalUsdAccumulated, trm, userPct, adminPct);
+                                const calc = calculateUserMonthlyResult(
+                                  totalUsdAccumulated,
+                                  effectiveGroupTrm,
+                                  userPct,
+                                  adminPct
+                                );
 
                                 return (
                                   <tr key={user.id} className="hover:bg-slate-800/30 transition">

@@ -51,16 +51,45 @@ const MainLayout: React.FC = () => {
     }
   }, [currentUser]);
 
-  // Auto-sync TRM en vivo al iniciar
+  // Auto-sync TRM desde la única fuente server-side.
   React.useEffect(() => {
-    fetchLiveTRM()
-      .then((res) => {
-        dataStore.syncAutomaticTRM(res.rate, res.source);
-      })
-      .catch((err) => {
-        console.warn('Background TRM sync error:', err);
-      });
-  }, []);
+    if (!currentUser) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncTrm = async () => {
+      try {
+        const res = await fetchLiveTRM();
+
+        if (!cancelled) {
+          dataStore.syncAutomaticTRM(
+            res.rate,
+            res.sourceLabel || res.source
+          );
+        }
+      } catch (err) {
+        console.warn(
+          'Dolar-Colombia TRM sync error:',
+          err
+        );
+      }
+    };
+
+    syncTrm();
+
+    const intervalId =
+      window.setInterval(
+        syncTrm,
+        5 * 60 * 1000
+      );
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [currentUser?.uid]);
 
   // If role switches from user to admin or vice versa, adapt tab
   React.useEffect(() => {

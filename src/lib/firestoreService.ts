@@ -515,275 +515,41 @@ export const firestoreService = {
     groupCapitalCop: number;
     date: string;
     amountUsd: number;
-    trmUsed?: number;
-    trmSource?: string;
-    trmCapturedAt?: string;
     notes?: string;
     targetType?: OperationTargetType;
     targetUserId?: string;
     customAuthorizedUids?: string[];
-  }): Promise<{ success: boolean; operation: DailyGroupOperation; message: string }> {
-    const {
-      action = 'CREATE',
-      operationIntentId,
-      payloadFingerprint,
-      cycleId,
-      category,
-      groupCapitalCop,
-      date,
-      amountUsd,
-      trmUsed: paramTrmUsed,
-      trmSource: paramTrmSource,
-      trmCapturedAt: paramTrmCapturedAt,
-      notes = '',
-      targetType = 'CUSTOM_GROUP',
-      targetUserId,
-      customAuthorizedUids,
-    } = params;
+  }): Promise<{
+    success: boolean;
+    operation: DailyGroupOperation;
+    message: string;
+  }> {
+    const callable =
+      httpsCallable<
+        typeof params,
+        {
+          success: boolean;
+          operation: DailyGroupOperation;
+          message: string;
+        }
+      >(
+        functions,
+        'adminExecuteDailyOperation'
+      );
 
     try {
-      const callable = httpsCallable(functions, 'adminExecuteDailyOperation');
-      const res = await callable({
-        action,
-        operationIntentId,
-        payloadFingerprint,
-        cycleId,
-        category,
-        groupCapitalCop,
-        date,
-        amountUsd,
-        trmUsed: paramTrmUsed,
-        trmSource: paramTrmSource,
-        trmCapturedAt: paramTrmCapturedAt,
-        notes,
-        targetType,
-        targetUserId,
-        customAuthorizedUids,
-      });
-      return res.data as { success: boolean; operation: DailyGroupOperation; message: string };
-    } catch (callableErr: any) {
-      console.warn('[FirestoreService] Error en Cloud Function Callable, evaluando transacción atómica local:', callableErr?.code, callableErr?.message);
+      const response =
+        await callable(params);
 
-      const code = callableErr?.code || '';
-      if (
-        code.includes('permission-denied') ||
-        code.includes('unauthenticated') ||
-        code.includes('failed-precondition') ||
-        code.includes('already-exists') ||
-        callableErr?.message?.includes('permiso') ||
-        callableErr?.message?.includes('cerrado')
-      ) {
-        throw new Error(callableErr.message || 'Error de validación en el servidor.');
-      }
+      return response.data;
+    } catch (err: any) {
+      console.error(
+        '[FirestoreService] adminExecuteDailyOperation falló. No existe fallback financiero client-side.',
+        err?.code,
+        err?.message
+      );
 
-      const currentUser = auth.currentUser;
-      if (!currentUser) {
-        throw new Error('Debes estar autenticado en Firebase Auth para registrar operaciones.');
-      }
-
-      // Validar Estado del Ciclo
-      const cycleSnap = await getDoc(doc(db, 'monthlyCycles', cycleId));
-      if (!cycleSnap.exists()) {
-        throw new Error(`El ciclo (${cycleId}) no existe en Firestore.`);
-      }
-      const cycleData = cycleSnap.data() as MonthlyCycle;
-      if (cycleData.status !== 'OPEN' && cycleData.status !== 'REOPENED') {
-        throw new Error(`El ciclo (${cycleData.name || cycleId}) está en estado '${cycleData.status}'. No se permiten operaciones.`);
-      }
-
-      let trm = Number(paramTrmUsed);
-      let trmSource = paramTrmSource || (paramTrmUsed ? 'LIVE_MARKET' : 'CYCLE_DEFAULT');
-      let trmCapturedAt = paramTrmCapturedAt || new Date().toISOString();
-
-      if (!Number.isFinite(trm) || trm <= 0) {
-        trm = cycleData.trmApplied || 4028.5;
-        trmSource = cycleData.trmApplied ? 'CYCLE_DEFAULT' : 'SYSTEM_FALLBACK';
-      }
-
-      // Verificación de Idempotencia
-      const existingOpSnap = await getDoc(doc(db, 'dailyOperations', operationIntentId));
-      if (existingOpSnap.exists()) {
-        const existingData = existingOpSnap.data() as DailyGroupOperation;
-        if (existingData.payloadFingerprint === payloadFingerprint) {
-          return {
-            success: true,
-            operation: existingData,
-            message: 'Operación procesada previamente (Idempotente).',
-          };
-        } else {
-          throw new Error(`ID de intención '${operationIntentId}' ya fue utilizado con un payload diferente.`);
-        }
-      }
-
-      // Construcción de authorizedUids
-      let authorizedUids: string[] = [];
-      let isPublicToActiveUsers = false;
-      let targetUserDoc: UserProfile | null = null;
-
-      if (targetType === 'GLOBAL') {
-        authorizedUids = [];
-        isPublicToActiveUsers = true;
-      } else if (targetType === 'INDIVIDUAL') {
-        if (targetUserId) {
-          const uSnap = await getDoc(doc(db, 'users', targetUserId));
-          if (uSnap.exists()) {
-            targetUserDoc = uSnap.data() as UserProfile;
-            authorizedUids = Array.from(new Set([targetUserDoc.uid, targetUserDoc.id].filter(Boolean) as string[]));
-          } else {
-            authorizedUids = [targetUserId];
-          }
-        } else if (customAuthorizedUids) {
-          authorizedUids = customAuthorizedUids.filter(Boolean);
-        }
-        isPublicToActiveUsers = false;
-      } else if (targetType === 'CATEGORY') {
-        const usersSnap = await getDocs(query(collection(db, 'users'), where('category', '==', category)));
-        const uids: string[] = [];
-        usersSnap.docs.forEach((d) => {
-          const u = d.data() as UserProfile;
-          if (u.status !== 'INACTIVE') {
-            if (u.uid) uids.push(u.uid);
-            if (u.id) uids.push(u.id);
-          }
-        });
-        authorizedUids = Array.from(new Set(uids));
-        isPublicToActiveUsers = false;
-      } else {
-        const usersSnap = await getDocs(query(collection(db, 'users'), where('currentCapital', '==', Number(groupCapitalCop))));
-        const uids: string[] = [];
-        usersSnap.docs.forEach((d) => {
-          const u = d.data() as UserProfile;
-          if (u.status !== 'INACTIVE' && (!category || u.category === category)) {
-            if (u.uid) uids.push(u.uid);
-            if (u.id) uids.push(u.id);
-          }
-        });
-        authorizedUids = Array.from(new Set(uids));
-        isPublicToActiveUsers = false;
-      }
-
-      const createdByName = currentUser.displayName || currentUser.email || 'Administrador';
-
-      // Construcción limpia de la operación (CERO propiedades undefined)
-      const newOp: any = {
-        id: operationIntentId,
-        operationIntentId,
-        payloadFingerprint,
-        cycleId,
-        category,
-        groupCapitalCop: Number(groupCapitalCop),
-        date: date || new Date().toISOString().split('T')[0],
-        amountUsd: Number(amountUsd),
-        trmUsed: trm,
-        trmSource,
-        trmCapturedAt,
-        grossCop: Number(amountUsd) * trm,
-        notes: notes.trim(),
-        createdAt: new Date().toISOString(),
-        createdBy: createdByName,
-        createdByUid: currentUser.uid,
-        status: 'ACTIVE',
-        targetType,
-        authorizedUids,
-        isPublicToActiveUsers,
-      };
-
-      if (targetType === 'INDIVIDUAL' && targetUserDoc) {
-        if (targetUserDoc.id) newOp.userId = targetUserDoc.id;
-        if (targetUserDoc.uid || targetUserDoc.id) newOp.userUid = targetUserDoc.uid || targetUserDoc.id;
-        if (targetUserDoc.email) newOp.userEmail = targetUserDoc.email;
-        if (targetUserDoc.userCode) newOp.userCode = targetUserDoc.userCode;
-        if (targetUserDoc.fullName) newOp.userName = targetUserDoc.fullName;
-      }
-
-      // Transacción Atómica en Firestore
-      await runTransaction(db, async (transaction) => {
-        const opsSnap = await getDocs(
-          query(
-            collection(db, 'dailyOperations'),
-            where('cycleId', '==', cycleId),
-            where('category', '==', category),
-            where('groupCapitalCop', '==', Number(groupCapitalCop))
-          )
-        );
-
-        let accumulatedUsd = Number(amountUsd);
-        opsSnap.docs.forEach((d) => {
-          const op = d.data() as DailyGroupOperation;
-          if (d.id !== operationIntentId && op.status !== 'CONSOLIDATED') {
-            accumulatedUsd += Number(op.amountUsd || 0);
-          }
-        });
-
-        const groupGrossCop = accumulatedUsd * trm;
-        const yieldPct = (groupGrossCop / Number(groupCapitalCop)) * 100;
-
-        const groupCalcId = `calc_${cycleId}_${category}_${groupCapitalCop}`;
-        const groupCalcDoc = {
-          id: groupCalcId,
-          cycleId,
-          category,
-          groupCapitalCop: Number(groupCapitalCop),
-          accumulatedUsd,
-          accumulatedGrossCop: groupGrossCop,
-          yieldPercentage: yieldPct,
-          updatedAt: new Date().toISOString(),
-          updatedBy: createdByName,
-        };
-
-        // Guardar Operación
-        transaction.set(doc(db, 'dailyOperations', operationIntentId), newOp);
-
-        // Guardar Cálculo de Grupo
-        transaction.set(doc(db, 'cycleGroupCalculations', groupCalcId), groupCalcDoc, { merge: true });
-
-        // Actualizar Resultados de Usuarios
-        const usersSnap = await getDocs(query(collection(db, 'users'), where('currentCapital', '==', Number(groupCapitalCop))));
-        usersSnap.docs.forEach((uDoc) => {
-          const u = uDoc.data() as UserProfile;
-          if (u.status === 'INACTIVE') return;
-          if (category && u.category !== category) return;
-
-          const uUid = u.uid || u.id;
-          const userPctRaw = u.userPercentage !== undefined ? u.userPercentage : 75;
-          const adminPctRaw = u.adminPercentage !== undefined ? u.adminPercentage : 25;
-          const uRatio = userPctRaw > 1 ? userPctRaw / 100 : userPctRaw;
-          const aRatio = adminPctRaw > 1 ? adminPctRaw / 100 : adminPctRaw;
-
-          const userProfitCop = groupGrossCop * uRatio;
-          const adminCommCop = groupGrossCop * aRatio;
-          const userProfitUsd = accumulatedUsd * uRatio;
-          const adminCommUsd = accumulatedUsd * aRatio;
-
-          const userResultId = `${cycleId}_${uUid}`;
-          const userResDoc = {
-            id: userResultId,
-            cycleId,
-            userId: u.id || uUid,
-            userUid: uUid,
-            userCode: u.userCode || '',
-            userName: u.fullName || '',
-            totalUsdOperated: accumulatedUsd,
-            totalGrossCop: groupGrossCop,
-            userProfitCop,
-            adminCommissionCop: adminCommCop,
-            userProfitUsd,
-            adminCommissionUsd: adminCommUsd,
-            userPercentage: uRatio * 100,
-            adminPercentage: aRatio * 100,
-            trmUsed: trm,
-            updatedAt: new Date().toISOString(),
-          };
-
-          transaction.set(doc(db, 'cycleUserResults', userResultId), userResDoc, { merge: true });
-        });
-      });
-
-      return {
-        success: true,
-        operation: newOp as DailyGroupOperation,
-        message: 'Operación guardada exitosamente en Firestore.',
-      };
+      throw err;
     }
   },
 
@@ -1034,7 +800,6 @@ export const firestoreService = {
   async adminCloseCycleCallable(payload: {
     cycleId: string;
     closingTrm: number;
-    observedMarketTrmAtClose?: number;
     adminNotes?: string;
     clientRequestId?: string;
   }): Promise<{
@@ -2071,29 +1836,74 @@ export const firestoreService = {
 
   async adminUpdateCycleTrm(params: {
     cycleId: string;
-    newTrm: number;
     clientRequestId: string;
     reason?: string;
   }) {
-    const callable = httpsCallable<{
-      cycleId: string;
-      newTrm: number;
-      clientRequestId: string;
-      reason?: string;
-    }, {
-      success: boolean;
-      idempotentReplay?: boolean;
-      cycleId: string;
-      previousTrm?: number;
-      newTrm: number;
-      affectedUsersCount: number;
-      affectedGroupsCount: number;
-      affectedReinvestmentsCount: number;
-      needsReviewCount: number;
-      message: string;
-    }>(functions, 'adminUpdateCycleTrmCallable');
+    const callable =
+      httpsCallable<
+        {
+          cycleId: string;
+          clientRequestId: string;
+          reason?: string;
+        },
+        {
+          success: boolean;
 
-    const result = await callable(params);
+          idempotentReplay?: boolean;
+
+          cycleId: string;
+
+          previousTrm?:
+            | number
+            | null;
+
+          // newTrm ES RESPUESTA DEL SERVIDOR.
+          // Nunca es entrada del navegador.
+          newTrm: number;
+
+          trmSource?:
+            | string
+            | null;
+
+          trmSourceUrl?:
+            | string
+            | null;
+
+          trmEffectiveDate?:
+            | string
+            | null;
+
+          trmCapturedAt?:
+            | string
+            | null;
+
+          trmRateCents?:
+            | number
+            | null;
+
+          affectedUsersCount:
+            number;
+
+          affectedGroupsCount:
+            number;
+
+          affectedReinvestmentsCount:
+            number;
+
+          needsReviewCount:
+            number;
+
+          message:
+            string;
+        }
+      >(
+        functions,
+        'adminUpdateCycleTrmCallable'
+      );
+
+    const result =
+      await callable(params);
+
     return result.data;
   },
 

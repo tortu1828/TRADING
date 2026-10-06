@@ -128,7 +128,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
       setLiveTrmResult(res);
       setNewTrmInput(res.rate != null ? String(res.rate) : '');
       if (dataStore.getConfig().trmMode === 'AUTOMATIC') {
-        dataStore.syncAutomaticTRM(res.rate, res.source);
+        dataStore.syncAutomaticTRM(res.rate, res.sourceLabel || res.source);
       }
     } catch (e) {
       console.warn('Error fetching live TRM:', e);
@@ -247,51 +247,103 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
     categoryGroups.NEGRA.filter((g) => g.isCalculated).length
   );
 
-  const handleSaveTrm = async (e: React.FormEvent) => {
+  const handleSaveTrm = async (
+    e: React.FormEvent
+  ) => {
     e.preventDefault();
-    setTrmError(null);
-    const parsed = parseFloat(newTrmInput.replace(/[^0-9.]/g, ''));
-    if (isNaN(parsed) || parsed <= 0) {
-      setTrmError('Ingresa un valor numérico de TRM válido mayor a cero.');
-      return;
-    }
 
+    setTrmError(null);
     setIsUpdatingTrm(true);
-    const clientRequestId = `trm_${selectedCycleId}_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+    const clientRequestId =
+      `trm_${selectedCycleId}_${Date.now()}_${Math.random()
+        .toString(36)
+        .substring(2, 9)}`;
 
     try {
-      // 1. Invocar Cloud Function autoritativa (SUPERADMIN)
-      const res = await firestoreService.adminUpdateCycleTrm({
-        cycleId: selectedCycleId,
-        newTrm: parsed,
-        clientRequestId,
-        reason: trmReason.trim() || 'Ajuste oficial de TRM para liquidación del período',
-      });
+      const res =
+        await firestoreService.adminUpdateCycleTrm({
+          cycleId:
+            selectedCycleId,
 
-      // 2. Sincronizar espejo en memoria local (DataStore)
-      dataStore.updateCycleTrm(
-        selectedCycleId,
-        parsed,
-        trmReason,
-        currentUser?.uid || 'admin_root_uid',
-        currentUser?.fullName || 'Administrador Principal'
+          clientRequestId,
+
+          reason:
+            trmReason.trim() ||
+            'Sincronización automática desde Dolar-Colombia.com',
+        });
+
+      const authoritativeRate =
+        Number(
+          res.newTrm
+        );
+
+      if (
+        !Number.isFinite(
+          authoritativeRate
+        ) ||
+        authoritativeRate <= 0
+      ) {
+        throw new Error(
+          'El servidor no devolvió una TRM válida.'
+        );
+      }
+
+      setNewTrmInput(
+        authoritativeRate.toFixed(2)
       );
 
-      let msg = res.message || `TRM actualizada exitosamente a $${parsed.toLocaleString('es-CO')} COP.`;
-      if (res.needsReviewCount && res.needsReviewCount > 0) {
-        msg += ` ⚠️ Atención: ${res.needsReviewCount} solicitud(es) de reinversión/inyección pasaron a estado "Requiere Revisión (NEEDS_REVIEW)" debido al ajuste. Por favor verifícalas antes del cierre.`;
+      dataStore.syncAutomaticTRM(
+        authoritativeRate,
+        'Dolar-Colombia.com'
+      );
+
+      let msg =
+        res.message ||
+        `TRM sincronizada desde Dolar-Colombia.com: $${authoritativeRate.toLocaleString(
+          'es-CO',
+          {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          }
+        )} COP.`;
+
+      if (
+        res.needsReviewCount &&
+        res.needsReviewCount > 0
+      ) {
+        msg +=
+          ` ⚠️ ${res.needsReviewCount} solicitud(es) pasaron a NEEDS_REVIEW.`;
       }
 
       setStatusMessage({
-        type: res.needsReviewCount && res.needsReviewCount > 0 ? 'info' : 'success',
-        text: msg,
+        type:
+          res.needsReviewCount &&
+          res.needsReviewCount > 0
+            ? 'info'
+            : 'success',
+
+        text:
+          msg,
       });
-      setShowTrmModal(false);
+
+      setShowTrmModal(
+        false
+      );
     } catch (err: any) {
-      console.error('[MonthlyClosureView] Error actualizando TRM:', err);
-      setTrmError(err.message || 'Error al actualizar y recalcular la TRM en el servidor.');
+      console.error(
+        '[MonthlyClosureView] Error sincronizando TRM:',
+        err
+      );
+
+      setTrmError(
+        err?.message ||
+        'No fue posible obtener la TRM desde Dolar-Colombia.com.'
+      );
     } finally {
-      setIsUpdatingTrm(false);
+      setIsUpdatingTrm(
+        false
+      );
     }
   };
 
@@ -902,14 +954,14 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                     setNewTrmInput(
                       currentCycle.trmApplied != null ? String(currentCycle.trmApplied) : ''
                     );
-                    setShowTrmModal(true);
+                    setShowTrmModal(false);
                     fetchMarketTrm();
                   }}
                   className="min-h-[36px] text-[11px] font-bold text-amber-400 hover:text-amber-300 transition cursor-pointer flex items-center justify-center gap-1 border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 px-2.5 py-1 rounded-lg"
-                  title="Ajustar o sincronizar TRM del ciclo"
+                  title="Sincronizar TRM desde Dolar-Colombia.com"
                 >
                   <Edit3 className="w-3 h-3 shrink-0" />
-                  <span>Ajustar TRM</span>
+                  <span>Actualizar TRM</span>
                 </button>
               </div>
             )}
@@ -2524,7 +2576,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
       )}
 
       {/* MODAL: Adjust Cycle TRM */}
-      {showTrmModal && (
+      {false && showTrmModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative text-slate-100">
             <button
@@ -2540,7 +2592,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <h3 className="text-lg font-bold text-slate-100">Ajustar TRM del Ciclo</h3>
+                  <h3 className="text-lg font-bold text-slate-100">TRM Automática del Ciclo</h3>
                   <span
                     className={`text-[9px] uppercase font-bold px-2 py-0.5 rounded-full border ${
                       dataStore.getConfig().trmMode === 'AUTOMATIC'
@@ -2582,12 +2634,12 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
               <div className="flex items-center justify-between">
                 <span className="text-base font-bold font-mono text-emerald-300">
-                  ${formatTRM(liveTrmResult?.rate || dataStore.getConfig().trmMarketRate || 4028.50)} COP
+                  ${formatTRM(liveTrmResult?.rate || dataStore.getConfig().trmMarketRate || 0)} COP
                 </span>
                 <button
                   type="button"
                   onClick={() => {
-                    const rate = liveTrmResult?.rate || dataStore.getConfig().trmMarketRate || 4028.50;
+                    const rate = liveTrmResult?.rate || dataStore.getConfig().trmMarketRate || 0;
                     setNewTrmInput(rate != null ? String(rate) : '');
                   }}
                   className="px-2 py-1 text-[11px] font-bold text-slate-900 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition cursor-pointer"
@@ -2614,14 +2666,14 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                     min="1000"
                     max="10000"
                     value={newTrmInput}
-                    onChange={(e) => setNewTrmInput(e.target.value)}
-                    placeholder="4028.50"
+                    readOnly
+                    placeholder="TRM automática"
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-8 pr-4 py-2.5 text-sm font-bold text-slate-100 font-mono focus:outline-none focus:border-blue-500"
                     required
                   />
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
-                  Puedes escribir un valor manual o usar la tasa automática del mercado.
+                  La tasa proviene exclusivamente de Dolar-Colombia.com y no puede modificarse manualmente.
                 </p>
               </div>
 

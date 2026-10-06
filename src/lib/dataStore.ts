@@ -82,13 +82,13 @@ function getEffectiveFinancialSplit(
 
 
 export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {
-  trmReference: 4028.50,
-  trmConfigured: 4028.50,
+  trmReference: 0,
+  trmConfigured: 0,
   trmMode: 'AUTOMATIC',
   trmAutoSync: true,
-  trmMarketRate: 4028.50,
-  trmSource: 'Mercado Oficial Bancario (USD/COP)',
-  trmLastSyncedAt: new Date().toISOString(),
+  trmMarketRate: 0,
+  trmSource: 'TRM no disponible',
+  trmLastSyncedAt: '',
   activeCycleId: '',
   operationalCycleId: null,
   preparingCycleId: null,
@@ -823,7 +823,7 @@ class DataStore {
       cycleId: activeId,
       name: 'Ciclo Activo',
       status: 'OPEN',
-      trmApplied: this.config?.trmConfigured || 4028.50,
+      trmApplied: 0,
       totalManagedCapital: 0,
       totalUsersActive: 0,
       calculatedUsersCount: 0,
@@ -1604,30 +1604,9 @@ class DataStore {
       throw new Error('El monto operado en USD debe ser mayor a 0.');
     }
 
-    let opTrmUsed = trmUsedParam;
-    let opTrmSource = trmSourceParam || 'LIVE_MARKET';
-    let opTrmCapturedAt = trmCapturedAtParam || new Date().toISOString();
-
-    if (!opTrmUsed || opTrmUsed <= 0) {
-      try {
-        const liveTrm = await fetchLiveTRM();
-        if (liveTrm && liveTrm.rate && liveTrm.rate > 0) {
-          opTrmUsed = liveTrm.rate;
-          opTrmSource = liveTrm.source || 'LIVE_MARKET';
-          opTrmCapturedAt = liveTrm.timestamp || new Date().toISOString();
-        }
-      } catch (err) {
-        console.warn('Error fetching live TRM for daily operation, using fallback:', err);
-      }
-    }
-    if (!opTrmUsed || opTrmUsed <= 0) {
-      if (cycle.isLegacy && cycle.trmApplied && cycle.trmApplied > 0) {
-        opTrmUsed = cycle.trmApplied;
-        opTrmSource = 'CYCLE_DEFAULT';
-      } else {
-        throw new Error('LIVE_TRM_UNAVAILABLE: TRM en vivo no disponible para registrar la operación en ciclo moderno.');
-      }
-    }
+    // TRM_AUTHORITATIVE_SERVER_ONLY
+    // La Cloud Function obtiene la TRM directamente
+    // desde Dolar-Colombia.com.
 
     const targetType: OperationTargetType = targetTypeParam || (targetUser ? 'INDIVIDUAL' : 'CUSTOM_GROUP');
     const targetUserId = targetUser?.uid || targetUser?.id;
@@ -1657,9 +1636,6 @@ class DataStore {
       groupCapitalCop,
       date,
       amountUsd,
-      trmUsed: opTrmUsed,
-      trmSource: opTrmSource,
-      trmCapturedAt: opTrmCapturedAt,
       notes: cleanNotes,
       targetType,
       targetUserId,
@@ -2213,11 +2189,16 @@ class DataStore {
           Number(op.amountUsd || 0);
 
         const opTrm =
-          Number(
-            op.trmUsed ||
-            cycle.trmApplied ||
-            4028.5
+          Number(op.trmUsed);
+
+        if (
+          !Number.isFinite(opTrm) ||
+          opTrm <= 0
+        ) {
+          throw new Error(
+            'TRM_OPERATION_MISSING: La operaci?n no contiene una TRM server-side v?lida.'
           );
+        }
 
         const rawUserPct =
           user.userPercentage ??
@@ -3199,29 +3180,23 @@ class DataStore {
       throw new Error(`No se puede cerrar el ciclo. Aún existen ${activeUsers.length - userResults.length} usuarios sin calcular.`);
     }
 
-    const isModernCycle = !cycle.isLegacy;
-    const parsedClosingTrm = Number(closingTrmParam);
-    if (isModernCycle && (!parsedClosingTrm || !Number.isFinite(parsedClosingTrm) || parsedClosingTrm <= 0)) {
-      throw new Error('INVALID_CLOSING_TRM: La TRM de cierre manual es obligatoria y debe ser un número mayor a cero para ciclos modernos.');
-    }
-
-    const effectiveClosingTrm = parsedClosingTrm > 0
-      ? parsedClosingTrm
-      : (cycle.isLegacy && Number(cycle.trmApplied) > 0 ? Number(cycle.trmApplied) : 0);
-
-    if (!effectiveClosingTrm || effectiveClosingTrm <= 0) {
-      throw new Error('INVALID_CLOSING_TRM: TRM de cierre inválida o menor/igual a cero.');
-    }
-
+    // CLOSING_TRM_MANUAL_FINAL
+    //
+    // closingTrmParam es la TRM manual definitiva ingresada
+    // por el SuperAdmin ?nicamente al cerrar el ciclo.
+    // La TRM del mercado durante el ciclo contin?a siendo autom?tica.
+    // observedMarketTrmAtCloseParam se conserva por retrocompatibilidad.
     const now = new Date().toISOString();
 
     // 1. INVOCAR CLOUD FUNCTION AUTORITATIVA DE SERVIDOR
     // Realiza el cierre en Firestore y aplica cada reinversión aprobada mediante Transacciones Atómicas en el backend
     const callResult = await firestoreService.adminCloseCycleCallable({
       cycleId,
-      closingTrm: effectiveClosingTrm,
-      observedMarketTrmAtClose: observedMarketTrmAtCloseParam,
-      adminNotes: adminNotes || `Cierre formal ejecutado por ${adminName}`,
+      closingTrm: closingTrmParam,
+
+      adminNotes:
+        adminNotes ||
+        `Cierre formal ejecutado por ${adminName}`,
     });
 
     if (!callResult.success || !callResult.cycleClosed) {
@@ -3252,7 +3227,21 @@ class DataStore {
       throw new Error(conflictMsg);
     }
 
-    const finalClosingTrm = callResult.closingTrm || effectiveClosingTrm;
+    const finalClosingTrm =
+      Number(
+        callResult.closingTrm
+      );
+
+    if (
+      !Number.isFinite(
+        finalClosingTrm
+      ) ||
+      finalClosingTrm <= 0
+    ) {
+      throw new Error(
+        'SERVER_CLOSING_TRM_MISSING: El servidor no devolvió la TRM definitiva del cierre.'
+      );
+    }
     let totalGrossUsdAtClose = 0;
     let totalGrossCopAtClose = 0;
     let totalUsersProfitCopAtClose = 0;
@@ -3461,7 +3450,7 @@ class DataStore {
     // Mantener sincronizada la configuración global
     if (cycleId === this.config.activeCycleId) {
       this.config.trmConfigured = newTrm;
-      this.config.trmMode = 'MANUAL';
+      this.config.trmMode = 'AUTOMATIC';
       this.config.updatedAt = new Date().toISOString();
       this.config.updatedBy = adminName;
     }
@@ -3758,7 +3747,7 @@ class DataStore {
         cycleId: params.cycleId,
         name: `${monthName} ${y}`,
         status: 'OPEN',
-        trmApplied: this.config.trmConfigured || 4028.50,
+        trmApplied: 0,
         totalManagedCapital: 0,
         totalUsersActive: 0,
         calculatedUsersCount: 0,
@@ -3776,7 +3765,43 @@ class DataStore {
       this.cycles.unshift(cycle);
     }
 
-    const trm = cycle.trmApplied || this.config.trmConfigured || 4028.50;
+    const marketTrmCandidate =
+      Number(this.config.trmMarketRate);
+
+    const marketSource =
+      String(this.config.trmSource || '')
+        .trim()
+        .toLowerCase();
+
+    const hasAuthoritativeMarketTrm =
+      Number.isFinite(marketTrmCandidate) &&
+      marketTrmCandidate > 1000 &&
+      marketTrmCandidate < 10000 &&
+      (
+        marketSource === 'dolar-colombia.com' ||
+        marketSource === 'dolar_colombia'
+      );
+
+    const closedCycleTrm =
+      Number(cycle.trmApplied);
+
+    const trm =
+      cycle.status === 'CLOSED' &&
+      Number.isFinite(closedCycleTrm) &&
+      closedCycleTrm > 0
+        ? closedCycleTrm
+        : hasAuthoritativeMarketTrm
+          ? marketTrmCandidate
+          : 0;
+
+    if (
+      !Number.isFinite(trm) ||
+      trm <= 0
+    ) {
+      throw new Error(
+        'TRM_SOURCE_UNAVAILABLE: No existe una TRM autom?tica v?lida de Dolar-Colombia.'
+      );
+    }
     let createdUsersCount = 0;
     let updatedUsersCount = 0;
     let resultsImportedCount = 0;
@@ -4008,191 +4033,123 @@ class DataStore {
    */
   public syncAutomaticTRM(
     marketRate: number,
-    source: string = 'Mercado Oficial Bancario (USD/COP)',
-    forceApply: boolean = false
+    source: string = 'Dolar-Colombia.com',
+    _forceApply: boolean = false
   ): { applied: boolean; rate: number; mode: string } {
-    if (marketRate <= 0 || isNaN(marketRate)) {
-      return { applied: false, rate: this.config.trmConfigured, mode: this.config.trmMode };
+    void _forceApply;
+
+    const normalizedSource =
+      String(source || '')
+        .trim()
+        .toLowerCase();
+
+    const authoritativeSource =
+      normalizedSource === 'dolar-colombia.com' ||
+      normalizedSource === 'dolar_colombia';
+
+    if (
+      !Number.isFinite(marketRate) ||
+      marketRate <= 1000 ||
+      marketRate >= 10000 ||
+      !authoritativeSource
+    ) {
+      return {
+        applied: false,
+        rate: Number(this.config.trmMarketRate || 0),
+        mode: 'AUTOMATIC',
+      };
     }
 
-    const previousMarketRate = this.config.trmMarketRate;
-    this.config.trmMarketRate = marketRate;
-    this.config.trmLastSyncedAt = new Date().toISOString();
-    this.config.trmSource = source;
+    const roundedRate =
+      Math.round(marketRate * 100) / 100;
 
-    const shouldApply = forceApply || this.config.trmMode === 'AUTOMATIC';
-
-    if (shouldApply) {
-      const prevConfigured = this.config.trmConfigured;
-      this.config.trmConfigured = marketRate;
-      this.config.trmReference = marketRate;
-
-      // Actualizar ciclo activo si está abierto
-      const activeCycle = this.getActiveCycle();
-      if (activeCycle && activeCycle.status === 'OPEN') {
-        const idx = this.cycles.findIndex((c) => c.cycleId === activeCycle.cycleId);
-        if (idx >= 0) {
-          this.cycles[idx].trmApplied = marketRate;
-        }
-
-        // Recalcular cálculos existentes del ciclo con la nueva TRM en vivo
-        this.groupCalculations.forEach((gc) => {
-          if (gc.cycleId === activeCycle.cycleId) {
-            gc.trmUsed = marketRate;
-            gc.totalCopPerUser = gc.totalUsdApplied * marketRate;
-            gc.totalGroupCop = gc.totalUsdApplied * marketRate * gc.usersCount;
-          }
-        });
-
-        this.userResults.forEach((ur) => {
-          if (ur.cycleId === activeCycle.cycleId) {
-            ur.trmUsed = marketRate;
-            ur.totalGrossCop = ur.totalUsdOperated * marketRate;
-            ur.userProfitCop = Math.round(ur.totalGrossCop * (ur.userPercentage / 100));
-            ur.adminCommissionCop = Math.round(ur.totalGrossCop * (ur.adminPercentage / 100));
-          }
-        });
-
-        this.recalculateCycleMetrics();
-      }
-
-      if (Math.abs(prevConfigured - marketRate) > 0.01) {
-        this.addAuditLog({
-          action: 'TRM_UPDATED',
-          performedBy: 'system_auto_sync',
-          performedByName: 'Sincronizador Automático TRM',
-          targetEntity: 'settings/global_config',
-          previousValue: prevConfigured,
-          newValue: marketRate,
-          difference: marketRate - prevConfigured,
-          reason: `Sincronización automática con tasa de mercado en vivo (${source})`,
-        });
-      }
-    }
+    // ?nicamente estado autom?tico de mercado.
+    // NO modifica trmApplied de ning?n ciclo.
+    this.config.trmMarketRate = roundedRate;
+    this.config.trmReference = roundedRate;
+    this.config.trmConfigured = roundedRate;
+    this.config.trmMode = 'AUTOMATIC';
+    this.config.trmAutoSync = true;
+    this.config.trmSource = 'Dolar-Colombia.com';
+    this.config.trmLastSyncedAt =
+      new Date().toISOString();
 
     this.notify();
-    return { applied: shouldApply, rate: marketRate, mode: this.config.trmMode };
+
+    return {
+      applied: true,
+      rate: roundedRate,
+      mode: 'AUTOMATIC',
+    };
   }
 
-  /**
-   * CAMBIAR MODO DE TRM (AUTOMÁTICO vs MANUAL)
-   */
   public setTRMMode(
     mode: 'AUTOMATIC' | 'MANUAL',
     manualRate?: number,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
   ): { success: boolean; mode: string; currentTrm: number } {
-    const prevMode = this.config.trmMode;
-    const prevTrm = this.config.trmConfigured;
-    this.config.trmMode = mode;
-    this.config.updatedAt = new Date().toISOString();
-    this.config.updatedBy = adminName;
+    void manualRate;
+    void adminUid;
+    void adminName;
 
-    if (mode === 'AUTOMATIC') {
-      const rateToApply = this.config.trmMarketRate || prevTrm;
-      this.config.trmConfigured = rateToApply;
-
-      const activeCycle = this.getActiveCycle();
-      if (activeCycle && activeCycle.status === 'OPEN') {
-        const idx = this.cycles.findIndex((c) => c.cycleId === activeCycle.cycleId);
-        if (idx >= 0) {
-          this.cycles[idx].trmApplied = rateToApply;
-        }
-        this.recalculateCycleMetrics();
-      }
-    } else if (mode === 'MANUAL' && manualRate && manualRate > 0) {
-      this.config.trmConfigured = manualRate;
-
-      const activeCycle = this.getActiveCycle();
-      if (activeCycle && activeCycle.status === 'OPEN') {
-        const idx = this.cycles.findIndex((c) => c.cycleId === activeCycle.cycleId);
-        if (idx >= 0) {
-          this.cycles[idx].trmApplied = manualRate;
-        }
-        this.recalculateCycleMetrics();
-      }
+    if (mode !== 'AUTOMATIC') {
+      throw new Error(
+        'TRM_MANUAL_DISABLED: La TRM operativa es autom?tica. La ?nica TRM manual permitida es la definitiva del cierre.'
+      );
     }
 
-    this.addAuditLog({
-      action: 'TRM_UPDATED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      targetEntity: 'settings/global_config',
-      previousValue: { mode: prevMode, trm: prevTrm },
-      newValue: { mode: this.config.trmMode, trm: this.config.trmConfigured },
-      reason: `Cambio de modo TRM a ${mode === 'AUTOMATIC' ? 'Automático (En Vivo)' : 'Manual (Personalizado)'}`,
-    });
+    const rate =
+      Number(this.config.trmMarketRate);
+
+    const source =
+      String(this.config.trmSource || '')
+        .trim()
+        .toLowerCase();
+
+    const valid =
+      Number.isFinite(rate) &&
+      rate > 1000 &&
+      rate < 10000 &&
+      (
+        source === 'dolar-colombia.com' ||
+        source === 'dolar_colombia'
+      );
+
+    if (!valid) {
+      throw new Error(
+        'TRM_SOURCE_UNAVAILABLE: No hay una TRM v?lida de Dolar-Colombia.'
+      );
+    }
+
+    this.config.trmMode = 'AUTOMATIC';
+    this.config.trmConfigured = rate;
+    this.config.trmReference = rate;
+    this.config.trmAutoSync = true;
 
     this.notify();
-    return { success: true, mode: this.config.trmMode, currentTrm: this.config.trmConfigured };
+
+    return {
+      success: true,
+      mode: 'AUTOMATIC',
+      currentTrm: rate,
+    };
   }
 
-  /**
-   * ACTUALIZAR TRM MANUALMENTE
-   */
   public updateTRM(
     newTrm: number,
     adminUid: string = 'admin_root_uid',
     adminName: string = 'Administrador Principal'
   ) {
-    if (newTrm <= 0 || isNaN(newTrm)) {
-      throw new Error('La TRM debe ser un valor numérico válido mayor a 0.');
-    }
+    void newTrm;
+    void adminUid;
+    void adminName;
 
-    const prevTrm = this.config.trmConfigured;
-    this.config.trmConfigured = newTrm;
-    // Al ingresar un valor manual explícito, fijamos el modo a MANUAL
-    this.config.trmMode = 'MANUAL';
-    this.config.updatedAt = new Date().toISOString();
-    this.config.updatedBy = adminName;
-
-    // Actualizar ciclo activo si está abierto
-    const activeCycle = this.getActiveCycle();
-    if (activeCycle && activeCycle.status === 'OPEN') {
-      const idx = this.cycles.findIndex((c) => c.cycleId === activeCycle.cycleId);
-      if (idx >= 0) {
-        this.cycles[idx].trmApplied = newTrm;
-      }
-
-      // Recalcular resultados existentes del ciclo con la nueva TRM
-      this.groupCalculations.forEach((gc) => {
-        if (gc.cycleId === activeCycle.cycleId) {
-          gc.trmUsed = newTrm;
-          gc.totalCopPerUser = gc.totalUsdApplied * newTrm;
-          gc.totalGroupCop = gc.totalUsdApplied * newTrm * gc.usersCount;
-        }
-      });
-
-      this.userResults.forEach((ur) => {
-        if (ur.cycleId === activeCycle.cycleId) {
-          ur.trmUsed = newTrm;
-          ur.totalGrossCop = ur.totalUsdOperated * newTrm;
-          ur.userProfitCop = Math.round(ur.totalGrossCop * (ur.userPercentage / 100));
-          ur.adminCommissionCop = Math.round(ur.totalGrossCop * (ur.adminPercentage / 100));
-        }
-      });
-
-      this.recalculateCycleMetrics();
-    }
-
-    this.addAuditLog({
-      action: 'TRM_UPDATED',
-      performedBy: adminUid,
-      performedByName: adminName,
-      targetEntity: 'settings/global_config',
-      previousValue: prevTrm,
-      newValue: newTrm,
-      difference: newTrm - prevTrm,
-      reason: 'Ajuste manual de TRM por Administrador',
-    });
-
-    this.notify();
+    throw new Error(
+      'TRM_MANUAL_DISABLED: No se puede modificar manualmente la TRM operativa. Usa la TRM definitiva ?nicamente al cerrar el ciclo.'
+    );
   }
 
-  /**
-  * GESTIÓN DE REINVERSIONES E INYECCIONES DE CAPITAL (Regla de 2 Modalidades)
-  */
   public async submitReinvestmentRequest(params: {
     userId: string;
     sourceCycleId: string;

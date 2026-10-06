@@ -704,8 +704,75 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
         // Si hay operaciones diarias registradas en este ciclo (ej: 3 trades de 123 USD = 369 USD),
         // esa es la verdad operativa en tiempo real para este inversionista.
         // Si no hay operaciones diarias aún, consultar el userResult del ciclo si existe.
-        const liveTotalUsd = userDailyOps.length > 0 ? sumDailyUsd : (userResult?.totalUsdOperated ?? 0);
-        const liveTrm = userResult?.trmUsed ?? currentCycle?.trmApplied ?? activeCycle?.trmApplied ?? 4028.5;
+        const liveTotalUsd =
+          userDailyOps.length > 0
+            ? sumDailyUsd
+            : (userResult?.totalUsdOperated ?? 0);
+
+        // Operaciones diarias:
+        // usar exclusivamente valores persistidos
+        // por el backend con su TRM real.
+        const persistedDailyGrossCop =
+          userDailyOps.reduce(
+            (sum, op) => {
+              const gross =
+                Number((op as any).grossCop);
+
+              if (Number.isFinite(gross)) {
+                return sum + gross;
+              }
+
+              const operationTrm =
+                Number((op as any).trmUsed);
+
+              if (
+                Number.isFinite(operationTrm) &&
+                operationTrm > 0
+              ) {
+                return (
+                  sum +
+                  Number(op.amountUsd || 0) *
+                    operationTrm
+                );
+              }
+
+              return sum;
+            },
+            0
+          );
+
+        const dailyEffectiveTrm =
+          userDailyOps.length > 0 &&
+          sumDailyUsd !== 0
+            ? persistedDailyGrossCop /
+              sumDailyUsd
+            : 0;
+
+        const resultTrmCandidate =
+          Number(userResult?.trmUsed);
+
+        const frozenCycleTrmCandidate =
+          Number(
+            currentCycle?.trmApplied ??
+            activeCycle?.trmApplied ??
+            0
+          );
+
+        const liveTrm =
+          userDailyOps.length > 0 &&
+          Number.isFinite(dailyEffectiveTrm) &&
+          dailyEffectiveTrm > 0
+            ? dailyEffectiveTrm
+            : Number.isFinite(resultTrmCandidate) &&
+              resultTrmCandidate > 0
+              ? resultTrmCandidate
+              : currentCycle?.status === 'CLOSED' &&
+                Number.isFinite(frozenCycleTrmCandidate) &&
+                frozenCycleTrmCandidate > 0
+                ? frozenCycleTrmCandidate
+                : hasAuthoritativeMarketTrm
+                  ? marketTrmCandidate
+                  : 0;
 
         const liveCalc = calculateUserMonthlyResult(
           liveTotalUsd,
