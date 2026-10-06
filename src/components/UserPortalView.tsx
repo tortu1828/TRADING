@@ -303,6 +303,18 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
   const selectedCycleObj = allCycles.find((c) => c.cycleId === selectedCycleId);
   const isCycleClosing = selectedCycleObj?.isClosing === true;
 
+  // Solo presentación: la lógica interna continúa usando cycleId.
+  const getCycleDisplayName = (cycleId?: string | null) => {
+    if (!cycleId) return '';
+    const cycle = allCycles.find(
+      (c) => c.cycleId === cycleId || c.id === cycleId
+    );
+    return cycle?.name?.trim() || cycleId;
+  };
+
+  const selectedCycleName =
+    getCycleDisplayName(selectedCycleId);
+
   let preparingCycleObj: any = null;
   let previousCycleObj: any = null;
 
@@ -353,7 +365,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
 
   // User Performance Chart Data
   const userPerformanceData = allUserHistoricalResults.map((r) => ({
-    cycle: r.cycleId,
+    cycle: getCycleDisplayName(r.cycleId),
     profitCOP_k: Math.round(r.userProfitCop / 1000),
     profitCOP: r.userProfitCop,
     usdOperated: r.totalUsdOperated,
@@ -1113,7 +1125,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
                 >
                   {allCycles.map((c) => (
                     <option key={c.id} value={c.cycleId} className="bg-slate-900 text-slate-100">
-                      {c.cycleId} {c.status === 'CLOSED' ? '(Cerrado)' : '(Activo)'}
+                      {c.name || c.cycleId} {c.status === 'CLOSED' ? '(Cerrado)' : '(Activo)'}
                     </option>
                   ))}
                 </select>
@@ -1133,7 +1145,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
               </div>
 
               <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80">
-                <span className="text-slate-400 block text-[11px] font-sans">Ganancia Ciclo {selectedCycleId}</span>
+                <span className="text-slate-400 block text-[11px] font-sans">Ganancia {selectedCycleName}</span>
                 <span
                   className={`font-bold text-sm block mt-0.5 ${
                     cycleProfitCop > 0
@@ -1201,7 +1213,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
               <div className="flex items-center gap-2">
                 <Lock className="w-5 h-5 text-amber-400 shrink-0" />
                 <h4 className="font-bold text-amber-300 text-sm">
-                  Cierre de Ciclo en Proceso ({selectedCycleId})
+                  Cierre de Ciclo en Proceso ({selectedCycleName})
                 </h4>
               </div>
               <p className="text-[11px] text-amber-300/90 leading-relaxed">
@@ -1216,7 +1228,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
               <div className="flex items-center gap-2">
                 <Clock className="w-5 h-5 text-amber-400 shrink-0" />
                 <h4 className="font-bold text-amber-300 text-sm">
-                  Ya tienes una solicitud pendiente para el ciclo {selectedCycleId}
+                  Ya tienes una solicitud pendiente para {selectedCycleName}
                 </h4>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-950/60 p-3 rounded-xl border border-amber-500/20 font-mono text-[11px]">
@@ -1680,7 +1692,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
                     </div>
                     <div className="flex justify-between text-slate-400">
                       <span className="font-sans">Ciclo de origen:</span>
-                      <span className="text-slate-200">{selectedCycleId}</span>
+                      <span className="text-slate-200">{selectedCycleName}</span>
                     </div>
                     <div className="flex justify-between text-slate-400">
                       <span className="font-sans">Modalidad:</span>

@@ -87,6 +87,34 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
   onSelectTab,
 }) => {
   const { currentUser, isSuperAdmin } = useAuth();
+
+  // Presentación únicamente: conserva cycleId real y el contenido
+  // original almacenado en Firestore.
+  const getNotificationDisplayText = (
+    value: string,
+    notif: any
+  ) => {
+    const cycleId =
+      notif?.payload?.cycleId ||
+      notif?.cycleId ||
+      '';
+
+    if (!cycleId || !value?.includes(cycleId)) {
+      return value;
+    }
+
+    const cycle =
+      dataStore.getCycleById(cycleId);
+
+    const cycleName =
+      cycle?.name?.trim();
+
+    if (!cycleName || cycleName === cycleId) {
+      return value;
+    }
+
+    return value.split(cycleId).join(cycleName);
+  };
   const [pushStatus, setPushStatus] = useState<NotificationPermission>('default');
   const [isActivatingPush, setIsActivatingPush] = useState(false);
   const [pushMsg, setPushMsg] = useState<string | null>(null);
@@ -484,7 +512,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                       </div>
                       <div className="flex-1 min-w-0 pr-4">
                         <div className="flex items-center gap-2 mb-1 flex-wrap">
-                          <h4 className="text-xs font-bold text-slate-100">{notif.title}</h4>
+                          <h4 className="text-xs font-bold text-slate-100">{getNotificationDisplayText(notif.title, notif)}</h4>
                           {isAdmission && (
                             <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-medium border border-amber-500/30">
                               Admisión
@@ -504,7 +532,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                           </div>
                         ) : null}
 
-                        <p className="text-xs text-slate-300 leading-relaxed mt-1">{notif.message}</p>
+                        <p className="text-xs text-slate-300 leading-relaxed mt-1">{getNotificationDisplayText(notif.message, notif)}</p>
                         
                         <div className="flex items-center justify-between mt-2.5 pt-2 border-t border-t-slate-800/60 text-[11px] text-slate-500">
                           <span>{new Date(notif.sentAt).toLocaleString('es-CO', { dateStyle: 'medium', timeStyle: 'short' })}</span>
