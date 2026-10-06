@@ -697,25 +697,25 @@ export const UserManagementView: React.FC = () => {
               )}`;
 
             const whatsappMessage =
-              `?? *?Hola ${userWithAlias.fullName}!*
+              `👋 *¡Hola ${userWithAlias.fullName}!*
 
-Te compartimos tus credenciales y token de activaci?n seguro para tu portal de inversionista en *EasyTraders*:
+Te compartimos tus credenciales y token de activación seguro para tu portal de inversionista en *EasyTraders*:
 
-?? *C?digo de Inversionista:* \`${userWithAlias.userCode}\`
-??? *Token de Activaci?n Seguro:* \`${tokenResult.token}\`
-?? *Capital Registrado:* ${formatCOP(userWithAlias.currentCapital)}
-?? *Bit?cora Asignada:* ${userWithAlias.category}
-? *Vigencia:* 7 d?as (un solo uso)
+🔑 *Código de Inversionista:* \`${userWithAlias.userCode}\`
+🛡️ *Token de Activación Seguro:* \`${tokenResult.token}\`
+💼 *Capital Registrado:* ${formatCOP(userWithAlias.currentCapital)}
+📊 *Bitácora Asignada:* ${userWithAlias.category}
+⏳ *Vigencia:* 7 días (un solo uso)
 
-?? *Enlace Directo al Portal:*
+🌐 *Enlace Directo al Portal:*
 ${directLink}
 
-?? *Instrucciones:*
+💡 *Instrucciones:*
 1. Abre el enlace directo o ingresa a la plataforma.
-2. Pega manualmente el *Token de Activaci?n Seguro*.
-3. Confirma tu correo personal y define tu contrase?a segura.
+2. Pega manualmente el *Token de Activación Seguro*.
+3. Confirma tu correo personal y define tu contraseña segura.
 
-?? *Seguridad:* Este token es personal e intransferible. Una vez activada la cuenta quedar? invalidado.`;
+⚠️ *Seguridad:* Este token es personal e intransferible. Una vez activada la cuenta quedará invalidado.`;
 
             setGeneratedTokenModal({
               token: tokenResult.token,
