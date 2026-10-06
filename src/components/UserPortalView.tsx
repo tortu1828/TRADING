@@ -294,10 +294,28 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
       (currentUser.uid && (r.userUid === currentUser.uid || r.userId === currentUser.uid))
   );
 
-  // Reference TRM for USD calculations
-  const referenceTrm =
-    userResult?.trmUsed || currentCycle?.trmApplied || activeCycle?.trmApplied || 4028.5;
-  const capitalEquivalentUsd = Math.round(currentUser.currentCapital / referenceTrm);
+  // Equivalente informativo del capital a USD.
+  // Usa exclusivamente la TRM automática validada desde Dolar-Colombia.com.
+  // NO usa TRM de cierre, resultados históricos ni fallbacks financieros.
+  const marketTrmCandidate = Number(config?.trmMarketRate);
+
+  const hasAuthoritativeMarketTrm =
+    Number.isFinite(marketTrmCandidate) &&
+    marketTrmCandidate > 1000 &&
+    marketTrmCandidate < 10000 &&
+    String(config?.trmSource || '').trim().toLowerCase() === 'dolar-colombia.com';
+
+  const capitalEquivalentUsd = hasAuthoritativeMarketTrm
+    ? currentUser.currentCapital / marketTrmCandidate
+    : null;
+
+  const capitalEquivalentUsdLabel =
+    capitalEquivalentUsd !== null
+      ? `$${capitalEquivalentUsd.toLocaleString('es-CO', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })} USD`
+      : 'TRM no disponible';
 
   // FINANCIAL SNAPSHOTS FOR REINVESTMENT
   const selectedCycleObj = allCycles.find((c) => c.cycleId === selectedCycleId);
@@ -518,7 +536,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
               <span className="text-slate-600">•</span>
               <span>Equivalente:</span>
               <strong className="text-blue-300 font-mono font-bold">
-                ${capitalEquivalentUsd.toLocaleString('es-CO')} USD
+                {capitalEquivalentUsdLabel}
               </strong>
             </p>
           </div>
@@ -1140,7 +1158,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
                   {formatCOP(currentUser.currentCapital)}
                 </span>
                 <span className="text-[10px] text-blue-400 font-sans block mt-0.5">
-                  ${capitalEquivalentUsd.toLocaleString('es-CO')} USD
+                  {capitalEquivalentUsdLabel}
                 </span>
               </div>
 
