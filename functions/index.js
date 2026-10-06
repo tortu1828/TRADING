@@ -8782,6 +8782,343 @@ exports.adminConfigureTradingParticipantCallable = onCall(
 );
 
 
+
+/**
+ * Permite al SuperAdmin corregir el capital operativo de un inversionista
+ * antes del inicio del ciclo.
+ *
+ * SEGURIDAD:
+ * - Solo SuperAdmin.
+ * - Solo cuando existe un ciclo PREPARING autoritativo.
+ * - Bloqueado si existe un ciclo operativo STARTED.
+ * - No modifica snapshots congelados ni resultados del ciclo.
+ * - Firestore Rules siguen bloqueando cambios financieros client-side.
+ */
+exports.adminUpdateInvestorCapitalCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const {
+      authUid,
+      createdByName,
+    } = await verifySuperAdminPrivileges(request);
+
+    const {
+      targetUid,
+      currentCapital,
+    } = request.data || {};
+
+    const cleanTargetUid =
+      typeof targetUid === "string"
+        ? targetUid.trim()
+        : "";
+
+    const parsedCapital =
+      Number(currentCapital);
+
+    if (!cleanTargetUid) {
+      throw new HttpsError(
+        "invalid-argument",
+        "TARGET_UID_REQUIRED"
+      );
+    }
+
+    if (
+      !Number.isFinite(parsedCapital) ||
+      parsedCapital < 2000000 ||
+      parsedCapital > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_TRADING_CAPITAL: El capital debe ser igual o superior a $2.000.000 COP."
+      );
+    }
+
+    const roundedCapital =
+      Math.round(parsedCapital);
+
+    const settingsRef =
+      db.collection("settings").doc("global_config");
+
+    const settingsSnap =
+      await settingsRef.get();
+
+    if (!settingsSnap.exists) {
+      throw new HttpsError(
+        "failed-precondition",
+        "GLOBAL_CONFIG_NOT_FOUND"
+      );
+    }
+
+    const settings =
+      settingsSnap.data() || {};
+
+    const preparingCycleId =
+      typeof settings.preparingCycleId === "string"
+        ? settings.preparingCycleId.trim()
+        : "";
+
+    const operationalCycleId =
+      typeof settings.operationalCycleId === "string"
+        ? settings.operationalCycleId.trim()
+        : "";
+
+    if (operationalCycleId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "CAPITAL_EDIT_BLOCKED_DURING_OPERATIONAL_CYCLE"
+      );
+    }
+
+    if (!preparingCycleId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "NO_PREPARING_CYCLE_AVAILABLE"
+      );
+    }
+
+    const directRef =
+      db.collection("users").doc(cleanTargetUid);
+
+    const directSnap =
+      await directRef.get();
+
+    let userRef = null;
+    let userSnap = null;
+
+    if (directSnap.exists) {
+      userRef = directRef;
+      userSnap = directSnap;
+    } else {
+      const uidQuery =
+        await db
+          .collection("users")
+          .where("uid", "==", cleanTargetUid)
+          .limit(2)
+          .get();
+
+      if (uidQuery.empty) {
+        throw new HttpsError(
+          "not-found",
+          "TARGET_USER_NOT_FOUND"
+        );
+      }
+
+      if (uidQuery.size > 1) {
+        throw new HttpsError(
+          "failed-precondition",
+          "TARGET_USER_UID_AMBIGUOUS"
+        );
+      }
+
+      userSnap =
+        uidQuery.docs[0];
+
+      userRef =
+        userSnap.ref;
+    }
+
+    const resolvedUserDocId =
+      userRef.id;
+
+    const cycleRef =
+      db.collection("monthlyCycles").doc(preparingCycleId);
+
+    const frozenResultRef =
+      db
+        .collection("cycleUserResults")
+        .doc(`${preparingCycleId}_${resolvedUserDocId}`);
+
+    const [
+      cycleSnap,
+      frozenResultSnap,
+    ] = await Promise.all([
+      cycleRef.get(),
+      frozenResultRef.get(),
+    ]);
+
+    if (!cycleSnap.exists) {
+      throw new HttpsError(
+        "failed-precondition",
+        "PREPARING_CYCLE_NOT_FOUND"
+      );
+    }
+
+    const cycle =
+      cycleSnap.data() || {};
+
+    if (cycle.operationalStatus !== "PREPARING") {
+      throw new HttpsError(
+        "failed-precondition",
+        "CAPITAL_EDIT_REQUIRES_PREPARING_CYCLE"
+      );
+    }
+
+    if (frozenResultSnap.exists) {
+      throw new HttpsError(
+        "failed-precondition",
+        "TARGET_USER_ALREADY_FROZEN_IN_CYCLE"
+      );
+    }
+
+    const user =
+      userSnap.data() || {};
+
+    const previousCapital =
+      Number(user.currentCapital || 0);
+
+    const previousCategory =
+      user.category || null;
+
+    const category =
+      getCanonicalCategoryForCapital(
+        roundedCapital
+      );
+
+    const nowIso =
+      new Date().toISOString();
+
+    await db.runTransaction(
+      async (transaction) => {
+        const [
+          freshSettingsSnap,
+          freshCycleSnap,
+          freshUserSnap,
+          freshFrozenSnap,
+        ] = await Promise.all([
+          transaction.get(settingsRef),
+          transaction.get(cycleRef),
+          transaction.get(userRef),
+          transaction.get(frozenResultRef),
+        ]);
+
+        if (
+          !freshSettingsSnap.exists ||
+          !freshCycleSnap.exists ||
+          !freshUserSnap.exists
+        ) {
+          throw new HttpsError(
+            "failed-precondition",
+            "CAPITAL_EDIT_CONTEXT_CHANGED"
+          );
+        }
+
+        const freshSettings =
+          freshSettingsSnap.data() || {};
+
+        const freshCycle =
+          freshCycleSnap.data() || {};
+
+        if (
+          freshSettings.preparingCycleId !== preparingCycleId ||
+          freshSettings.operationalCycleId
+        ) {
+          throw new HttpsError(
+            "failed-precondition",
+            "CAPITAL_EDIT_CONTEXT_CHANGED"
+          );
+        }
+
+        if (
+          freshCycle.operationalStatus !== "PREPARING"
+        ) {
+          throw new HttpsError(
+            "failed-precondition",
+            "CAPITAL_EDIT_REQUIRES_PREPARING_CYCLE"
+          );
+        }
+
+        if (freshFrozenSnap.exists) {
+          throw new HttpsError(
+            "failed-precondition",
+            "TARGET_USER_ALREADY_FROZEN_IN_CYCLE"
+          );
+        }
+
+        transaction.update(
+          userRef,
+          {
+            currentCapital:
+              roundedCapital,
+
+            category,
+
+            updatedAt:
+              nowIso,
+
+            updatedBy:
+              authUid,
+          }
+        );
+      }
+    );
+
+    await db.collection("auditLogs").add({
+      action:
+        "ADMIN_INVESTOR_CAPITAL_UPDATED",
+
+      performedBy:
+        authUid,
+
+      performedByName:
+        createdByName,
+
+      cycleId:
+        preparingCycleId,
+
+      targetEntity:
+        resolvedUserDocId,
+
+      timestamp:
+        admin.firestore.FieldValue.serverTimestamp(),
+
+      previousValue:
+        previousCapital,
+
+      newValue:
+        roundedCapital,
+
+      details: {
+        targetUserDocId:
+          resolvedUserDocId,
+
+        targetUserUid:
+          user.uid || cleanTargetUid,
+
+        previousCapital,
+        newCapital:
+          roundedCapital,
+
+        previousCategory,
+        newCategory:
+          category,
+
+        preparingCycleId,
+      },
+    }).catch(() => {});
+
+    return {
+      success: true,
+
+      targetUserDocId:
+        resolvedUserDocId,
+
+      currentCapital:
+        roundedCapital,
+
+      category,
+
+      preparingCycleId,
+
+      message:
+        `Capital actualizado correctamente a $${roundedCapital.toLocaleString("es-CO")} COP (${category}).`,
+    };
+  }
+);
+
+
 exports.adminStartCycleCallable = onCall(
   {
     region: "us-central1",

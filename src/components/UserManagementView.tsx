@@ -168,6 +168,12 @@ export const UserManagementView: React.FC = () => {
     editingUser?.commissionMode === 'SELF_ADMIN' &&
     editingUser?.participatesInTrading === true;
 
+  const canSuperAdminEditCapital =
+    isSuperAdmin &&
+    !!editingUser &&
+    !!config?.preparingCycleId &&
+    !config?.operationalCycleId;
+
   const effectiveUserSplit =
     isEditingSelfAdmin
       ? 100
@@ -510,7 +516,46 @@ export const UserManagementView: React.FC = () => {
 
     try {
       if (editingUser) {
-        // Update user in dataStore and Firestore (PROTEGIENDO CAMPOS FINANCIEROS DEL SERVIDOR)
+        // Update user in dataStore and Firestore
+        let effectiveCapital =
+          Number(editingUser.currentCapital || 0);
+
+        let effectiveCategory =
+          editingUser.category;
+
+        const requestedCapital =
+          Math.round(cap);
+
+        const capitalChanged =
+          requestedCapital !==
+          Math.round(
+            Number(editingUser.currentCapital || 0)
+          );
+
+        if (capitalChanged) {
+          if (!canSuperAdminEditCapital) {
+            throw new Error(
+              'El capital solo puede ser corregido por el SuperAdmin mientras el ciclo está en PREPARING y no existe un ciclo operativo iniciado.'
+            );
+          }
+
+          const capitalResult =
+            await firestoreService.adminUpdateInvestorCapital({
+              targetUid:
+                editingUser.uid ||
+                editingUser.id,
+
+              currentCapital:
+                requestedCapital,
+            });
+
+          effectiveCapital =
+            capitalResult.currentCapital;
+
+          effectiveCategory =
+            capitalResult.category;
+        }
+
         const updatedUser = dataStore.updateUser(
           editingUser.id,
           {
@@ -518,12 +563,12 @@ export const UserManagementView: React.FC = () => {
             tradeNotificationAlias: trimmedAlias,
             email: formEmail,
             phone: formPhone,
-            currentCapital: editingUser.currentCapital, // PROTEGIDO: Solo lectura, administrado por el sistema financiero
+            currentCapital: effectiveCapital,
             userPercentage:
               isEditingSelfAdmin ? 100 : split,
             adminPercentage:
               isEditingSelfAdmin ? 0 : 100 - split,
-            category: editingUser.category, // PROTEGIDO: Solo lectura, administrado por el sistema financiero
+            category: effectiveCategory,
             paymentMethod: formBank,
             paymentDetails: formAccount || 'Cuenta Principal',
           },
@@ -2038,23 +2083,43 @@ ${directLink}
                 <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <label className="block text-xs font-semibold text-slate-300">Capital Operativo (COP)</label>
-                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-500/30">
-                      Solo Lectura
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border ${
+                      canSuperAdminEditCapital
+                        ? 'bg-emerald-950 text-emerald-300 border-emerald-500/30'
+                        : 'bg-blue-950 text-blue-300 border-blue-500/30'
+                    }`}>
+                      {canSuperAdminEditCapital ? 'Editable SuperAdmin' : 'Solo Lectura'}
                     </span>
                   </div>
+
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-slate-500">$</span>
                     <input
-                      type="text"
-                      disabled
-                      value={Number(editingUser.currentCapital || 0).toLocaleString('es-CO')}
-                      className="w-full bg-slate-900/50 border border-slate-800 rounded-lg pl-7 pr-3 py-2 text-slate-300 font-mono font-bold text-sm cursor-not-allowed opacity-80"
+                      type="number"
+                      min="2000000"
+                      step="1"
+                      disabled={!canSuperAdminEditCapital}
+                      value={formCapital}
+                      onChange={(e) => setFormCapital(e.target.value)}
+                      className={`w-full border rounded-lg pl-7 pr-3 py-2 font-mono font-bold text-sm ${
+                        canSuperAdminEditCapital
+                          ? 'bg-slate-900 border-emerald-500/40 text-emerald-300 focus:outline-none focus:border-emerald-500'
+                          : 'bg-slate-900/50 border-slate-800 text-slate-300 cursor-not-allowed opacity-80'
+                      }`}
                     />
                   </div>
 
-                  <p className="text-[11px] text-amber-300/90 flex items-center gap-1.5 bg-amber-950/30 border border-amber-500/20 px-2.5 py-1.5 rounded-lg">
-                    <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    <span>Capital operativo administrado por el sistema financiero.</span>
+                  <p className={`text-[11px] flex items-center gap-1.5 border px-2.5 py-1.5 rounded-lg ${
+                    canSuperAdminEditCapital
+                      ? 'text-emerald-300/90 bg-emerald-950/30 border-emerald-500/20'
+                      : 'text-amber-300/90 bg-amber-950/30 border-amber-500/20'
+                  }`}>
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {canSuperAdminEditCapital
+                        ? 'El SuperAdmin puede corregir el capital antes de iniciar el ciclo. La bitácora se recalcula automáticamente.'
+                        : 'Capital bloqueado mientras existe un ciclo operativo iniciado.'}
+                    </span>
                   </p>
 
                   <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-800/60 mt-1">

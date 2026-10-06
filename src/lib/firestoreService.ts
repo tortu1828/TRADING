@@ -259,6 +259,45 @@ export const firestoreService = {
     };
   },
 
+  /**
+   * Corrección autoritativa del capital por SuperAdmin.
+   * El navegador NO escribe currentCapital/category directamente.
+   */
+  async adminUpdateInvestorCapital(params: {
+    targetUid: string;
+    currentCapital: number;
+  }): Promise<{
+    success: boolean;
+    targetUserDocId: string;
+    currentCapital: number;
+    category: BitacoraCategory;
+    preparingCycleId: string;
+    message: string;
+  }> {
+    const callable = httpsCallable<
+      {
+        targetUid: string;
+        currentCapital: number;
+      },
+      {
+        success: boolean;
+        targetUserDocId: string;
+        currentCapital: number;
+        category: BitacoraCategory;
+        preparingCycleId: string;
+        message: string;
+      }
+    >(
+      functions,
+      'adminUpdateInvestorCapitalCallable'
+    );
+
+    const response =
+      await callable(params);
+
+    return response.data;
+  },
+
   async saveUser(user: UserProfile) {
     const targetUid = user.uid || user.id;
 
