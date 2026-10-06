@@ -233,7 +233,13 @@ export const UserManagementView: React.FC = () => {
     selfAdminCapitalValid &&
     selfAdminPreparingCycleValid;
 
-  const filteredUsers = allUsers.filter((u) => {
+  // Documento MIGRATED = identidad legacy conservada únicamente
+  // para auditoría. No representa un segundo inversionista visible.
+  const visibleUsers = allUsers.filter(
+    (u) => u.status !== 'MIGRATED'
+  );
+
+  const filteredUsers = visibleUsers.filter((u) => {
     if (
       u.role === 'ADMIN' &&
       u.participatesInTrading !== true
@@ -984,7 +990,7 @@ ${directLink}
             className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-bold text-xs text-slate-400 hover:text-slate-100 transition cursor-pointer"
           >
             <Users className="w-4 h-4 text-blue-400" />
-            <span>Inversionistas Registrados ({allUsers.filter((u) => u.role === 'USER' || u.participatesInTrading === true).length})</span>
+            <span>Inversionistas Registrados ({visibleUsers.filter((u) => u.role === 'USER' || u.participatesInTrading === true).length})</span>
           </button>
           <button
             onClick={() => setSubTab('queue')}
@@ -1014,7 +1020,7 @@ ${directLink}
           className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-bold text-xs bg-blue-600/20 text-blue-300 border border-blue-500/40 shadow-sm transition cursor-pointer"
         >
           <Users className="w-4 h-4 text-blue-400" />
-          <span>Inversionistas Registrados ({allUsers.filter((u) => u.role === 'USER').length})</span>
+          <span>Inversionistas Registrados ({visibleUsers.filter((u) => u.role === 'USER').length})</span>
         </button>
         <button
           onClick={() => setSubTab('queue')}
@@ -1327,7 +1333,7 @@ ${directLink}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
         {/* Ventana Azul */}
         {(() => {
-          const azulUsers = allUsers.filter((u) => (u.role === 'USER' || u.participatesInTrading === true) && u.category === 'AZUL');
+          const azulUsers = visibleUsers.filter((u) => (u.role === 'USER' || u.participatesInTrading === true) && u.category === 'AZUL');
           const azulCap = azulUsers.reduce((sum, u) => sum + u.currentCapital, 0);
           const isSelected = selectedCategory === 'AZUL';
           return (
@@ -1356,7 +1362,7 @@ ${directLink}
 
         {/* Ventana Verde */}
         {(() => {
-          const verdeUsers = allUsers.filter((u) => (u.role === 'USER' || u.participatesInTrading === true) && u.category === 'VERDE');
+          const verdeUsers = visibleUsers.filter((u) => (u.role === 'USER' || u.participatesInTrading === true) && u.category === 'VERDE');
           const verdeCap = verdeUsers.reduce((sum, u) => sum + u.currentCapital, 0);
           const isSelected = selectedCategory === 'VERDE';
           return (
@@ -1385,7 +1391,7 @@ ${directLink}
 
         {/* Ventana Negra */}
         {(() => {
-          const negraUsers = allUsers.filter((u) => (u.role === 'USER' || u.participatesInTrading === true) && u.category === 'NEGRA');
+          const negraUsers = visibleUsers.filter((u) => (u.role === 'USER' || u.participatesInTrading === true) && u.category === 'NEGRA');
           const negraCap = negraUsers.reduce((sum, u) => sum + u.currentCapital, 0);
           const isSelected = selectedCategory === 'NEGRA';
           return (
@@ -1593,37 +1599,49 @@ ${directLink}
                     <span className="font-mono truncate">{user.paymentDetails}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
+                  {((user.status === 'PENDING_CLAIM' || user.status === 'PENDING') && !user.isClaimed && !user.uid) && (
                     <button
                       onClick={() => handleCopyWhatsAppAccess(user)}
                       disabled={generatingTokenUserId === user.id}
                       className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold border transition cursor-pointer disabled:opacity-60 ${
                         copiedUserId === user.id
-                          ? 'bg-emerald-950 text-emerald-300 border-emerald-500/50'
-                          : 'bg-slate-900 hover:bg-slate-800 text-emerald-400 border-emerald-500/30'
+                          ? 'bg-amber-950 text-amber-300 border-amber-500/50'
+                          : 'bg-slate-900 hover:bg-slate-800 text-amber-400 border-amber-500/30'
                       }`}
-                      title={user.isClaimed ? 'Copiar datos de acceso para WhatsApp' : 'Generar token criptográfico y copiar acceso'}
+                      title="Generar token seguro de activación"
                     >
                       {generatingTokenUserId === user.id ? (
                         <>
-                          <div className="w-3 h-3 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+                          <div className="w-3 h-3 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
                           <span>Generando...</span>
                         </>
                       ) : copiedUserId === user.id ? (
                         <>
-                          <Check className="w-3 h-3 text-emerald-400" />
+                          <Check className="w-3 h-3 text-amber-400" />
                           <span>¡Copiado!</span>
                         </>
                       ) : (
                         <>
-                          {user.isClaimed ? (
-                            <MessageCircle className="w-3 h-3 text-emerald-400" />
-                          ) : (
-                            <KeyRound className="w-3 h-3 text-amber-400" />
-                          )}
-                          <span>{user.isClaimed ? 'WhatsApp' : 'Token Act.'}</span>
+                          <KeyRound className="w-3 h-3 text-amber-400" />
+                          <span>Generar Token</span>
                         </>
                       )}
                     </button>
+                  )}
+
+                  {isSuperAdmin && user.status === 'ACTIVE' && (
+                    <button
+                      onClick={() => {
+                        setTestPushUser(user);
+                        setTestPushResult(null);
+                      }}
+                      className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold bg-blue-950/80 hover:bg-blue-900 border border-blue-500/40 text-blue-300 hover:text-white transition cursor-pointer"
+                      title="Probar envío Push FCM directo a este usuario"
+                    >
+                      <Sparkles className="w-3 h-3 text-blue-400" />
+                      <span>Probar Push</span>
+                    </button>
+                  )}
                     {isSuperAdmin && user.status === 'ACTIVE' && (
                       <button
                         onClick={() => {
@@ -1828,31 +1846,6 @@ ${directLink}
                             <>
                               <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
                               <span>Reconciliar</span>
-                            </>
-                          )}
-                        </button>
-                      )}
-
-                      {/* Caso C: Usuario Activo Directo con Credenciales */}
-                      {((user.status === 'ACTIVE' || user.isClaimed) && (user.uid || (user.id && user.id.length >= 20)) && !(user.status === 'PENDING_CLAIM' && !user.isClaimed)) && (
-                        <button
-                          onClick={() => handleCopyWhatsAppAccess(user)}
-                          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
-                            copiedUserId === user.id
-                              ? 'bg-emerald-950 text-emerald-300 border-emerald-500/50'
-                              : 'bg-slate-800 hover:bg-slate-700 text-emerald-400 hover:text-emerald-300 border-emerald-500/30'
-                          }`}
-                          title="Copiar mensaje con datos de acceso para WhatsApp"
-                        >
-                          {copiedUserId === user.id ? (
-                            <>
-                              <Check className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>¡Copiado!</span>
-                            </>
-                          ) : (
-                            <>
-                              <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>Enviar Acceso</span>
                             </>
                           )}
                         </button>
