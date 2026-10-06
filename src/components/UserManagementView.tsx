@@ -164,7 +164,19 @@ export const UserManagementView: React.FC = () => {
 
   const numericCapital = parseFloat(formCapital) || 0;
   const detectedCategory = getCategoryForCapital(numericCapital);
-  const adminSplit = 100 - (parseFloat(formUserSplit) || 50);
+  const isEditingSelfAdmin =
+    editingUser?.commissionMode === 'SELF_ADMIN' &&
+    editingUser?.participatesInTrading === true;
+
+  const effectiveUserSplit =
+    isEditingSelfAdmin
+      ? 100
+      : (parseFloat(formUserSplit) || 50);
+
+  const adminSplit =
+    isEditingSelfAdmin
+      ? 0
+      : 100 - effectiveUserSplit;
 
   // -------------------------------------------------------
   // SuperAdmin Juanes como participante financiero.
@@ -415,7 +427,12 @@ export const UserManagementView: React.FC = () => {
     setFormEmail(user.email);
     setFormPhone(user.phone);
     setFormCapital(user.currentCapital.toString());
-    setFormUserSplit(user.userPercentage.toString());
+    setFormUserSplit(
+      user.commissionMode === 'SELF_ADMIN' &&
+      user.participatesInTrading === true
+        ? '100'
+        : user.userPercentage.toString()
+    );
     setFormBank(user.paymentMethod);
     setFormAccount(user.paymentDetails);
     setFormSupportAgent(user.permissions?.supportAgent === true);
@@ -502,8 +519,10 @@ export const UserManagementView: React.FC = () => {
             email: formEmail,
             phone: formPhone,
             currentCapital: editingUser.currentCapital, // PROTEGIDO: Solo lectura, administrado por el sistema financiero
-            userPercentage: split,
-            adminPercentage: 100 - split,
+            userPercentage:
+              isEditingSelfAdmin ? 100 : split,
+            adminPercentage:
+              isEditingSelfAdmin ? 0 : 100 - split,
             category: editingUser.category, // PROTEGIDO: Solo lectura, administrado por el sistema financiero
             paymentMethod: formBank,
             paymentDetails: formAccount || 'Cuenta Principal',
@@ -2144,8 +2163,9 @@ ${directLink}
                     <input
                       type="number"
                       min="1"
-                      max="99"
-                      value={formUserSplit}
+                      max={isEditingSelfAdmin ? 100 : 99}
+                      value={isEditingSelfAdmin ? '100' : formUserSplit}
+                      disabled={isEditingSelfAdmin}
                       onChange={(e) => setFormUserSplit(e.target.value)}
                       className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-emerald-300 font-mono font-bold text-sm mt-1 focus:outline-none focus:border-emerald-500"
                       required
