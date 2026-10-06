@@ -266,11 +266,15 @@ export const firestoreService = {
   async adminUpdateInvestorCapital(params: {
     targetUid: string;
     currentCapital: number;
+    userPercentage: number;
+    adminPercentage: number;
   }): Promise<{
     success: boolean;
     targetUserDocId: string;
     currentCapital: number;
     category: BitacoraCategory;
+    userPercentage: number;
+    adminPercentage: number;
     preparingCycleId: string;
     message: string;
   }> {
@@ -278,12 +282,16 @@ export const firestoreService = {
       {
         targetUid: string;
         currentCapital: number;
+        userPercentage: number;
+        adminPercentage: number;
       },
       {
         success: boolean;
         targetUserDocId: string;
         currentCapital: number;
         category: BitacoraCategory;
+        userPercentage: number;
+        adminPercentage: number;
         preparingCycleId: string;
         message: string;
       }

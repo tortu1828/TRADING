@@ -9042,6 +9042,8 @@ exports.adminUpdateInvestorCapitalCallable = onCall(
     const {
       targetUid,
       currentCapital,
+      userPercentage,
+      adminPercentage,
     } = request.data || {};
 
     const cleanTargetUid =
@@ -9051,6 +9053,16 @@ exports.adminUpdateInvestorCapitalCallable = onCall(
 
     const parsedCapital =
       Number(currentCapital);
+
+    const splitWasProvided =
+      userPercentage !== undefined ||
+      adminPercentage !== undefined;
+
+    const parsedUserPercentage =
+      Number(userPercentage);
+
+    const parsedAdminPercentage =
+      Number(adminPercentage);
 
     if (!cleanTargetUid) {
       throw new HttpsError(
@@ -9200,6 +9212,76 @@ exports.adminUpdateInvestorCapitalCallable = onCall(
     const user =
       userSnap.data() || {};
 
+    const isSelfAdmin =
+      user.commissionMode === "SELF_ADMIN";
+
+    const previousUserPercentage =
+      Number(user.userPercentage);
+
+    const previousAdminPercentage =
+      Number(user.adminPercentage);
+
+    let effectiveUserPercentage;
+    let effectiveAdminPercentage;
+
+    if (isSelfAdmin) {
+      effectiveUserPercentage = 100;
+      effectiveAdminPercentage = 0;
+    } else if (!splitWasProvided) {
+      effectiveUserPercentage =
+        Number.isFinite(previousUserPercentage)
+          ? previousUserPercentage
+          : 75;
+
+      effectiveAdminPercentage =
+        Number.isFinite(previousAdminPercentage)
+          ? previousAdminPercentage
+          : 25;
+    } else {
+      if (
+        !Number.isFinite(parsedUserPercentage) ||
+        !Number.isFinite(parsedAdminPercentage)
+      ) {
+        throw new HttpsError(
+          "invalid-argument",
+          "INVALID_PERCENTAGE_SPLIT"
+        );
+      }
+
+      effectiveUserPercentage =
+        Math.round(parsedUserPercentage * 100) / 100;
+
+      effectiveAdminPercentage =
+        Math.round(parsedAdminPercentage * 100) / 100;
+
+      if (
+        effectiveUserPercentage <= 0 ||
+        effectiveUserPercentage > 100 ||
+        effectiveAdminPercentage < 0 ||
+        effectiveAdminPercentage >= 100
+      ) {
+        throw new HttpsError(
+          "invalid-argument",
+          "INVALID_PERCENTAGE_RANGE"
+        );
+      }
+
+      const percentageTotal =
+        Math.round(
+          (
+            effectiveUserPercentage +
+            effectiveAdminPercentage
+          ) * 100
+        ) / 100;
+
+      if (Math.abs(percentageTotal - 100) > 0.01) {
+        throw new HttpsError(
+          "invalid-argument",
+          "INVALID_PERCENTAGE_TOTAL: Los porcentajes deben sumar exactamente 100%."
+        );
+      }
+    }
+
     const previousCapital =
       Number(user.currentCapital || 0);
 
@@ -9279,6 +9361,12 @@ exports.adminUpdateInvestorCapitalCallable = onCall(
 
             category,
 
+            userPercentage:
+              effectiveUserPercentage,
+
+            adminPercentage:
+              effectiveAdminPercentage,
+
             updatedAt:
               nowIso,
 
@@ -9329,6 +9417,22 @@ exports.adminUpdateInvestorCapitalCallable = onCall(
         newCategory:
           category,
 
+        previousUserPercentage:
+          Number.isFinite(previousUserPercentage)
+            ? previousUserPercentage
+            : null,
+
+        newUserPercentage:
+          effectiveUserPercentage,
+
+        previousAdminPercentage:
+          Number.isFinite(previousAdminPercentage)
+            ? previousAdminPercentage
+            : null,
+
+        newAdminPercentage:
+          effectiveAdminPercentage,
+
         preparingCycleId,
       },
     }).catch(() => {});
@@ -9344,10 +9448,16 @@ exports.adminUpdateInvestorCapitalCallable = onCall(
 
       category,
 
+      userPercentage:
+        effectiveUserPercentage,
+
+      adminPercentage:
+        effectiveAdminPercentage,
+
       preparingCycleId,
 
       message:
-        `Capital actualizado correctamente a $${roundedCapital.toLocaleString("es-CO")} COP (${category}).`,
+        `Condiciones financieras actualizadas correctamente: $${roundedCapital.toLocaleString("es-CO")} COP, ${effectiveUserPercentage}% inversionista / ${effectiveAdminPercentage}% administracion.`,
     };
   }
 );

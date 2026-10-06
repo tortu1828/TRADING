@@ -523,14 +523,20 @@ export const UserManagementView: React.FC = () => {
     try {
       if (editingUser) {
         // Update user in dataStore and Firestore
-        let effectiveCapital =
-          Number(editingUser.currentCapital || 0);
-
-        let effectiveCategory =
-          editingUser.category;
-
         const requestedCapital =
           Math.round(cap);
+
+        const requestedUserPercentage =
+          isEditingSelfAdmin ? 100 : split;
+
+        const requestedAdminPercentage =
+          isEditingSelfAdmin ? 0 : 100 - split;
+
+        const currentUserPercentage =
+          Number(editingUser.userPercentage);
+
+        const currentAdminPercentage =
+          Number(editingUser.adminPercentage);
 
         const capitalChanged =
           requestedCapital !==
@@ -538,14 +544,50 @@ export const UserManagementView: React.FC = () => {
             Number(editingUser.currentCapital || 0)
           );
 
-        if (capitalChanged) {
+        const splitChanged =
+          !Number.isFinite(currentUserPercentage) ||
+          !Number.isFinite(currentAdminPercentage) ||
+          Math.abs(
+            requestedUserPercentage -
+            currentUserPercentage
+          ) > 0.001 ||
+          Math.abs(
+            requestedAdminPercentage -
+            currentAdminPercentage
+          ) > 0.001;
+
+        let effectiveCapital =
+          Number(editingUser.currentCapital || 0);
+
+        let effectiveCategory =
+          editingUser.category;
+
+        let effectiveUserPercentage =
+          isEditingSelfAdmin
+            ? 100
+            : (
+                Number.isFinite(currentUserPercentage)
+                  ? currentUserPercentage
+                  : requestedUserPercentage
+              );
+
+        let effectiveAdminPercentage =
+          isEditingSelfAdmin
+            ? 0
+            : (
+                Number.isFinite(currentAdminPercentage)
+                  ? currentAdminPercentage
+                  : requestedAdminPercentage
+              );
+
+        if (capitalChanged || splitChanged) {
           if (!canSuperAdminEditCapital) {
             throw new Error(
-              'El capital solo puede ser corregido por el SuperAdmin mientras el ciclo está en PREPARING y no existe un ciclo operativo iniciado.'
+              'El capital y los porcentajes solo pueden ser corregidos por el SuperAdmin mientras el ciclo esta en PREPARING y no existe un ciclo operativo iniciado.'
             );
           }
 
-          const capitalResult =
+          const financialResult =
             await firestoreService.adminUpdateInvestorCapital({
               targetUid:
                 editingUser.uid ||
@@ -553,13 +595,25 @@ export const UserManagementView: React.FC = () => {
 
               currentCapital:
                 requestedCapital,
+
+              userPercentage:
+                requestedUserPercentage,
+
+              adminPercentage:
+                requestedAdminPercentage,
             });
 
           effectiveCapital =
-            capitalResult.currentCapital;
+            financialResult.currentCapital;
 
           effectiveCategory =
-            capitalResult.category;
+            financialResult.category;
+
+          effectiveUserPercentage =
+            financialResult.userPercentage;
+
+          effectiveAdminPercentage =
+            financialResult.adminPercentage;
         }
 
         const updatedUser = dataStore.updateUser(
@@ -571,9 +625,9 @@ export const UserManagementView: React.FC = () => {
             phone: formPhone,
             currentCapital: effectiveCapital,
             userPercentage:
-              isEditingSelfAdmin ? 100 : split,
+              effectiveUserPercentage,
             adminPercentage:
-              isEditingSelfAdmin ? 0 : 100 - split,
+              effectiveAdminPercentage,
             category: effectiveCategory,
             paymentMethod: formBank,
             paymentDetails: formAccount || 'Cuenta Principal',
