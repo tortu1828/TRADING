@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import { InvestorApplication, BitacoraCategory, UserProfile } from '../types';
 import { dataStore } from '../lib/dataStore';
+import { firestoreService } from '../lib/firestoreService';
 import { getAppBaseUrl } from '../lib/constants';
 import { useAuth } from '../context/AuthContext';
 import { getCategoryForCapital } from '../lib/financialEngine';
@@ -73,10 +74,11 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
   // Estados para Modal de Aprobación
   const [approvalCapitalStr, setApprovalCapitalStr] = useState<string>('8.000.000');
   const [approvalCategory, setApprovalCategory] = useState<BitacoraCategory>('AZUL');
-  const [approvalCode, setApprovalCode] = useState<string>('');
   const [approvalBank, setApprovalBank] = useState<string>('Bancolombia');
   const [approvalPaymentDetails, setApprovalPaymentDetails] = useState<string>('');
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [isApproving, setIsApproving] = useState(false);
+  const [generatingAccessAppId, setGeneratingAccessAppId] = useState<string | null>(null);
 
   // Estados para Importador
   const [importTab, setImportTab] = useState<'file' | 'paste'>('file');
@@ -146,66 +148,392 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
   }, [applications, statusFilter, categoryFilter, searchTerm]);
 
   // Manejar apertura de modal de aprobación
+  const buildAdmissionActivationMessage = (params: {
+    app: InvestorApplication;
+    userCode: string;
+    token: string;
+    capital: number;
+    category: BitacoraCategory;
+    expiresAt: string;
+  }): string => {
+    const baseUrl = getAppBaseUrl().replace(/\/+$/, '');
+
+    const directLink =
+      `${baseUrl}/?mode=claim&code=${encodeURIComponent(params.userCode)}`;
+
+    return `?? ?Hola *${params.app.fullName}*!
+
+Tu ingreso como inversionista en *EasyTraders24* fue aprobado correctamente.
+
+?? *C?digo de Inversionista:* \`${params.userCode}\`
+??? *Token de Activaci?n Seguro:* \`${params.token}\`
+?? *Capital Registrado:* $${params.capital.toLocaleString('es-CO')} COP
+?? *Bit?cora Asignada:* ${params.category}
+? *Vigencia:* 7 d?as (un solo uso)
+
+?? *Enlace directo para activar tu cuenta:*
+${directLink}
+
+?? *Instrucciones:*
+1. Abre el enlace.
+2. Verifica tu c?digo.
+3. Pega manualmente el token de activaci?n.
+4. Confirma tu correo y define tu contrase?a.
+
+?? El token es personal y de un solo uso.`;
+  };
+
+  // Manejar apertura del modal de aprobaci?n
   const handleOpenApprove = (app: InvestorApplication) => {
     setApprovingApp(app);
-    const capital = app.requestedCapitalCop || 8_000_000;
-    setApprovalCapitalStr(capital.toLocaleString('es-CO'));
-    const cat = getCategoryForCapital(capital);
-    setApprovalCategory(cat);
-    // Sugerir código
-    const allUsers = dataStore.getUsers();
-    const existingCodes = allUsers.map((u) => u.userCode);
-    let nextNum = 1;
-    existingCodes.forEach((c) => {
-      const match = c.match(/INV-(\d+)/i) || c.match(/USR-(\d+)/i);
-      if (match) {
-        const n = parseInt(match[1], 10);
-        if (n >= nextNum) nextNum = n + 1;
-      }
-    });
-    setApprovalCode(`INV-${String(nextNum).padStart(3, '0')}`);
-    setApprovalBank(app.originBank || 'Bancolombia');
-    setApprovalPaymentDetails(`Cuenta de ahorros ${app.originBank || 'Bancolombia'} (${app.phone})`);
+
+    const capital =
+      app.requestedCapitalCop ||
+      8_000_000;
+
+    setApprovalCapitalStr(
+      capital.toLocaleString('es-CO')
+    );
+
+    setApprovalCategory(
+      getCategoryForCapital(capital)
+    );
+
+    setApprovalBank(
+      app.originBank ||
+      'Bancolombia'
+    );
+
+    setApprovalPaymentDetails(
+      `Cuenta de ahorros ${app.originBank || 'Bancolombia'} (${app.phone})`
+    );
+
     setApprovalError(null);
   };
 
-  // Confirmar Aprobación
-  const handleConfirmApprove = () => {
-    if (!approvingApp) return;
+  // Confirmar aprobaci?n mediante backend autoritativo
+  const handleConfirmApprove = async () => {
+    if (
+      !approvingApp ||
+      isApproving
+    ) {
+      return;
+    }
+
+    setApprovalError(null);
+
+    const numCapital =
+      parseInt(
+        approvalCapitalStr.replace(/[^0-9]/g, ''),
+        10
+      ) || 0;
+
+    if (numCapital < 4_000_000) {
+      setApprovalError(
+        'El capital m?nimo para aprobar una admisi?n es de $4.000.000 COP.'
+      );
+      return;
+    }
+
+    if (
+      !approvingApp.email ||
+      !approvingApp.email.includes('@')
+    ) {
+      setApprovalError(
+        'La solicitud debe tener un correo electr?nico v?lido.'
+      );
+      return;
+    }
+
+    const targetCycleId =
+      String(
+        dataStore.getConfig()?.preparingCycleId ||
+        ''
+      ).trim();
+
+    if (!targetCycleId) {
+      setApprovalError(
+        'No existe un ciclo PREPARING para recibir al nuevo inversionista.'
+      );
+      return;
+    }
+
+    setIsApproving(true);
+
     try {
-      setApprovalError(null);
-      const numCapital = parseInt(approvalCapitalStr.replace(/[^0-9]/g, ''), 10) || 0;
-      if (numCapital < 1_000_000) {
-        setApprovalError('Ingresa un capital válido (mínimo $1.000.000 COP).');
-        return;
+      const res =
+        await firestoreService.adminApproveInvestorApplication({
+          applicationId:
+            approvingApp.id,
+
+          finalCapitalCop:
+            numCapital,
+
+          paymentMethod:
+            approvalBank,
+
+          paymentDetails:
+            approvalPaymentDetails,
+
+          targetCycleId,
+        });
+
+      if (
+        !res?.success ||
+        !res?.user ||
+        !res?.application ||
+        !res?.token ||
+        !res?.user?.userCode
+      ) {
+        throw new Error(
+          'El servidor no devolvi? un acceso de activaci?n completo.'
+        );
       }
 
-      const res = dataStore.approveApplication(
-        approvingApp.id,
-        {
-          userCode: approvalCode.trim().toUpperCase(),
-          category: approvalCategory,
-          finalCapitalCop: numCapital,
-          paymentMethod: approvalBank,
-          paymentDetails: approvalPaymentDetails,
-        },
-        currentUser?.id || 'admin_root_uid',
-        currentUser?.fullName || 'Administrador Principal'
-      );
+      const capital =
+        Number(res.user.currentCapital) ||
+        numCapital;
+
+      const category =
+        res.user.category ||
+        getCategoryForCapital(capital);
+
+      const welcomeMessage =
+        buildAdmissionActivationMessage({
+          app:
+            res.application,
+
+          userCode:
+            res.user.userCode,
+
+          token:
+            res.token,
+
+          capital,
+
+          category,
+
+          expiresAt:
+            res.expiresAt,
+        });
 
       setApprovingApp(null);
-      // Abrir modal de mensaje de bienvenida listo para WhatsApp
+
       setGeneratedWelcomeModal({
-        app: res.application,
-        message: res.welcomeMessage,
-        userCode: res.user.userCode,
+        app:
+          res.application,
+
+        message:
+          welcomeMessage,
+
+        userCode:
+          res.user.userCode,
       });
     } catch (err: any) {
-      setApprovalError(err.message || 'Error al aprobar la solicitud.');
+      setApprovalError(
+        err?.message ||
+        'Error al aprobar la solicitud y generar el token.'
+      );
+    } finally {
+      setIsApproving(false);
     }
   };
 
-  // Confirmar Rechazo
+  const handleGenerateApprovedAccess = async (
+    app: InvestorApplication
+  ) => {
+    if (generatingAccessAppId) {
+      return;
+    }
+
+    setGeneratingAccessAppId(app.id);
+
+    try {
+      let effectiveApp = app;
+
+      let userCode =
+        String(
+          app.assignedUserCode || ''
+        ).trim();
+
+      let token = '';
+      let expiresAt = '';
+
+      let capital =
+        Number(
+          app.requestedCapitalCop
+        ) || 0;
+
+      let category =
+        getCategoryForCapital(capital);
+
+      const linkedUserId =
+        String(
+          app.assignedUserId || ''
+        ).trim();
+
+      let existingUser: UserProfile | null = null;
+
+      if (linkedUserId) {
+        try {
+          existingUser =
+            await firestoreService.getUser(
+              linkedUserId
+            );
+        } catch {
+          existingUser = null;
+        }
+      }
+
+      if (existingUser) {
+        if (
+          existingUser.isClaimed === true ||
+          existingUser.status === 'MIGRATED' ||
+          existingUser.status === 'ACTIVE'
+        ) {
+          throw new Error(
+            'Esta cuenta ya fue activada. El inversionista debe ingresar con su correo y contrase?a.'
+          );
+        }
+
+        const tokenResult =
+          await firestoreService
+            .adminGenerateActivationToken(
+              linkedUserId
+            );
+
+        if (
+          !tokenResult?.success ||
+          !tokenResult?.token
+        ) {
+          throw new Error(
+            'No fue posible generar el token de activacion.'
+          );
+        }
+
+        token = tokenResult.token;
+        expiresAt = tokenResult.expiresAt;
+
+        userCode =
+          tokenResult.userCode ||
+          existingUser.userCode ||
+          userCode;
+
+        capital =
+          Number(existingUser.currentCapital) ||
+          capital;
+
+        category =
+          existingUser.category ||
+          getCategoryForCapital(capital);
+      } else {
+        const targetCycleId =
+          String(
+            dataStore.getConfig()
+              ?.preparingCycleId ||
+            ''
+          ).trim();
+
+        if (!targetCycleId) {
+          throw new Error(
+            'Esta admision requiere recuperacion, pero actualmente no existe un ciclo PREPARING.'
+          );
+        }
+
+        if (capital < 4_000_000) {
+          throw new Error(
+            'Esta admision no puede recuperarse porque su capital es inferior a $4.000.000 COP.'
+          );
+        }
+
+        const recovery =
+          await firestoreService
+            .adminApproveInvestorApplication({
+              applicationId:
+                app.id,
+
+              finalCapitalCop:
+                capital,
+
+              paymentMethod:
+                app.originBank ||
+                'Bancolombia',
+
+              paymentDetails:
+                `Recuperacion de admision aprobada (${app.phone})`,
+
+              targetCycleId,
+            });
+
+        if (
+          !recovery?.success ||
+          !recovery?.user ||
+          !recovery?.application ||
+          !recovery?.token ||
+          !recovery?.user?.userCode
+        ) {
+          throw new Error(
+            'La recuperacion no devolvio un acceso valido.'
+          );
+        }
+
+        effectiveApp =
+          recovery.application;
+
+        userCode =
+          recovery.user.userCode;
+
+        token =
+          recovery.token;
+
+        expiresAt =
+          recovery.expiresAt;
+
+        capital =
+          Number(
+            recovery.user.currentCapital
+          ) || capital;
+
+        category =
+          recovery.user.category ||
+          getCategoryForCapital(capital);
+      }
+
+      if (!userCode || !token) {
+        throw new Error(
+          'No fue posible obtener el codigo y token de activacion.'
+        );
+      }
+
+      const message =
+        buildAdmissionActivationMessage({
+          app:
+            effectiveApp,
+
+          userCode,
+          token,
+          capital,
+          category,
+          expiresAt,
+        });
+
+      setGeneratedWelcomeModal({
+        app:
+          effectiveApp,
+
+        message,
+        userCode,
+      });
+    } catch (err: any) {
+      window.alert(
+        err?.message ||
+        'No fue posible generar el acceso de activacion.'
+      );
+    } finally {
+      setGeneratingAccessAppId(null);
+    }
+  };
+
   const handleConfirmReject = () => {
     if (!rejectingApp) return;
     try {
@@ -851,23 +1179,20 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                                 </button>
                               )}
                               <button
-                                onClick={() => {
-                                  const originUrl = getAppBaseUrl();
-                                  const msg = `👋 ¡Hola *${app.fullName}*! Te confirmamos que tu cuenta como Inversionista en *EasyTraders24* está lista.\n\n🔑 *Código:* *${app.assignedUserCode}*\n💼 *Capital:* $${app.requestedCapitalCop.toLocaleString('es-CO')} COP\n📲 *Acceso:* ${originUrl}\n\nIngresa a *"Activar Cuenta"* con tu código para definir tu clave.`;
-                                  handleCopyText(msg, `copy_approved_${app.id}`);
-                                }}
-                                className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold transition cursor-pointer"
-                                title="Copiar mensaje de acceso para WhatsApp"
+                                onClick={() => handleGenerateApprovedAccess(app)}
+                                disabled={generatingAccessAppId === app.id}
+                                className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Generar token seguro y mensaje de activacion"
                               >
-                                {copiedId === `copy_approved_${app.id}` ? (
+                                {generatingAccessAppId === app.id ? (
                                   <>
-                                    <Check className="w-3 h-3 text-emerald-400" />
-                                    <span>Copiado</span>
+                                    <div className="w-3 h-3 border-2 border-emerald-300/30 border-t-emerald-300 rounded-full animate-spin" />
+                                    <span>Generando...</span>
                                   </>
                                 ) : (
                                   <>
-                                    <Copy className="w-3 h-3" />
-                                    <span>Copiar Acceso</span>
+                                    <ShieldCheck className="w-3 h-3" />
+                                    <span>Generar Acceso</span>
                                   </>
                                 )}
                               </button>
@@ -950,20 +1275,18 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
               </div>
 
               {/* Código a Asignar */}
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Código Oficial de Inversionista a Asignar <span className="text-amber-400">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={approvalCode}
-                  onChange={(e) => setApprovalCode(e.target.value.toUpperCase())}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-sm text-amber-300 focus:outline-none focus:border-amber-500"
-                  placeholder="ej. INV-046 o USR-8F29K"
-                />
-                <p className="text-[11px] text-slate-500 mt-1">
-                  Con este código el inversionista podrá activar su cuenta o ingresar directamente a su portal.
-                </p>
+              <div className="p-3 rounded-xl bg-blue-950/30 border border-blue-500/30">
+                <div className="flex items-start gap-2">
+                  <ShieldCheck className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-semibold text-blue-200">
+                      Codigo y token automaticos
+                    </p>
+                    <p className="text-[11px] text-blue-200/70 mt-1 leading-relaxed">
+                      Al aprobar, el servidor asignara el codigo INV-XXXX y generara un token seguro de activacion de un solo uso.
+                    </p>
+                  </div>
+                </div>
               </div>
 
               {/* Capital y Categoría */}
@@ -1000,8 +1323,8 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                   <label className="block text-slate-300 font-semibold mb-1">Categoría Asignada</label>
                   <select
                     value={approvalCategory}
-                    onChange={(e) => setApprovalCategory(e.target.value as BitacoraCategory)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-amber-500"
+                    disabled
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-300 opacity-80 cursor-not-allowed"
                   >
                     <option value="AZUL">🔵 Azul ($2M - $9.999.999)</option>
                     <option value="VERDE">🟢 Verde ($10M - $59.999.999)</option>
@@ -1052,9 +1375,17 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
               <button
                 type="button"
                 onClick={handleConfirmApprove}
-                className="px-5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold shadow-lg shadow-emerald-950/40 cursor-pointer"
+                disabled={isApproving}
+                className="px-5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold shadow-lg shadow-emerald-950/40 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
-                Aprobar y Generar Acceso WhatsApp
+                {isApproving ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>Aprobando y generando token...</span>
+                  </>
+                ) : (
+                  <span>Aprobar y Generar Acceso WhatsApp</span>
+                )}
               </button>
             </div>
           </div>

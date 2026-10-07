@@ -882,7 +882,8 @@ async function verifySuperAdminPrivileges(request) {
 /**
  * Helper: Generación atómica correlativa de userCode (USR-XXXX) sin colisiones concurrentes
  */
-async function getNextAtomicUserCode() {
+async function getNextAtomicUserCode(prefix = "USR") {
+  const normalizedPrefix = prefix === "INV" ? "INV" : "USR";
   const counterRef = db.collection("counters").doc("users");
   const existingCounter = await counterRef.get();
   let baseline = 1000;
@@ -922,7 +923,7 @@ async function getNextAtomicUserCode() {
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
-    assignedCode = `USR-${String(nextNum).padStart(4, "0")}`;
+    assignedCode = `${normalizedPrefix}-${String(nextNum).padStart(4, "0")}`;
   });
 
   return assignedCode;
@@ -3272,6 +3273,793 @@ exports.adminGenerateActivationToken = onCall(
       expiresAt: expiresAt.toISOString(),
       userCode: userData.userCode || "",
       fullName: userData.fullName || "",
+    };
+  }
+);
+
+/**
+ * ADMIN_APPROVE_APPLICATION_WITH_TOKEN
+ *
+ * Aprueba una admision de forma autoritativa:
+ * - valida capital minimo de Admisiones ($4M)
+ * - valida ciclo PREPARING
+ * - crea el inversionista como PENDING_CLAIM
+ * - genera codigo INV-XXXX en servidor
+ * - genera token seguro y almacena solamente su hash
+ * - marca la admision APPROVED en la misma transaccion
+ *
+ * El token plaintext solo se retorna una vez al administrador.
+ */
+exports.adminApproveInvestorApplicationCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const {
+      authUid,
+      createdByName,
+    } = await verifySuperAdminPrivileges(request);
+
+    const data = request.data || {};
+
+    const applicationId =
+      typeof data.applicationId === "string"
+        ? data.applicationId.trim()
+        : "";
+
+    const targetCycleId =
+      typeof data.targetCycleId === "string"
+        ? data.targetCycleId.trim()
+        : "";
+
+    const finalCapitalCop =
+      Math.round(Number(data.finalCapitalCop));
+
+    const cleanPaymentMethod =
+      String(data.paymentMethod || "").trim().slice(0, 100);
+
+    const cleanPaymentDetails =
+      String(data.paymentDetails || "Cuenta Principal").trim().slice(0, 500);
+
+    if (!applicationId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "APPLICATION_ID_REQUIRED"
+      );
+    }
+
+    if (
+      !Number.isFinite(finalCapitalCop) ||
+      finalCapitalCop < 4000000 ||
+      finalCapitalCop > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "ADMISSION_MINIMUM_CAPITAL: El capital de una admision debe ser igual o superior a $4.000.000 COP."
+      );
+    }
+
+    if (!targetCycleId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "ADMISSION_TARGET_CYCLE_REQUIRED: No existe un ciclo PREPARING valido para el nuevo inversionista."
+      );
+    }
+
+    let entryCycleId;
+
+    try {
+      entryCycleId =
+        await validateTargetCycleForUserEntry({
+          db,
+          targetCycleId,
+        });
+    } catch (err) {
+      if (err && err.code === "not-found") {
+        throw new HttpsError(
+          "not-found",
+          err.message
+        );
+      }
+
+      throw new HttpsError(
+        "failed-precondition",
+        err && err.message
+          ? err.message
+          : "TARGET_CYCLE_NOT_PREPARING"
+      );
+    }
+
+    const settingsSnap =
+      await db.collection("settings")
+        .doc("global_config")
+        .get();
+
+    const settingsData =
+      settingsSnap.exists
+        ? settingsSnap.data() || {}
+        : {};
+
+    if (
+      settingsData.preparingCycleId !==
+      entryCycleId
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "TARGET_CYCLE_NOT_AUTHORITATIVE_PREPARING"
+      );
+    }
+
+    const authoritativeCycleSnap =
+      await db.collection("monthlyCycles")
+        .doc(entryCycleId)
+        .get();
+
+    if (!authoritativeCycleSnap.exists) {
+      throw new HttpsError(
+        "not-found",
+        "TARGET_CYCLE_NOT_FOUND"
+      );
+    }
+
+    const authoritativeCycle =
+      authoritativeCycleSnap.data() || {};
+
+    if (
+      authoritativeCycle.status !== "OPEN" ||
+      authoritativeCycle.operationalStatus !== "PREPARING" ||
+      authoritativeCycle.isStarting === true
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "TARGET_CYCLE_NOT_AVAILABLE_FOR_NEW_INVESTOR"
+      );
+    }
+
+    const appRef =
+      db.collection("investorApplications")
+        .doc(applicationId);
+
+    const appSnap =
+      await appRef.get();
+
+    if (!appSnap.exists) {
+      throw new HttpsError(
+        "not-found",
+        "APPLICATION_NOT_FOUND"
+      );
+    }
+
+    const appData =
+      appSnap.data() || {};
+
+    const isApprovedRecovery =
+      appData.status === "APPROVED";
+
+    if (
+      appData.status !== "PENDING" &&
+      !isApprovedRecovery
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "APPLICATION_NOT_PENDING_OR_RECOVERABLE"
+      );
+    }
+
+    const cleanFullName =
+      String(appData.fullName || "").trim();
+
+    const cleanEmail =
+      String(appData.email || "")
+        .trim()
+        .toLowerCase();
+
+    const cleanPhone =
+      String(appData.phone || "").trim();
+
+    const cleanDocumentId =
+      String(appData.documentId || "").trim();
+
+    const linkedUserId =
+      typeof appData.assignedUserId === "string"
+        ? appData.assignedUserId.trim()
+        : "";
+
+    // Recovery is intentionally restricted to admissions that were
+    // already approved by the historical flow and retain both pieces
+    // of linkage created by that flow.
+    if (
+      isApprovedRecovery &&
+      (
+        !linkedUserId ||
+        linkedUserId.includes("/") ||
+        typeof appData.assignedUserCode !== "string" ||
+        !/^INV-\d+$/i.test(
+          appData.assignedUserCode.trim()
+        )
+      )
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "APPROVED_RECOVERY_NOT_ELIGIBLE: La admision aprobada no tiene vinculacion historica valida para recuperacion."
+      );
+    }
+
+    if (
+      isApprovedRecovery &&
+      linkedUserId &&
+      !linkedUserId.includes("/")
+    ) {
+      const linkedUserSnap =
+        await db.collection("users")
+          .doc(linkedUserId)
+          .get();
+
+      if (linkedUserSnap.exists) {
+        throw new HttpsError(
+          "failed-precondition",
+          "APPROVED_USER_ALREADY_EXISTS: El perfil del inversionista ya existe. Debe regenerarse su token de activacion, no crear otro usuario."
+        );
+      }
+    }
+
+    if (!cleanFullName) {
+      throw new HttpsError(
+        "failed-precondition",
+        "APPLICATION_NAME_REQUIRED"
+      );
+    }
+
+    if (
+      !cleanEmail ||
+      !cleanEmail.includes("@")
+    ) {
+      throw new HttpsError(
+        "failed-precondition",
+        "APPLICATION_EMAIL_REQUIRED: La admision debe tener un correo valido antes de aprobarse."
+      );
+    }
+
+    // No permitir crear otra identidad Auth con el mismo correo.
+    try {
+      const authUser =
+        await admin.auth()
+          .getUserByEmail(cleanEmail);
+
+      if (authUser) {
+        throw new HttpsError(
+          "already-exists",
+          "Ya existe una cuenta de Firebase Authentication con este correo."
+        );
+      }
+    } catch (authErr) {
+      if (
+        authErr &&
+        authErr.code !== "auth/user-not-found"
+      ) {
+        if (authErr instanceof HttpsError) {
+          throw authErr;
+        }
+
+        throw new HttpsError(
+          "internal",
+          `AUTH_CHECK_FAILED: ${
+            authErr && authErr.message
+              ? authErr.message
+              : authErr
+          }`
+        );
+      }
+    }
+
+    // No permitir otro perfil activo/pendiente con el mismo correo.
+    const sameEmailSnap =
+      await db.collection("users")
+        .where("email", "==", cleanEmail)
+        .limit(10)
+        .get();
+
+    const conflictingProfile =
+      sameEmailSnap.docs.find((docSnap) => {
+        const profile =
+          docSnap.data() || {};
+
+        return profile.status !== "MIGRATED";
+      });
+
+    if (conflictingProfile) {
+      throw new HttpsError(
+        "already-exists",
+        "Ya existe un inversionista activo o pendiente con este correo."
+      );
+    }
+
+    const category =
+      getCanonicalCategoryForCapital(
+        finalCapitalCop
+      );
+
+    // Conservar la politica que utilizaba el flujo historico
+    // de aprobacion de Admisiones.
+    const userPercentage =
+      category === "NEGRA"
+        ? 70
+        : 50;
+
+    const adminPercentage =
+      100 - userPercentage;
+
+    // El numero sigue usando el contador global atomico,
+    // pero las aprobaciones de Admisiones conservan prefijo INV.
+    let userCode = "";
+
+    const legacyAssignedCode =
+      isApprovedRecovery &&
+      typeof appData.assignedUserCode === "string" &&
+      /^INV-\d+$/i.test(
+        appData.assignedUserCode.trim()
+      )
+        ? appData.assignedUserCode
+            .trim()
+            .toUpperCase()
+        : "";
+
+    if (legacyAssignedCode) {
+      const existingLegacyCodeSnap =
+        await db.collection("users")
+          .where(
+            "userCode",
+            "==",
+            legacyAssignedCode
+          )
+          .limit(1)
+          .get();
+
+      if (!existingLegacyCodeSnap.empty) {
+        throw new HttpsError(
+          "already-exists",
+          `USER_CODE_ALREADY_EXISTS: El codigo ${legacyAssignedCode} ya pertenece a otro perfil.`
+        );
+      }
+
+      userCode =
+        legacyAssignedCode;
+    } else {
+      for (
+        let attempt = 0;
+        attempt < 100;
+        attempt += 1
+      ) {
+        const candidateCode =
+          await getNextAtomicUserCode("INV");
+
+        const existingCodeSnap =
+          await db.collection("users")
+            .where(
+              "userCode",
+              "==",
+              candidateCode
+            )
+            .limit(1)
+            .get();
+
+        if (existingCodeSnap.empty) {
+          userCode =
+            candidateCode;
+          break;
+        }
+      }
+
+      if (!userCode) {
+        throw new HttpsError(
+          "internal",
+          "USER_CODE_GENERATION_EXHAUSTED"
+        );
+      }
+    }
+
+    const preservedAssignedUserId =
+      isApprovedRecovery &&
+      linkedUserId &&
+      !linkedUserId.includes("/")
+        ? linkedUserId
+        : "";
+
+    const userRef =
+      preservedAssignedUserId
+        ? db.collection("users")
+            .doc(preservedAssignedUserId)
+        : db.collection("users")
+            .doc();
+
+    const legacyDocId =
+      userRef.id;
+
+    const plaintextToken =
+      crypto.randomBytes(16)
+        .toString("hex")
+        .toUpperCase();
+
+    const tokenHash =
+      crypto.createHash("sha256")
+        .update(plaintextToken)
+        .digest("hex");
+
+    const expiresAt =
+      new Date(
+        Date.now() +
+        7 * 24 * 60 * 60 * 1000
+      );
+
+    const nowIso =
+      new Date().toISOString();
+
+    const pendingUserDoc = {
+      id: legacyDocId,
+      uid: null,
+
+      isClaimed: false,
+      status: "PENDING_CLAIM",
+      role: "USER",
+
+      email: cleanEmail,
+      fullName: cleanFullName,
+      phone: cleanPhone,
+      documentId: cleanDocumentId,
+
+      currentCapital: finalCapitalCop,
+      baseCapital: finalCapitalCop,
+      currency: "COP",
+
+      userPercentage,
+      adminPercentage,
+      category,
+
+      paymentMethod:
+        cleanPaymentMethod ||
+        String(appData.originBank || "").trim() ||
+        "Bancolombia",
+
+      paymentDetails:
+        cleanPaymentDetails,
+
+      entryCycleId:
+        entryCycleId || null,
+
+      entryDate:
+        nowIso.split("T")[0],
+
+      userCode,
+
+      source:
+        "ADMISSION_APPROVAL",
+
+      sourceApplicationId:
+        applicationId,
+
+      activationTokenHash:
+        tokenHash,
+
+      activationExpiresAt:
+        admin.firestore.Timestamp
+          .fromDate(expiresAt),
+
+      claimAttempts: 0,
+      claimLockedUntil: null,
+
+      tokenGeneratedAt:
+        admin.firestore.FieldValue
+          .serverTimestamp(),
+
+      tokenGeneratedBy:
+        authUid,
+
+      createdAt:
+        admin.firestore.FieldValue
+          .serverTimestamp(),
+
+      updatedAt:
+        admin.firestore.FieldValue
+          .serverTimestamp(),
+
+      createdByUid:
+        authUid,
+    };
+
+    // User + Application cambian juntos.
+    // Si cualquiera falla, no queda una admision aprobada sin usuario.
+    await db.runTransaction(
+      async (transaction) => {
+        const freshAppSnap =
+          await transaction.get(
+            appRef
+          );
+
+        if (!freshAppSnap.exists) {
+          throw new HttpsError(
+            "not-found",
+            "APPLICATION_NOT_FOUND"
+          );
+        }
+
+        const freshAppData =
+          freshAppSnap.data() || {};
+
+        if (
+          freshAppData.status !== "PENDING" &&
+          freshAppData.status !== "APPROVED"
+        ) {
+          throw new HttpsError(
+            "failed-precondition",
+            "APPLICATION_NOT_PENDING_OR_RECOVERABLE"
+          );
+        }
+
+        const freshUserSnap =
+          await transaction.get(
+            userRef
+          );
+
+        if (freshUserSnap.exists) {
+          throw new HttpsError(
+            "already-exists",
+            "ASSIGNED_USER_ALREADY_EXISTS"
+          );
+        }
+
+        transaction.set(
+          userRef,
+          pendingUserDoc
+        );
+
+        transaction.update(
+          appRef,
+          {
+            status:
+              "APPROVED",
+
+            assignedUserCode:
+              userCode,
+
+            assignedUserId:
+              legacyDocId,
+
+            resolvedAt:
+              nowIso,
+
+            resolvedBy:
+              createdByName,
+
+            finalCapitalCop:
+              finalCapitalCop,
+
+            category,
+
+            updatedAt:
+              admin.firestore
+                .FieldValue
+                .serverTimestamp(),
+          }
+        );
+      }
+    );
+
+    // Auditoria de aprobacion.
+    await db.collection("auditLogs")
+      .add({
+        action:
+          "APPLICATION_APPROVED",
+
+        performedBy:
+          authUid,
+
+        performedByName:
+          createdByName,
+
+        targetEntity:
+          applicationId,
+
+        reason:
+          `Admision aprobada. Codigo asignado: ${userCode}`,
+
+        details: {
+          applicationId,
+          userId:
+            legacyDocId,
+          userCode,
+          capital:
+            finalCapitalCop,
+          category,
+          entryCycleId,
+        },
+
+        timestamp:
+          admin.firestore
+            .FieldValue
+            .serverTimestamp(),
+      })
+      .catch(() => {});
+
+    // Auditoria del token. Nunca guardar plaintext ni hash en logs.
+    await db.collection("auditLogs")
+      .add({
+        action:
+          "ADMIN_GENERATE_ACTIVATION_TOKEN",
+
+        targetUserId:
+          legacyDocId,
+
+        userCode,
+
+        adminUid:
+          authUid,
+
+        source:
+          "ADMISSION_APPROVAL",
+
+        timestamp:
+          admin.firestore
+            .FieldValue
+            .serverTimestamp(),
+
+        expiresAt:
+          admin.firestore.Timestamp
+            .fromDate(expiresAt),
+      })
+      .catch(() => {});
+
+    const responseUser = {
+      id:
+        legacyDocId,
+
+      uid:
+        null,
+
+      isClaimed:
+        false,
+
+      status:
+        "PENDING_CLAIM",
+
+      role:
+        "USER",
+
+      email:
+        cleanEmail,
+
+      fullName:
+        cleanFullName,
+
+      phone:
+        cleanPhone,
+
+      documentId:
+        cleanDocumentId,
+
+      currentCapital:
+        finalCapitalCop,
+
+      baseCapital:
+        finalCapitalCop,
+
+      currency:
+        "COP",
+
+      userPercentage,
+      adminPercentage,
+      category,
+
+      paymentMethod:
+        pendingUserDoc.paymentMethod,
+
+      paymentDetails:
+        pendingUserDoc.paymentDetails,
+
+      entryCycleId:
+        entryCycleId || null,
+
+      entryDate:
+        nowIso.split("T")[0],
+
+      userCode,
+
+      createdAt:
+        nowIso,
+
+      updatedAt:
+        nowIso,
+    };
+
+    const responseApplication = {
+      id:
+        applicationId,
+
+      queuePosition:
+        Number(
+          appData.queuePosition || 0
+        ),
+
+      fullName:
+        cleanFullName,
+
+      documentId:
+        cleanDocumentId,
+
+      email:
+        cleanEmail,
+
+      phone:
+        cleanPhone,
+
+      city:
+        String(
+          appData.city ||
+          "Colombia"
+        ),
+
+      requestedCapitalCop:
+        Number(
+          appData.requestedCapitalCop ||
+          finalCapitalCop
+        ),
+
+      originBank:
+        String(
+          appData.originBank ||
+          ""
+        ),
+
+      submissionDate:
+        typeof appData.submissionDate ===
+        "string"
+          ? appData.submissionDate
+          : nowIso,
+
+      status:
+        "APPROVED",
+
+      source:
+        appData.source ||
+        "WEB_FORM",
+
+      priorityNotes:
+        typeof appData.priorityNotes ===
+        "string"
+          ? appData.priorityNotes
+          : "",
+
+      assignedUserCode:
+        userCode,
+
+      assignedUserId:
+        legacyDocId,
+
+      resolvedAt:
+        nowIso,
+
+      resolvedBy:
+        createdByName,
+    };
+
+    return {
+      success:
+        true,
+
+      user:
+        responseUser,
+
+      application:
+        responseApplication,
+
+      token:
+        plaintextToken,
+
+      expiresAt:
+        expiresAt.toISOString(),
+
+      message:
+        "Admision aprobada y token de activacion generado correctamente.",
     };
   }
 );

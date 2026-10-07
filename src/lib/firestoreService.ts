@@ -148,6 +148,45 @@ export const firestoreService = {
   },
 
   /**
+   * Aprueba una admision en backend, crea el perfil PENDING_CLAIM
+   * y devuelve el token seguro una sola vez.
+   */
+  async adminApproveInvestorApplication(params: {
+    applicationId: string;
+    finalCapitalCop: number;
+    paymentMethod?: string;
+    paymentDetails?: string;
+    targetCycleId: string;
+  }): Promise<{
+    success: boolean;
+    user: UserProfile;
+    application: InvestorApplication;
+    token: string;
+    expiresAt: string;
+    message: string;
+  }> {
+    const callable = httpsCallable<
+      typeof params,
+      {
+        success: boolean;
+        user: UserProfile;
+        application: InvestorApplication;
+        token: string;
+        expiresAt: string;
+        message: string;
+      }
+    >(
+      functions,
+      'adminApproveInvestorApplicationCallable'
+    );
+
+    const response =
+      await callable(params);
+
+    return response.data;
+  },
+
+  /**
    * Importacion masiva autoritativa de inversionistas
    * hacia el ciclo PREPARING.
    *
