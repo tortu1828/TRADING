@@ -59,7 +59,19 @@ const MainLayout: React.FC = () => {
 
     let cancelled = false;
 
+    let trmRequestInFlight = false;
+
     const syncTrm = async () => {
+      if (
+        cancelled ||
+        trmRequestInFlight ||
+        document.visibilityState !== 'visible'
+      ) {
+        return;
+      }
+
+      trmRequestInFlight = true;
+
       try {
         const res = await fetchLiveTRM();
 
@@ -74,20 +86,55 @@ const MainLayout: React.FC = () => {
           'Dolar-Colombia TRM sync error:',
           err
         );
+      } finally {
+        trmRequestInFlight = false;
       }
     };
 
-    syncTrm();
+    const handleWindowFocus = () => {
+      void syncTrm();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void syncTrm();
+      }
+    };
+
+    void syncTrm();
 
     const intervalId =
       window.setInterval(
-        syncTrm,
-        5 * 60 * 1000
+        () => {
+          void syncTrm();
+        },
+        30 * 1000
       );
+
+    window.addEventListener(
+      'focus',
+      handleWindowFocus
+    );
+
+    document.addEventListener(
+      'visibilitychange',
+      handleVisibilityChange
+    );
 
     return () => {
       cancelled = true;
+
       window.clearInterval(intervalId);
+
+      window.removeEventListener(
+        'focus',
+        handleWindowFocus
+      );
+
+      document.removeEventListener(
+        'visibilitychange',
+        handleVisibilityChange
+      );
     };
   }, [currentUser?.uid]);
 

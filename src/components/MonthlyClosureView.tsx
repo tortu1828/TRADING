@@ -923,7 +923,26 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3 py-2 sm:py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs w-full lg:w-auto">
             <div className="flex items-center gap-2 shrink-0">
               <span className="text-slate-400">TRM Configurada:</span>
-              <span className="text-blue-400 font-bold font-mono">{formatTRM(currentCycle.trmApplied)} COP</span>
+              <span className="text-blue-400 font-bold font-mono">
+                {(() => {
+                  const marketTrm =
+                    Number(
+                      dataStore.getConfig().trmMarketRate
+                    );
+
+                  const displayTrm =
+                    isClosed
+                      ? Number(currentCycle.trmApplied || 0)
+                      : marketTrm;
+
+                  return (
+                    Number.isFinite(displayTrm) &&
+                    displayTrm > 0
+                  )
+                    ? `${formatTRM(displayTrm)} COP`
+                    : 'Consultando TRM...';
+                })()}
+              </span>
               <span
                 className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded ${
                   dataStore.getConfig().trmMode === 'AUTOMATIC'
