@@ -208,8 +208,8 @@ export const AccessGatewayModal: React.FC<AccessGatewayModalProps> = ({
     }
 
     const numericCapital = parseInt(applyCapitalStr.replace(/[^0-9]/g, ''), 10) || 0;
-    if (numericCapital < 1_000_000) {
-      setApplyError('El capital mínimo de postulación es de $1.000.000 COP.');
+    if (numericCapital < 4_000_000) {
+      setApplyError('El capital mínimo para solicitar admisión es de $4.000.000 COP.');
       return;
     }
 

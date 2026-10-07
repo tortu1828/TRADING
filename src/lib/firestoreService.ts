@@ -1176,23 +1176,31 @@ export const firestoreService = {
   },
 
   async saveApplication(app: InvestorApplication) {
-    // FASE 1B: Delegación estricta a Cloud Function Callable con validación de backend
-    const res = await this.submitApplicationCallable({
-      fullName: app.fullName,
-      documentId: app.documentId,
-      email: app.email,
-      phone: app.phone,
-      city: app.city,
-      requestedCapitalCop: app.requestedCapitalCop,
-      originBank: app.originBank,
-      priorityNotes: app.priorityNotes,
-    });
-    if (res && res.applicationId) {
-      app.id = res.applicationId;
-      app.queuePosition = res.queuePosition;
+    if (!app?.id) {
+      throw new Error(
+        'APPLICATION_ID_REQUIRED: No se puede actualizar una admision sin ID.'
+      );
     }
-  },
 
+    // APPLICATION_STABLE_ID_UPDATE:
+    // Las admisiones existentes se actualizan siempre sobre su ID original.
+    // submitApplicationCallable() queda reservada exclusivamente para crear
+    // postulaciones nuevas.
+    const appRef = doc(
+      db,
+      'investorApplications',
+      app.id
+    );
+
+    const normalizedApp = Object.fromEntries(
+      Object.entries(app).filter(([, value]) => value !== undefined)
+    ) as Record<string, any>;
+
+    await updateDoc(
+      appRef,
+      normalizedApp
+    );
+  },
   async saveApplicationsBatch(apps: InvestorApplication[]) {
     for (const app of apps) {
       try {

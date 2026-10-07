@@ -3340,12 +3340,12 @@ exports.submitApplicationCallable = onCall(
     const numCapital = Number(requestedCapitalCop);
     if (
       !Number.isFinite(numCapital) ||
-      numCapital < 2000000 ||
+      numCapital < 4000000 ||
       numCapital > Number.MAX_SAFE_INTEGER
     ) {
       throw new HttpsError(
         "invalid-argument",
-        "El capital solicitado debe ser igual o superior a $2.000.000 COP."
+        "El capital solicitado debe ser igual o superior a $4.000.000 COP."
       );
     }
 

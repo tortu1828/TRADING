@@ -4953,6 +4953,15 @@ class DataStore {
 
     const app = this.applications[appIndex];
     const capital = Number(params.finalCapitalCop) || app.requestedCapitalCop || 8_000_000;
+
+    // ADMISSION_APPROVAL_MINIMUM_CAPITAL:
+    // Las excepciones desde $2M pertenecen al flujo operativo de Bitacoras,
+    // no al flujo normal de Admisiones.
+    if (!Number.isFinite(capital) || capital < 4_000_000) {
+      throw new Error(
+        'Una admision no puede aprobarse con un capital inferior a $4.000.000 COP.'
+      );
+    }
     const category = params.category || getCategoryForCapital(capital);
 
     // Asignar o generar código
