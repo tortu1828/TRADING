@@ -154,36 +154,49 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
     token: string;
     capital: number;
     category: BitacoraCategory;
-    expiresAt: string;
-  }): string => {
-    const baseUrl = getAppBaseUrl().replace(/\/+$/, '');
+    expiresAt?: string;
+  }) => {
+    const {
+      app,
+      userCode,
+      token,
+      capital,
+      category,
+    } = params;
 
-    const directLink =
-      `${baseUrl}/?mode=claim&code=${encodeURIComponent(params.userCode)}`;
+    const baseUrl =
+      getAppBaseUrl().replace(/\/+$/, '');
 
-    return `?? ?Hola *${params.app.fullName}*!
+    const directClaimUrl =
+      `${baseUrl}/?mode=claim&code=${encodeURIComponent(userCode)}`;
 
-Tu ingreso como inversionista en *EasyTraders24* fue aprobado correctamente.
+    const formattedCapital =
+      `$${Number(capital || 0).toLocaleString('es-CO')} COP`;
 
-?? *C?digo de Inversionista:* \`${params.userCode}\`
-??? *Token de Activaci?n Seguro:* \`${params.token}\`
-?? *Capital Registrado:* $${params.capital.toLocaleString('es-CO')} COP
-?? *Bit?cora Asignada:* ${params.category}
-? *Vigencia:* 7 d?as (un solo uso)
-
-?? *Enlace directo para activar tu cuenta:*
-${directLink}
-
-?? *Instrucciones:*
-1. Abre el enlace.
-2. Verifica tu c?digo.
-3. Pega manualmente el token de activaci?n.
-4. Confirma tu correo y define tu contrase?a.
-
-?? El token es personal y de un solo uso.`;
+    return [
+      `\u{1F44B} \u00A1Hola *${app.fullName}*!`,
+      '',
+      'Tu ingreso como inversionista en *EasyTraders24* fue aprobado correctamente.',
+      '',
+      `\u{1F511} *C\u00F3digo de Inversionista:* \`${userCode}\``,
+      `\u{1F6E1}\uFE0F *Token de Activaci\u00F3n Seguro:* \`${token}\``,
+      `\u{1F4B0} *Capital Registrado:* ${formattedCapital}`,
+      `\u{1F4D8} *Bit\u00E1cora Asignada:* ${category}`,
+      `\u23F3 *Vigencia:* 7 d\u00EDas (un solo uso)`,
+      '',
+      `\u{1F517} *Enlace directo para activar tu cuenta:*`,
+      directClaimUrl,
+      '',
+      `\u{1F4CB} *Instrucciones:*`,
+      `1. Abre el enlace.`,
+      `2. Verifica tu c\u00F3digo.`,
+      `3. Pega manualmente el token de activaci\u00F3n.`,
+      `4. Confirma tu correo y define tu contrase\u00F1a.`,
+      '',
+      `\u{1F512} El token es personal y de un solo uso.`,
+    ].join('\n');
   };
 
-  // Manejar apertura del modal de aprobaci?n
   const handleOpenApprove = (app: InvestorApplication) => {
     setApprovingApp(app);
 
