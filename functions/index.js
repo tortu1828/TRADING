@@ -4141,14 +4141,25 @@ exports.submitApplicationCallable = onCall(
     const cleanBank = originBank && typeof originBank === "string" ? originBank.trim().slice(0, 50) : "Bancolombia";
     const cleanNotes = priorityNotes && typeof priorityNotes === "string" ? priorityNotes.trim().slice(0, 500) : "Postulación desde Formulario Web";
 
-    // 3. Asignación Atómica Transaccional de queuePosition (APPLICATION-04 / APPLICATION-05)
+    // 3. Asignación atómica de orden FIFO + posición visible dinámica.
+    // queuePosition queda como secuencia histórica estable para ordenar.
+    // La posición que ve el aspirante se calcula únicamente con los PENDING actuales,
+    // por lo que nunca salta de #15 a #63 por aprobaciones/eliminaciones históricas.
     const counterRef = db.collection("counters").doc("investorApplications");
     const appRef = db.collection("investorApplications").doc();
 
     let assignedQueuePosition = 1;
+    let assignedDisplayQueuePosition = 1;
 
     await db.runTransaction(async (transaction) => {
       const counterSnap = await transaction.get(counterRef);
+
+      const pendingQuery = db
+        .collection("investorApplications")
+        .where("status", "==", "PENDING");
+
+      const pendingSnap = await transaction.get(pendingQuery);
+      assignedDisplayQueuePosition = pendingSnap.size + 1;
 
       if (counterSnap.exists) {
         const counterData = counterSnap.data() || {};
@@ -4158,24 +4169,20 @@ exports.submitApplicationCallable = onCall(
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
       } else {
-        // APPLICATION-05: Inicialización segura si el contador aún no existe
-        // Consultar la posición máxima histórica existente y total de postulaciones
-        // para garantizar que nunca se reutilicen ni dupliquen posiciones pasadas
-        const maxQuerySnap = await db
+        // APPLICATION-05: inicialización segura de la secuencia histórica.
+        const maxQuery = db
           .collection("investorApplications")
           .orderBy("queuePosition", "desc")
-          .limit(1)
-          .get();
+          .limit(1);
+
+        const maxQuerySnap = await transaction.get(maxQuery);
         let maxExisting = 0;
+
         if (!maxQuerySnap.empty) {
           maxExisting = Number(maxQuerySnap.docs[0].data().queuePosition) || 0;
         }
 
-        const countSnap = await db.collection("investorApplications").count().get();
-        const totalDocsCount = countSnap.data().count || 0;
-        const baseline = Math.max(maxExisting, totalDocsCount);
-
-        assignedQueuePosition = baseline + 1;
+        assignedQueuePosition = maxExisting + 1;
 
         transaction.set(counterRef, {
           nextPosition: assignedQueuePosition + 1,
@@ -4184,7 +4191,7 @@ exports.submitApplicationCallable = onCall(
         });
       }
 
-      // 4. Creación autoritativa en Firestore dentro de la transacción atómica
+      // 4. Creación autoritativa en Firestore dentro de la transacción atómica.
       const applicationDoc = {
         id: appRef.id,
         fullName: fullName.trim(),
@@ -4208,7 +4215,8 @@ exports.submitApplicationCallable = onCall(
     return {
       success: true,
       applicationId: appRef.id,
-      queuePosition: assignedQueuePosition,
+      // Posición real dentro de la cola pendiente en el momento de radicar.
+      queuePosition: assignedDisplayQueuePosition,
     };
   }
 );

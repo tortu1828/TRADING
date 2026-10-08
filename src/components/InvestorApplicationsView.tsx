@@ -112,8 +112,44 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
     return unsub;
   }, []);
 
-  // Métricas
-  const pendingApps = useMemo(() => applications.filter((a) => a.status === 'PENDING'), [applications]);
+  // Métricas + posición dinámica de la cola pendiente.
+  // queuePosition se conserva como clave histórica de orden FIFO; la posición visible
+  // siempre se calcula sobre las solicitudes que realmente siguen PENDING.
+  const pendingApps = useMemo(
+    () =>
+      applications
+        .filter((a) => a.status === 'PENDING')
+        .sort((a, b) => {
+          const aQueue = Number(a.queuePosition || 0);
+          const bQueue = Number(b.queuePosition || 0);
+
+          if (aQueue !== bQueue) return aQueue - bQueue;
+
+          const aDate = new Date(a.submissionDate || 0).getTime();
+          const bDate = new Date(b.submissionDate || 0).getTime();
+          if (aDate !== bDate) return aDate - bDate;
+
+          return String(a.id).localeCompare(String(b.id));
+        }),
+    [applications]
+  );
+
+  const pendingTurnById = useMemo(
+    () =>
+      new Map<string, number>(
+        pendingApps.map((app, index) => [app.id, index + 1])
+      ),
+    [pendingApps]
+  );
+
+  const getDisplayTurn = (app: InvestorApplication): number => {
+    if (app.status === 'PENDING') {
+      return pendingTurnById.get(app.id) || 1;
+    }
+
+    return Number(app.queuePosition || 0);
+  };
+
   const approvedApps = useMemo(() => applications.filter((a) => a.status === 'APPROVED'), [applications]);
   const rejectedApps = useMemo(() => applications.filter((a) => a.status === 'REJECTED'), [applications]);
 
@@ -138,14 +174,15 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
         const matchEmail = app.email?.toLowerCase().includes(term);
         const matchCode = app.assignedUserCode?.toLowerCase().includes(term);
         const matchNotes = app.priorityNotes?.toLowerCase().includes(term);
-        const matchTurn = String(app.queuePosition) === term || `#${app.queuePosition}` === term;
+        const displayTurn = getDisplayTurn(app);
+        const matchTurn = String(displayTurn) === term || `#${displayTurn}` === term;
         if (!matchName && !matchDoc && !matchPhone && !matchEmail && !matchCode && !matchNotes && !matchTurn) {
           return false;
         }
       }
       return true;
     });
-  }, [applications, statusFilter, categoryFilter, searchTerm]);
+  }, [applications, statusFilter, categoryFilter, searchTerm, pendingTurnById]);
 
   // Manejar apertura de modal de aprobación
   const buildAdmissionActivationMessage = (params: {
@@ -723,7 +760,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
               </h2>
             </div>
             <p className="text-xs sm:text-sm text-slate-400 max-w-2xl leading-relaxed">
-              Gestión secuencial por <span className="text-amber-300 font-semibold">Orden de Llegada</span>. 
+              Gestión secuencial por <span className="text-amber-300 font-semibold">Orden de Llegada</span>.
               El inversionista con el Turno #1 tiene la máxima prioridad para incorporarse al siguiente ciclo operativo de capital.
             </p>
           </div>
@@ -812,7 +849,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
               <Sparkles className="w-4 h-4 text-emerald-400" />
             </div>
             <p className="text-xl sm:text-2xl font-bold font-mono text-emerald-400">
-              {pendingApps.length > 0 ? `#${pendingApps[0].queuePosition}` : 'Al día'}
+              {pendingApps.length > 0 ? '#1' : 'Al día'}
             </p>
             <p className="text-[10px] text-slate-400 mt-0.5 truncate">
               {pendingApps.length > 0 ? pendingApps[0].fullName : 'Cola completada'}
@@ -851,8 +888,8 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
             Regla de Prioridad Institucional: Orden de Llegada Estricto
           </p>
           <p className="text-amber-200/70 text-[11px] leading-relaxed">
-            Las postulaciones radicadas vía web o importadas desde tu Excel histórico ocupan un puesto secuencial inmutable. 
-            Al aprobar una solicitud, el sistema genera automáticamente el código único de inversionista (ej. <code className="bg-amber-950/60 px-1 py-0.5 rounded text-amber-300">INV-046</code>), 
+            Las postulaciones pendientes conservan su orden FIFO, pero su número visible es dinámico: si una persona sale de la cola, las demás avanzan automáticamente sin dejar huecos.
+            Al aprobar una solicitud, el turno deja de ser temporal y el sistema genera automáticamente el código único y permanente de inversionista (ej. <code className="bg-amber-950/60 px-1 py-0.5 rounded text-amber-300">INV-046</code>),
             establece su cuenta activa y redacta el mensaje de bienvenida con enlace y credenciales para enviar por WhatsApp en 1 solo clic.
           </p>
         </div>
@@ -967,6 +1004,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                 </tr>
               ) : (
                 filteredApps.map((app, index) => {
+                  const displayTurn = getDisplayTurn(app);
                   const isFirstPending = app.status === 'PENDING' && pendingApps[0]?.id === app.id;
                   const estimatedCategory = getCategoryForCapital(app.requestedCapitalCop);
                   const cleanPhone = app.phone.replace(/[^0-9]/g, '');
@@ -993,7 +1031,9 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                                 : 'bg-slate-800 text-slate-400'
                             }`}
                           >
-                            Turno #{app.queuePosition}
+                            {app.status === 'APPROVED' && app.assignedUserCode
+                              ? app.assignedUserCode
+                              : `Turno #${displayTurn}`}
                           </span>
                           {isFirstPending && (
                             <span className="hidden xl:inline-flex items-center gap-1 text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 animate-pulse">
@@ -1003,14 +1043,14 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                           {app.status === 'PENDING' && (
                             <div className="flex flex-col gap-0.5">
                               <button
-                                onClick={() => handleMoveTurn(app.id, app.queuePosition, 'up')}
+                                onClick={() => handleMoveTurn(app.id, displayTurn, 'up')}
                                 title="Subir en orden de prioridad"
                                 className="p-0.5 rounded hover:bg-slate-700 text-slate-400 hover:text-white"
                               >
                                 <ChevronUp className="w-3 h-3" />
                               </button>
                               <button
-                                onClick={() => handleMoveTurn(app.id, app.queuePosition, 'down')}
+                                onClick={() => handleMoveTurn(app.id, displayTurn, 'down')}
                                 title="Bajar en orden de prioridad"
                                 className="p-0.5 rounded hover:bg-slate-700 text-slate-400 hover:text-white"
                               >
@@ -1248,7 +1288,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-slate-100">Aprobar Solicitud de Ingreso</h3>
-                  <p className="text-xs text-slate-400">Turno #{approvingApp.queuePosition} • {approvingApp.fullName}</p>
+                  <p className="text-xs text-slate-400">Turno #{getDisplayTurn(approvingApp)} • {approvingApp.fullName}</p>
                 </div>
               </div>
               <button
@@ -1874,7 +1914,7 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
 
             <p className="text-xs text-slate-300">
               ¿Estás seguro de rechazar la solicitud de{' '}
-              <span className="font-bold text-white">{rejectingApp.fullName}</span> (Turno #{rejectingApp.queuePosition})?
+              <span className="font-bold text-white">{rejectingApp.fullName}</span> (Turno #{getDisplayTurn(rejectingApp)})?
             </p>
 
             <div>
@@ -1944,7 +1984,9 @@ export const InvestorApplicationsView: React.FC<InvestorApplicationsViewProps> =
               <div className="flex justify-between items-center text-slate-300">
                 <span className="text-slate-400">Turno / Estado:</span>
                 <span className="font-mono font-bold text-amber-300">
-                  Turno #{deletingApp.queuePosition} ({deletingApp.status})
+                  {deletingApp.status === 'APPROVED' && deletingApp.assignedUserCode
+                    ? deletingApp.assignedUserCode
+                    : `Turno #${getDisplayTurn(deletingApp)}`} ({deletingApp.status})
                 </span>
               </div>
               <div className="flex justify-between items-center text-slate-300">

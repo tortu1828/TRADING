@@ -383,6 +383,25 @@ class DataStore {
     // 6. Investor Applications global
     const uApps = firestoreService.listenApplications((remoteApps) => {
       if (!remoteApps) return;
+
+      const orderedPending = remoteApps
+        .filter((app) => app.status === 'PENDING')
+        .sort((a, b) => {
+          const queueDiff = Number(a.queuePosition || 0) - Number(b.queuePosition || 0);
+          if (queueDiff !== 0) return queueDiff;
+
+          const dateDiff =
+            new Date(a.submissionDate || 0).getTime() -
+            new Date(b.submissionDate || 0).getTime();
+
+          if (dateDiff !== 0) return dateDiff;
+          return String(a.id).localeCompare(String(b.id));
+        });
+
+      const pendingTurnById = new Map(
+        orderedPending.map((app, index) => [app.id, index + 1])
+      );
+
       const isFirst = !this.isInitialAppsSynced;
       remoteApps.forEach((app) => {
         if (!this.knownApplicationIds.has(app.id)) {
@@ -391,7 +410,7 @@ class DataStore {
             notifyNewApplicationToAdmin({
               applicantName: app.fullName,
               requestedCapitalCop: app.requestedCapitalCop,
-              queuePosition: app.queuePosition || 1,
+              queuePosition: pendingTurnById.get(app.id) || 1,
               phone: app.phone,
               city: app.city,
               bank: app.originBank,
@@ -4753,6 +4772,8 @@ class DataStore {
       0
     );
     const newTurn = currentMaxTurn + 1;
+    const displayTurn =
+      this.applications.filter((item) => item.status === 'PENDING').length + 1;
 
     const newApp: InvestorApplication = {
       id: `app_${Date.now()}_${Math.random().toString(36).slice(-4)}`,
@@ -4791,7 +4812,7 @@ class DataStore {
       userName: 'Administradores EasyTraders',
       cycleId: this.config.activeCycleId || '2026-08',
       type: 'INVESTMENT_REQUEST',
-      title: `📥 Nueva Solicitud de Admisión: ${newApp.fullName} (Turno #${newApp.queuePosition})`,
+      title: `📥 Nueva Solicitud de Admisión: ${newApp.fullName} (Turno #${displayTurn})`,
       message: `${newApp.fullName} ha radicado una solicitud de ingreso con un capital de ${formattedAmount}.${detailsInfo ? ` [${detailsInfo}]` : ''} Revisa la sección de Admisiones para gestionar la aprobación.`,
       payload: {
         cycleId: this.config.activeCycleId || '2026-08',
@@ -4809,7 +4830,7 @@ class DataStore {
     notifyNewApplicationToAdmin({
       applicantName: newApp.fullName,
       requestedCapitalCop: newApp.requestedCapitalCop,
-      queuePosition: newApp.queuePosition,
+      queuePosition: displayTurn,
       phone: newApp.phone,
       city: newApp.city,
       bank: newApp.originBank,
@@ -5141,29 +5162,35 @@ class DataStore {
   }
 
   public reorderApplicationQueue(applicationId: string, newTurn: number) {
-    const pending = this.applications.filter((a) => a.status === 'PENDING');
-    const targetApp = pending.find((a) => a.id === applicationId);
-    if (!targetApp) return;
+    const pending = this.applications
+      .filter((a) => a.status === 'PENDING')
+      .sort((a, b) => {
+        const queueDiff = Number(a.queuePosition || 0) - Number(b.queuePosition || 0);
+        if (queueDiff !== 0) return queueDiff;
 
-    const oldTurn = targetApp.queuePosition;
-    const clampedTurn = Math.max(1, Math.min(newTurn, pending.length));
-    if (oldTurn === clampedTurn) return;
+        const dateDiff =
+          new Date(a.submissionDate || 0).getTime() -
+          new Date(b.submissionDate || 0).getTime();
 
-    pending.forEach((a) => {
-      if (a.id === applicationId) {
-        a.queuePosition = clampedTurn;
-      } else if (oldTurn < clampedTurn && a.queuePosition > oldTurn && a.queuePosition <= clampedTurn) {
-        a.queuePosition -= 1;
-      } else if (oldTurn > clampedTurn && a.queuePosition >= clampedTurn && a.queuePosition < oldTurn) {
-        a.queuePosition += 1;
-      }
+        if (dateDiff !== 0) return dateDiff;
+        return String(a.id).localeCompare(String(b.id));
+      });
+
+    const currentIndex = pending.findIndex((a) => a.id === applicationId);
+    if (currentIndex < 0) return;
+
+    const targetIndex = Math.max(0, Math.min(newTurn - 1, pending.length - 1));
+    if (currentIndex === targetIndex) return;
+
+    const [moved] = pending.splice(currentIndex, 1);
+    pending.splice(targetIndex, 0, moved);
+
+    pending.forEach((app, index) => {
+      app.queuePosition = index + 1;
+      firestoreService.saveApplication(app).catch(() => {});
     });
 
-    pending.sort((a, b) => a.queuePosition - b.queuePosition);
-    pending.forEach((a, i) => {
-      a.queuePosition = i + 1;
-    });
-
+    this.applications.sort((a, b) => (a.queuePosition || 0) - (b.queuePosition || 0));
     this.notify();
   }
 
