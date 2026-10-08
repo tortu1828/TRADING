@@ -1245,34 +1245,75 @@ class DataStore {
       });
 
       // Asegurar que si hay resultados individuales guardados en el ciclo cerrado, se muestren
+      // GROUP_USERS_SAME_CAPITAL:
+      // Todos los participantes congelados con la misma categoria y
+      // groupCapitalCop pertenecen al MISMO grupo operativo.
       cycleUserResults.forEach((r) => {
-        const capital = r.cycleCapitalCop || r.groupCapitalCop;
-        const key = `${r.cycleCategory}_${capital}`;
-        if (!map.has(key)) {
-          const user: UserProfile = {
-            id: r.userId,
-            uid: r.userUid || r.userId,
-            userCode: r.userCode,
-            fullName: r.userName,
-            email: r.email,
-            phone: '',
-            role: 'USER',
-            status: 'ACTIVE',
-            currentCapital: capital,
-            currency: 'COP',
-            category: r.cycleCategory,
-            userPercentage: r.userPercentage,
-            adminPercentage: r.adminPercentage,
-            paymentMethod: '',
-            paymentDetails: '',
-            createdAt: r.calculatedAt || '',
-            entryDate: '',
-          };
+        const capital = Number(
+          r.groupCapitalCop ||
+          r.cycleCapitalCop ||
+          0
+        );
+
+        if (!capital || !r.cycleCategory) {
+          return;
+        }
+
+        const key =
+          `${r.cycleCategory}_${capital}`;
+
+        const user: UserProfile = {
+          id: r.userId,
+          uid: r.userUid || r.userId,
+          userCode: r.userCode,
+          fullName: r.userName,
+          email: r.email,
+          phone: '',
+          role: 'USER',
+          status: 'ACTIVE',
+          currentCapital: capital,
+          currency: 'COP',
+          category: r.cycleCategory,
+          userPercentage: r.userPercentage,
+          adminPercentage: r.adminPercentage,
+          paymentMethod: '',
+          paymentDetails: '',
+          createdAt: r.calculatedAt || '',
+          entryDate: '',
+        };
+
+        const existingGroup =
+          map.get(key);
+
+        if (!existingGroup) {
           map.set(key, {
             category: r.cycleCategory,
-            groupCapitalCop: Number(capital),
+            groupCapitalCop: capital,
             users: [user],
           });
+
+          return;
+        }
+
+        const alreadyIncluded =
+          existingGroup.users.some(
+            (existingUser) =>
+              (
+                user.uid &&
+                existingUser.uid === user.uid
+              ) ||
+              (
+                user.id &&
+                existingUser.id === user.id
+              ) ||
+              (
+                user.userCode &&
+                existingUser.userCode === user.userCode
+              )
+          );
+
+        if (!alreadyIncluded) {
+          existingGroup.users.push(user);
         }
       });
     } else {
