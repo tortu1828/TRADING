@@ -292,44 +292,11 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
       return;
     }
 
-    const authorized =
-      new Set(
-        (op.authorizedUids || [])
-          .filter(Boolean)
-          .map(
-            (value) =>
-              String(value)
-                .trim()
-                .toLowerCase()
-          )
-      );
-
     const recipients =
-      authorized.size === 0
-        ? group.users
-        : group.users.filter(
-            (user) => {
-
-              const keys = [
-                user.uid,
-                user.id,
-                user.userCode,
-                user.email,
-              ]
-                .filter(Boolean)
-                .map(
-                  (value) =>
-                    String(value)
-                      .trim()
-                      .toLowerCase()
-                );
-
-              return keys.some(
-                (key) =>
-                  authorized.has(key)
-              );
-            }
-          );
+      dataStore.resolveOperationRecipients(
+        op,
+        group.users
+      );
 
     recipients.forEach((user) => {
 
@@ -365,11 +332,13 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
           op.amountUsd || 0
         );
 
+      const persistedGrossCop =
+        resolveOperationGrossCop(op);
+
       const opTrm =
-        Number(
-          op.trmUsed ||
-          trm
-        );
+        opUsd !== 0
+          ? persistedGrossCop / opUsd
+          : 0;
 
       const calc =
         calculateUserMonthlyResult(
@@ -499,39 +468,15 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
     return acc + ops.length;
   }, 0);
 
-  const totalUsdAcrossGroups = allGroups.reduce((acc, g) => {
-    const ops = dataStore.getDailyOperations(currentCycle.cycleId, g.category, g.groupCapitalCop);
-    const sumUsd = ops.reduce((s, op) => s + op.amountUsd, 0);
-    return acc + sumUsd * g.users.length;
-  }, 0);
+  const totalUsdAcrossGroups =
+    operatedUsersList.reduce(
+      (sum, item) => sum + item.usdOperatedGroup,
+      0
+    );
 
   const totalInvestorsInGroups = allGroups.reduce((acc, g) => acc + g.users.length, 0);
   const totalGrossCopGenerated =
-    allGroups.reduce(
-      (acc, group) => {
-        const ops =
-          dataStore.getDailyOperations(
-            currentCycle.cycleId,
-            group.category,
-            group.groupCapitalCop
-          );
-
-        const grossCopPerUser =
-          ops.reduce(
-            (sum, op) =>
-              sum +
-              resolveOperationGrossCop(op),
-            0
-          );
-
-        return (
-          acc +
-          grossCopPerUser *
-            group.users.length
-        );
-      },
-      0
-    );
+    globalActiveGrossCopTotal;
 
   // Handlers para purga de datos de prueba (SuperAdmin)
   const handleOpenPurgeModal = async () => {
@@ -1111,20 +1056,10 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
             const groupKey = `${group.category}_${group.groupCapitalCop}`;
             const isExpanded = !!expandedGroupKeys[groupKey];
             const operations = dataStore.getDailyOperations(currentCycle.cycleId, group.category, group.groupCapitalCop);
-            const totalUsdAccumulated = operations.reduce((sum, op) => sum + op.amountUsd, 0);
-            const totalGrossCopPerUser =
-              operations.reduce(
-                (sum, op) =>
-                  sum +
-                  resolveOperationGrossCop(op),
-                0
-              );
-
-            const effectiveGroupTrm =
-              totalUsdAccumulated !== 0
-                ? totalGrossCopPerUser /
-                  totalUsdAccumulated
-                : 0;
+            const totalUsdAccumulated = operations.reduce(
+              (sum, op) => sum + Number(op.amountUsd || 0),
+              0
+            );
             const isNotifyingThis = notifyingKey === groupKey;
 
             // Inversionistas del grupo
@@ -1132,18 +1067,80 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
             const isIndividual = users.length === 1;
             const singleUser = isIndividual ? users[0] : null;
 
-            // Totales de ganancia para este grupo
-            const totalGroupProfitCop = users.reduce((acc, u) => {
-              const raw = u.userPercentage !== undefined ? u.userPercentage : 75;
-              const ratio = raw > 1 ? raw / 100 : raw;
-              return acc + totalGrossCopPerUser * ratio;
-            }, 0);
+            const calculateUserTradeTotalsForGroup = (user: UserProfile) => {
+              const rawUserPct =
+                user.userPercentage !== undefined ? user.userPercentage : 75;
+              const rawAdminPct =
+                user.adminPercentage !== undefined ? user.adminPercentage : 25;
+              const userPct = rawUserPct <= 1 ? rawUserPct * 100 : rawUserPct;
+              const adminPct = rawAdminPct <= 1 ? rawAdminPct * 100 : rawAdminPct;
+              const userKey = String(user.uid || user.id || user.userCode || '').trim();
 
-            const totalGroupAdminCop = users.reduce((acc, u) => {
-              const raw = u.adminPercentage !== undefined ? u.adminPercentage : 25;
-              const ratio = raw > 1 ? raw / 100 : raw;
-              return acc + totalGrossCopPerUser * ratio;
-            }, 0);
+              return operations.reduce(
+                (acc, op) => {
+                  const applies = dataStore
+                    .resolveOperationRecipients(op, users)
+                    .some(
+                      (recipient) =>
+                        String(
+                          recipient.uid || recipient.id || recipient.userCode || ''
+                        ).trim() === userKey
+                    );
+
+                  if (!applies) return acc;
+
+                  const usd = Number(op.amountUsd || 0);
+                  const grossCop = resolveOperationGrossCop(op);
+                  const operationTrm = usd !== 0 ? grossCop / usd : 0;
+                  const calc = calculateUserMonthlyResult(
+                    usd,
+                    operationTrm,
+                    userPct,
+                    adminPct
+                  );
+
+                  acc.usdOperated += calc.usdOperated;
+                  acc.grossCop += calc.grossCop;
+                  acc.userProfitCop += calc.userProfitCop;
+                  acc.userProfitUsd += calc.userProfitUsd;
+                  acc.adminCommissionCop += calc.adminCommissionCop;
+                  acc.adminCommissionUsd += calc.adminCommissionUsd;
+                  return acc;
+                },
+                {
+                  usdOperated: 0,
+                  grossCop: 0,
+                  userProfitCop: 0,
+                  userProfitUsd: 0,
+                  adminCommissionCop: 0,
+                  adminCommissionUsd: 0,
+                }
+              );
+            };
+
+            const userTradeRows = users.map((user) => ({
+              user,
+              totals: calculateUserTradeTotalsForGroup(user),
+            }));
+
+            const recipientUsersCount = userTradeRows.filter(
+              ({ totals }) => totals.usdOperated > 0
+            ).length;
+
+            const totalAppliedGrossCop = userTradeRows.reduce(
+              (sum, row) => sum + row.totals.grossCop,
+              0
+            );
+
+            const totalGroupProfitCop = userTradeRows.reduce(
+              (sum, row) => sum + row.totals.userProfitCop,
+              0
+            );
+
+            const totalGroupAdminCop = userTradeRows.reduce(
+              (sum, row) => sum + row.totals.adminCommissionCop,
+              0
+            );
 
             const getCategoryBadge = (cat: BitacoraCategory) => {
               switch (cat) {
@@ -1229,15 +1226,15 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                   {/* Financial Quick Metrics */}
                   <div className="grid grid-cols-3 gap-3 font-mono text-xs text-left bg-slate-900/90 p-2.5 rounded-xl border border-slate-800">
                     <div>
-                      <span className="text-[10px] text-slate-500 block">USD Acumulado:</span>
+                      <span className="text-[10px] text-slate-500 block">USD Trades:</span>
                       <span className="text-sm font-extrabold text-blue-400">
                         {formatUSD(totalUsdAccumulated)}
                       </span>
                     </div>
                     <div>
-                      <span className="text-[10px] text-slate-500 block">Total Bruto COP:</span>
+                      <span className="text-[10px] text-slate-500 block">Bruto Aplicado COP:</span>
                       <span className="text-sm font-bold text-slate-200">
-                        {formatCOP(totalGrossCopPerUser)}
+                        {formatCOP(totalAppliedGrossCop)}
                       </span>
                     </div>
                     <div>
@@ -1299,7 +1296,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                           <span>
                             {isIndividual
                               ? 'Inversionista que recibe la liquidación (1 persona)'
-                              : `Inversionistas que reciben los ${formatUSD(totalUsdAccumulated)} (${users.length} personas)`}
+                              : `Inversionistas con trades aplicados (${recipientUsersCount} de ${users.length})`}
                           </span>
                         </div>
                         <span className="text-[11px] font-mono text-slate-400">
@@ -1327,16 +1324,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                             </thead>
                             <tbody className="divide-y divide-slate-800/60 font-mono">
                               {users.map((user, idx) => {
-                                const rawUserPct = user.userPercentage !== undefined ? user.userPercentage : 75;
-                                const rawAdminPct = user.adminPercentage !== undefined ? user.adminPercentage : 25;
-                                const userPct = rawUserPct <= 1 ? rawUserPct * 100 : rawUserPct;
-                                const adminPct = rawAdminPct <= 1 ? rawAdminPct * 100 : rawAdminPct;
-                                const calc = calculateUserMonthlyResult(
-                                  totalUsdAccumulated,
-                                  effectiveGroupTrm,
-                                  userPct,
-                                  adminPct
-                                );
+                                const calc = calculateUserTradeTotalsForGroup(user);
 
                                 return (
                                   <tr key={user.id} className="hover:bg-slate-800/30 transition">
@@ -1361,7 +1349,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                                     </td>
 
                                     <td className="py-2.5 px-3 font-bold text-blue-400">
-                                      {formatUSD(totalUsdAccumulated)}
+                                      {formatUSD(calc.usdOperated)}
                                     </td>
 
                                     <td className="py-2.5 px-3 text-slate-200">
@@ -1383,9 +1371,15 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                                     </td>
 
                                     <td className="py-2.5 px-3 text-center font-sans">
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 text-[10px] font-bold border border-emerald-500/30">
-                                        <CheckCircle2 className="w-3 h-3" /> Activo
-                                      </span>
+                                      {calc.usdOperated > 0 ? (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 text-[10px] font-bold border border-emerald-500/30">
+                                          <CheckCircle2 className="w-3 h-3" /> Aplicado
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-950 text-slate-500 text-[10px] font-bold border border-slate-700">
+                                          Sin trade
+                                        </span>
+                                      )}
                                     </td>
                                   </tr>
                                 );
@@ -1445,7 +1439,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                                     {formatUSD(op.amountUsd)}
                                   </td>
                                   <td className="py-2 px-3 text-slate-200">
-                                    {formatCOP(op.amountUsd * trm)}
+                                    {formatCOP(resolveOperationGrossCop(op))}
                                   </td>
                                   <td className="py-2 px-3 text-slate-400 font-sans max-w-xs truncate">
                                     {op.notes || 'Operación de trading regular'}

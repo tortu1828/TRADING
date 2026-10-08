@@ -56,6 +56,7 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
   const [amountUsd, setAmountUsd] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
   const [selectedUserId, setSelectedUserId] = useState<string | null>(initialTargetUser?.id || null);
+  const [excludedGroupUserKeys, setExcludedGroupUserKeys] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -90,9 +91,16 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
 
   React.useEffect(() => {
     if (initialTargetUser) {
-      setSelectedUserId(initialTargetUser.id);
+      setSelectedUserId(initialTargetUser.id || initialTargetUser.uid || null);
+      setExcludedGroupUserKeys([]);
     }
   }, [initialTargetUser]);
+
+  React.useEffect(() => {
+    if (isOpen) {
+      setExcludedGroupUserKeys([]);
+    }
+  }, [isOpen, group?.category, group?.groupCapitalCop]);
 
   // Editing operation state
   const [editingOpId, setEditingOpId] = useState<string | null>(null);
@@ -149,18 +157,6 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
   const consolidatedUsd = consolidatedOps.reduce((sum, op) => sum + op.amountUsd, 0);
 
   const totalUsdAccumulated = operations.reduce((sum, op) => sum + op.amountUsd, 0);
-  const totalGrossCopPerUser =
-    operations.reduce(
-      (sum, op) =>
-        sum + resolveOperationGrossCop(op),
-      0
-    );
-
-  const effectiveTrmForTotals =
-    totalUsdAccumulated !== 0
-      ? totalGrossCopPerUser /
-        totalUsdAccumulated
-      : 0;
 
   // Obtener usuarios reales del grupo (quienes tienen este capital exacto en esta categoría)
   const usersInGroup: UserProfile[] = (
@@ -189,40 +185,129 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
     );
   });
 
-  // Totales consolidados del grupo
-  const groupTotalGrossCop = totalGrossCopPerUser * usersInGroup.length;
-  const groupTotalUsd = totalUsdAccumulated * usersInGroup.length;
+  // RECIPIENT_AWARE_TRADES_DIRECT_FIX
+  const getGroupUserKey = (user: UserProfile): string =>
+    String(user.uid || user.id || user.userCode || '').trim();
 
-  // Promedios y sumas por usuario
-  const avgUserPct = usersInGroup.length > 0
-    ? usersInGroup.reduce((acc, u) => {
-        const raw = u.userPercentage !== undefined ? u.userPercentage : 75;
-        return acc + (raw > 1 ? raw / 100 : raw);
-      }, 0) / usersInGroup.length
-    : 0.75;
-  const avgAdminPct = usersInGroup.length > 0
-    ? usersInGroup.reduce((acc, u) => {
-        const raw = u.adminPercentage !== undefined ? u.adminPercentage : 25;
-        return acc + (raw > 1 ? raw / 100 : raw);
-      }, 0) / usersInGroup.length
-    : 0.25;
+  const getGroupUserUid = (user: UserProfile): string =>
+    String(user.uid || '').trim();
 
-  const avgClientProfitCop = totalGrossCopPerUser * avgUserPct;
-  const avgAdminCommissionCop = totalGrossCopPerUser * avgAdminPct;
-  const avgClientProfitUsd = totalUsdAccumulated * avgUserPct;
-  const avgAdminCommissionUsd = totalUsdAccumulated * avgAdminPct;
+  const selectedGroupUsers = usersInGroup.filter(
+    (user) => !excludedGroupUserKeys.includes(getGroupUserKey(user))
+  );
 
-  const totalGroupClientProfitCop = usersInGroup.reduce((sum, u) => {
-    const raw = u.userPercentage !== undefined ? u.userPercentage : 75;
-    const ratio = raw > 1 ? raw / 100 : raw;
-    return sum + (totalGrossCopPerUser * ratio);
-  }, 0);
+  const selectedGroupUids = selectedGroupUsers
+    .map(getGroupUserUid)
+    .filter(Boolean);
 
-  const totalGroupAdminCommissionCop = usersInGroup.reduce((sum, u) => {
-    const raw = u.adminPercentage !== undefined ? u.adminPercentage : 25;
-    const ratio = raw > 1 ? raw / 100 : raw;
-    return sum + (totalGrossCopPerUser * ratio);
-  }, 0);
+  const isCustomSubsetSelection =
+    selectedGroupUsers.length !== usersInGroup.length;
+
+  const toggleGroupUser = (user: UserProfile) => {
+    const key = getGroupUserKey(user);
+    if (!key) return;
+
+    setExcludedGroupUserKeys((previous) =>
+      previous.includes(key)
+        ? previous.filter((item) => item !== key)
+        : [...previous, key]
+    );
+  };
+
+  const operationRecipients = (op: DailyGroupOperation): UserProfile[] =>
+    dataStore.resolveOperationRecipients(op, usersInGroup);
+
+  const operationRecipientCount = (op: DailyGroupOperation): number =>
+    operationRecipients(op).length;
+
+  const operationAppliesToUser = (
+    op: DailyGroupOperation,
+    user: UserProfile
+  ): boolean => {
+    const key = getGroupUserKey(user);
+    if (!key) return false;
+
+    return operationRecipients(op).some(
+      (recipient) => getGroupUserKey(recipient) === key
+    );
+  };
+
+  const calculateUserTradeTotals = (user: UserProfile) => {
+    const rawUserPct =
+      user.userPercentage !== undefined ? user.userPercentage : 75;
+    const rawAdminPct =
+      user.adminPercentage !== undefined ? user.adminPercentage : 25;
+
+    const userPct = rawUserPct <= 1 ? rawUserPct * 100 : rawUserPct;
+    const adminPct = rawAdminPct <= 1 ? rawAdminPct * 100 : rawAdminPct;
+
+    return operations.reduce(
+      (acc, op) => {
+        if (!operationAppliesToUser(op, user)) return acc;
+
+        const usd = Number(op.amountUsd || 0);
+        const grossCop = resolveOperationGrossCop(op);
+        const operationTrm = usd !== 0 ? grossCop / usd : 0;
+        const calc = calculateUserMonthlyResult(
+          usd,
+          operationTrm,
+          userPct,
+          adminPct
+        );
+
+        acc.usdOperated += calc.usdOperated;
+        acc.grossCop += calc.grossCop;
+        acc.userProfitCop += calc.userProfitCop;
+        acc.userProfitUsd += calc.userProfitUsd;
+        acc.adminCommissionCop += calc.adminCommissionCop;
+        acc.adminCommissionUsd += calc.adminCommissionUsd;
+        return acc;
+      },
+      {
+        usdOperated: 0,
+        grossCop: 0,
+        userProfitCop: 0,
+        userProfitUsd: 0,
+        adminCommissionCop: 0,
+        adminCommissionUsd: 0,
+      }
+    );
+  };
+
+  const userTradeRows = usersInGroup.map((user) => ({
+    user,
+    totals: calculateUserTradeTotals(user),
+  }));
+
+  const recipientUsersCount = userTradeRows.filter(
+    ({ totals }) => totals.usdOperated > 0
+  ).length;
+
+  // Estos son totales ECONÓMICOS aplicados a los destinatarios reales.
+  const groupTotalGrossCop = userTradeRows.reduce(
+    (sum, row) => sum + row.totals.grossCop,
+    0
+  );
+  const groupTotalUsd = userTradeRows.reduce(
+    (sum, row) => sum + row.totals.usdOperated,
+    0
+  );
+  const totalGroupClientProfitCop = userTradeRows.reduce(
+    (sum, row) => sum + row.totals.userProfitCop,
+    0
+  );
+  const totalGroupClientProfitUsd = userTradeRows.reduce(
+    (sum, row) => sum + row.totals.userProfitUsd,
+    0
+  );
+  const totalGroupAdminCommissionCop = userTradeRows.reduce(
+    (sum, row) => sum + row.totals.adminCommissionCop,
+    0
+  );
+  const totalGroupAdminCommissionUsd = userTradeRows.reduce(
+    (sum, row) => sum + row.totals.adminCommissionUsd,
+    0
+  );
 
   // Filtrar inversionistas en la pestaña de verificación
   const filteredUsers = usersInGroup.filter((u) => {
@@ -401,8 +486,8 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
     setSuccessMsg(null);
 
     const parsedUsd = parseFloat(amountUsd);
-    if (isNaN(parsedUsd)) {
-      setError('Por favor ingresa un monto en USD válido.');
+    if (isNaN(parsedUsd) || parsedUsd <= 0) {
+      setError('Por favor ingresa un monto en USD válido mayor a 0.');
       return;
     }
 
@@ -412,11 +497,35 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
     }
 
     const chosenUser = selectedUserId
-      ? usersInGroup.find((u) => u.id === selectedUserId) || null
+      ? usersInGroup.find(
+          (u) => u.id === selectedUserId || u.uid === selectedUserId
+        ) || null
       : null;
+
+    if (selectedUserId && !chosenUser) {
+      setError('No se encontró el inversionista seleccionado.');
+      return;
+    }
+
+    if (!selectedUserId && selectedGroupUsers.length === 0) {
+      setError('Debes dejar al menos un inversionista seleccionado.');
+      return;
+    }
+
+    if (
+      !selectedUserId &&
+      isCustomSubsetSelection &&
+      selectedGroupUids.length !== selectedGroupUsers.length
+    ) {
+      setError(
+        'No se puede crear el subgrupo porque uno de los inversionistas seleccionados no tiene UID válido.'
+      );
+      return;
+    }
 
     try {
       setIsSubmitting(true);
+
       const res = await dataStore.addDailyOperationAsync(
         cycle.cycleId,
         group.category,
@@ -426,12 +535,17 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
         notes.trim() || undefined,
         adminUid,
         adminName,
-        chosenUser
+        chosenUser,
+        selectedUserId ? 'INDIVIDUAL' : 'CUSTOM_GROUP',
+        !selectedUserId && isCustomSubsetSelection
+          ? selectedGroupUids
+          : undefined
       );
 
       setSuccessMsg(`✓ ${res.message}`);
       setAmountUsd('');
       setNotes('');
+      setExcludedGroupUserKeys([]);
       setTimeout(() => setSuccessMsg(null), 5000);
     } catch (err: any) {
       console.error('Error al registrar operación diaria en servidor:', err);
@@ -587,33 +701,33 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
           </div>
 
           <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800">
-            <span className="text-[10px] text-slate-400 uppercase font-semibold block">Bruto COP (c/u)</span>
+            <span className="text-[10px] text-slate-400 uppercase font-semibold block">Bruto Aplicado COP</span>
             <p className="text-base sm:text-lg font-black text-blue-400 font-mono mt-0.5">
-              {formatCOP(totalGrossCopPerUser)}
+              {formatCOP(groupTotalGrossCop)}
             </p>
-            <p className="text-[10px] text-slate-500">A TRM ${trm}</p>
+            <p className="text-[10px] text-slate-500">TRM persistida por cada trade</p>
           </div>
 
           <div className="p-3 rounded-xl bg-slate-900/90 border border-emerald-500/30">
             <span className="text-[10px] text-emerald-400 uppercase font-semibold block flex items-center justify-between">
-              <span>Ganancia Cliente</span>
-              <span className="text-[9px] font-mono opacity-80 font-bold">({(avgUserPct * 100).toFixed(0)}%)</span>
+              <span>Ganancia Clientes</span>
+              <span className="text-[9px] font-mono opacity-80 font-bold">TOTAL</span>
             </span>
             <p className="text-base sm:text-lg font-black text-emerald-300 font-mono mt-0.5">
-              {formatCOP(avgClientProfitCop)}
+              {formatCOP(totalGroupClientProfitCop)}
             </p>
-            <p className="text-[10px] text-emerald-500/80 font-mono">{formatUSD(avgClientProfitUsd)}</p>
+            <p className="text-[10px] text-emerald-500/80 font-mono">{formatUSD(totalGroupClientProfitUsd)}</p>
           </div>
 
           <div className="p-3 rounded-xl bg-slate-900/90 border border-amber-500/30 col-span-2 sm:col-span-1">
             <span className="text-[10px] text-amber-400 uppercase font-semibold block flex items-center justify-between">
               <span>Comisión Admin</span>
-              <span className="text-[9px] font-mono opacity-80 font-bold">({(avgAdminPct * 100).toFixed(0)}%)</span>
+              <span className="text-[9px] font-mono opacity-80 font-bold">TOTAL</span>
             </span>
             <p className="text-base sm:text-lg font-black text-amber-300 font-mono mt-0.5">
-              {formatCOP(avgAdminCommissionCop)}
+              {formatCOP(totalGroupAdminCommissionCop)}
             </p>
-            <p className="text-[10px] text-amber-500/80 font-mono">{formatUSD(avgAdminCommissionUsd)}</p>
+            <p className="text-[10px] text-amber-500/80 font-mono">{formatUSD(totalGroupAdminCommissionUsd)}</p>
           </div>
         </div>
 
@@ -622,11 +736,11 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-blue-400 shrink-0" />
             <span>
-              <strong>Regla del Grupo:</strong> Las operaciones registradas ({formatUSD(totalUsdAccumulated)}) se aplican a <strong>cada uno</strong> de los {usersInGroup.length} inversionistas con capital de {formatCOP(group.groupCapitalCop)}.
+              <strong>Regla:</strong> cada trade se aplica completo únicamente a sus destinatarios. En “Todo el Grupo” puedes excluir personas sin dividir el monto entre las seleccionadas.
             </span>
           </div>
           <div className="text-[11px] font-mono text-blue-300 bg-blue-900/40 px-2 py-0.5 rounded border border-blue-500/30">
-            Total Grupo: {formatCOP(groupTotalGrossCop)} ({formatUSD(groupTotalUsd)})
+            Total aplicado: {formatCOP(groupTotalGrossCop)} ({formatUSD(groupTotalUsd)})
           </div>
         </div>
 
@@ -693,17 +807,24 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
                       </label>
                       <select
                         value={selectedUserId || 'ALL_GROUP'}
-                        onChange={(e) => setSelectedUserId(e.target.value === 'ALL_GROUP' ? null : e.target.value)}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setSelectedUserId(value === 'ALL_GROUP' ? null : value);
+                          setExcludedGroupUserKeys([]);
+                        }}
                         className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-2 text-xs text-slate-100 focus:border-blue-500 focus:outline-none"
                       >
                         <option value="ALL_GROUP">
                           👥 Todo el Grupo ({usersInGroup.length} inversionistas)
                         </option>
-                        {usersInGroup.map((u) => (
-                          <option key={u.id} value={u.id}>
-                            👤 Solo {u.fullName} ({u.userCode})
-                          </option>
-                        ))}
+                        {usersInGroup.map((u) => {
+                          const value = u.id || u.uid || u.userCode;
+                          return (
+                            <option key={value} value={value}>
+                              👤 Solo {u.fullName} ({u.userCode})
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
 
@@ -756,25 +877,103 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
                     </div>
                   </div>
 
+                  {!selectedUserId && usersInGroup.length > 1 && (
+                    <div className="rounded-xl border border-blue-500/30 bg-blue-950/20 p-3 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="text-xs font-bold text-blue-200">
+                            Inversionistas incluidos en este trade
+                          </p>
+                          <p className="text-[10px] text-slate-400">
+                            Todos empiezan seleccionados. Haz clic para excluir o volver a incluir una persona.
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-1 rounded-lg bg-slate-950 border border-slate-700 text-[10px] font-bold font-mono text-slate-200">
+                            {selectedGroupUsers.length}/{usersInGroup.length} seleccionados
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setExcludedGroupUserKeys([])}
+                            className="px-2.5 py-1 rounded-lg bg-blue-950 border border-blue-500/30 text-blue-300 text-[10px] font-bold hover:bg-blue-900 cursor-pointer"
+                          >
+                            Seleccionar todos
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {usersInGroup.map((user) => {
+                          const key = getGroupUserKey(user);
+                          const selected = !excludedGroupUserKeys.includes(key);
+
+                          return (
+                            <button
+                              key={key}
+                              type="button"
+                              disabled={!key}
+                              onClick={() => toggleGroupUser(user)}
+                              className={`rounded-xl border px-3 py-2 text-left transition cursor-pointer ${
+                                selected
+                                  ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                                  : 'bg-red-950/30 border-red-500/40 text-red-200'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`w-4 h-4 rounded border flex items-center justify-center text-[10px] font-black ${
+                                    selected
+                                      ? 'bg-emerald-500 border-emerald-400 text-slate-950'
+                                      : 'bg-slate-950 border-red-500/50'
+                                  }`}
+                                >
+                                  {selected ? '✓' : '×'}
+                                </span>
+                                <div className="min-w-0">
+                                  <span className="block text-[11px] font-bold truncate">
+                                    {user.fullName}
+                                  </span>
+                                  <span className="block text-[9px] font-mono opacity-70 truncate">
+                                    {user.userCode}
+                                  </span>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {selectedGroupUsers.length === 0 && (
+                        <p className="text-[10px] font-bold text-red-300">
+                          Debes dejar al menos un inversionista seleccionado.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
                     <p className="text-[11px] text-slate-400">
                       {selectedUserId ? (
                         <>
                           ⚡ Operación individual asignada a:{' '}
                           <strong className="text-blue-300">
-                            {usersInGroup.find((u) => u.id === selectedUserId)?.fullName || selectedUserId}
+                            {usersInGroup.find((u) => u.id === selectedUserId || u.uid === selectedUserId)?.fullName || selectedUserId}
                           </strong>. Se enviará notificación push de inmediato a su perfil.
                         </>
                       ) : (
                         <>
                           Al guardar, este valor se aplicará de inmediato a los{' '}
-                          <strong className="text-slate-200">{usersInGroup.length} inversionistas</strong> del grupo con capital {formatCOP(group.groupCapitalCop)}.
+                          <strong className="text-slate-200">{selectedGroupUsers.length} de {usersInGroup.length} inversionistas</strong> del grupo con capital {formatCOP(group.groupCapitalCop)}.
                         </>
                       )}
                     </p>
                     <button
                       type="submit"
-                      disabled={isSubmitting}
+                      disabled={
+                        isSubmitting ||
+                        (!selectedUserId && selectedGroupUsers.length === 0)
+                      }
                       className="min-h-[44px] w-full sm:w-auto px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-lg shadow-blue-500/20 disabled:opacity-50 shrink-0 cursor-pointer active:scale-95"
                     >
                       <Plus className="w-4 h-4" />
@@ -812,8 +1011,8 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
                         <th className="py-2.5 px-3">Destinatario</th>
                         <th className="py-2.5 px-3">Estado</th>
                         <th className="py-2.5 px-3">Operado (USD)</th>
-                        <th className="py-2.5 px-3">Equivalente COP (c/u)</th>
-                        <th className="py-2.5 px-3">Total Grupo ({usersInGroup.length} pers)</th>
+                        <th className="py-2.5 px-3">Bruto COP Trade</th>
+                        <th className="py-2.5 px-3">Total Aplicado</th>
                         <th className="py-2.5 px-3">Sesión / Detalle</th>
                         {!isClosed && <th className="py-2.5 px-3 text-right">Acciones</th>}
                       </tr>
@@ -821,6 +1020,12 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
                     <tbody className="divide-y divide-slate-800/60 font-mono">
                       {operations.map((op, idx) => {
                         const isEditingThis = editingOpId === op.id;
+                        const recipientCount = operationRecipientCount(op);
+                        const isCustomSubset =
+                          !op.userName &&
+                          recipientCount > 0 &&
+                          recipientCount < usersInGroup.length;
+
                         return (
                           <tr key={op.id} className="hover:bg-slate-800/30 transition">
                             {isEditingThis ? (
@@ -834,7 +1039,11 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
                                   />
                                 </td>
                                 <td className="py-2.5 px-3 font-sans text-[11px] text-slate-400">
-                                  {op.userName ? op.userName : 'Todo el Grupo'}
+                                  {op.userName
+                                    ? op.userName
+                                    : isCustomSubset
+                                      ? `Subgrupo (${recipientCount}/${usersInGroup.length})`
+                                      : 'Todo el Grupo'}
                                 </td>
                                 <td className="py-2.5 px-3">
                                   <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-500/30">
@@ -852,10 +1061,17 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
                                   />
                                 </td>
                                 <td className="py-2.5 px-3 text-blue-300">
-                                  {formatCOP((parseFloat(editAmountUsd) || 0) * trm)}
+                                  {formatCOP(
+                                    (parseFloat(editAmountUsd) || 0) *
+                                      (Number(op.trmUsed) > 0 ? Number(op.trmUsed) : trm)
+                                  )}
                                 </td>
                                 <td className="py-2.5 px-3 text-slate-300">
-                                  {formatCOP((parseFloat(editAmountUsd) || 0) * trm * usersInGroup.length)}
+                                  {formatCOP(
+                                    (parseFloat(editAmountUsd) || 0) *
+                                      (Number(op.trmUsed) > 0 ? Number(op.trmUsed) : trm) *
+                                      recipientCount
+                                  )}
                                 </td>
                                 <td className="py-2.5 px-3">
                                   <input
@@ -904,7 +1120,9 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
                                   ) : (
                                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 text-[10px] font-semibold">
                                       <Users className="w-2.5 h-2.5 text-slate-400" />
-                                      Todo el grupo
+                                      {isCustomSubset
+                                        ? `Subgrupo (${recipientCount}/${usersInGroup.length})`
+                                        : 'Todo el grupo'}
                                     </span>
                                   )}
                                 </td>
@@ -925,10 +1143,10 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
                                   {formatUSD(op.amountUsd)}
                                 </td>
                                 <td className="py-2.5 px-3 text-blue-300">
-                                  {formatCOP(op.amountUsd * trm)}
+                                  {formatCOP(resolveOperationGrossCop(op))}
                                 </td>
                                 <td className="py-2.5 px-3 text-slate-300">
-                                  {formatCOP(op.amountUsd * trm * usersInGroup.length)}
+                                  {formatCOP(resolveOperationGrossCop(op) * recipientCount)}
                                 </td>
                                 <td className="py-2.5 px-3 font-sans text-slate-400 max-w-xs truncate">
                                   {op.notes || <span className="text-slate-600 italic">Sin detalle</span>}
@@ -985,7 +1203,7 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
               <div>
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200 flex items-center gap-2">
                   <UserCheck className="w-4 h-4 text-emerald-400" />
-                  Inversionistas que reciben los {formatUSD(totalUsdAccumulated)} de este grupo ({usersInGroup.length})
+                  Inversionistas con trades aplicados ({recipientUsersCount} de {usersInGroup.length})
                 </h3>
                 <p className="text-[11px] text-slate-400">
                   Verificación de la aplicación de rendimiento individual y comisiones por cada cliente.
@@ -1039,17 +1257,7 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 font-mono">
                     {filteredUsers.map((user, idx) => {
-                      const rawUserPct = user.userPercentage !== undefined ? user.userPercentage : 75;
-                      const rawAdminPct = user.adminPercentage !== undefined ? user.adminPercentage : 25;
-                      const userPct = rawUserPct <= 1 ? rawUserPct * 100 : rawUserPct;
-                      const adminPct = rawAdminPct <= 1 ? rawAdminPct * 100 : rawAdminPct;
-
-                      const calc = calculateUserMonthlyResult(
-                        totalUsdAccumulated,
-                        effectiveTrmForTotals,
-                        userPct,
-                        adminPct
-                      );
+                      const calc = calculateUserTradeTotals(user);
 
                       return (
                         <tr key={user.id} className="hover:bg-slate-800/30 transition">
@@ -1077,7 +1285,7 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
 
                           {/* USD Operado Aplicado */}
                           <td className="py-2.5 px-3 font-bold text-blue-400">
-                            {formatUSD(totalUsdAccumulated)}
+                            {formatUSD(calc.usdOperated)}
                             <span className="block text-[10px] text-slate-500 font-normal">
                               {formatCOP(calc.grossCop)}
                             </span>
@@ -1101,9 +1309,15 @@ export const DailyOperationsModal: React.FC<DailyOperationsModalProps> = ({
 
                           {/* Estado */}
                           <td className="py-2.5 px-3 text-center font-sans">
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 text-[10px] font-bold border border-emerald-500/30">
-                              <CheckCircle2 className="w-3 h-3" /> Aplicado
-                            </span>
+                            {calc.usdOperated > 0 ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 text-[10px] font-bold border border-emerald-500/30">
+                                <CheckCircle2 className="w-3 h-3" /> Aplicado
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-950 text-slate-500 text-[10px] font-bold border border-slate-700">
+                                Sin trade
+                              </span>
+                            )}
                           </td>
                         </tr>
                       );
