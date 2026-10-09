@@ -20,7 +20,45 @@ export type NotificationType =
   | 'INVESTMENT_REQUEST' 
   | 'CORRECTION' 
   | 'SYSTEM'
-  | 'ADMIN_BROADCAST';
+  | 'ADMIN_BROADCAST'
+  | 'ANNOUNCEMENT';
+
+export type AnnouncementKind = 'INFO' | 'IMPORTANT' | 'UPDATE' | 'NEWS';
+
+export type AnnouncementStatus = 'DRAFT' | 'PUBLISHING' | 'PUBLISHED' | 'ARCHIVED';
+
+export type AnnouncementAudienceType = 'ALL_ACTIVE' | 'CATEGORY' | 'USERS';
+
+export interface Announcement {
+  id: string;
+  title: string;
+  body: string;
+  kind: AnnouncementKind;
+  status: AnnouncementStatus;
+  audienceType: AnnouncementAudienceType;
+  targetCategory?: BitacoraCategory | null;
+  requestedTargetUids?: string[];
+  authorizedUids?: string[];
+  isPublicToActiveUsers?: boolean;
+  targetUsersCount?: number;
+  createdByUid: string;
+  createdByName: string;
+  createdAt: any;
+  updatedAt: any;
+  publishedAt?: any;
+  archivedAt?: any;
+  archivedByUid?: string | null;
+  archivedByName?: string | null;
+  clientRequestId?: string;
+}
+
+export interface AnnouncementRead {
+  id: string;
+  announcementId: string;
+  userUid: string;
+  readAt: any;
+  updatedAt: any;
+}
 
 export interface UserPermissions {
   supportAgent?: boolean;

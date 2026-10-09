@@ -242,6 +242,56 @@ service cloud.firestore {
     }
 
     // =========================================================================
+    // 10.1 COMUNICADOS OFICIALES (/announcements/{announcementId})
+    // Escritura exclusiva por Cloud Functions (Admin SDK).
+    // Los inversionistas activos solo pueden leer comunicados globales o
+    // aquellos donde su UID esté explícitamente autorizado.
+    // =========================================================================
+    match /announcements/{announcementId} {
+      allow read: if isSuperAdmin() || (
+        isUserActive() && (
+          resource.data.isPublicToActiveUsers == true ||
+          (
+            resource.data.authorizedUids != null &&
+            request.auth.uid in resource.data.authorizedUids
+          )
+        )
+      );
+
+      allow create, update, delete: if false;
+    }
+
+    // =========================================================================
+    // 10.2 ESTADO DE LECTURA DE COMUNICADOS (/announcementReads/{readId})
+    // Cada inversionista controla únicamente su propio recibo de lectura.
+    // =========================================================================
+    match /announcementReads/{readId} {
+      function ownsAnnouncementRead() {
+        return isAuthenticated() &&
+          resource.data.userUid == request.auth.uid;
+      }
+
+      allow read: if isSuperAdmin() || ownsAnnouncementRead();
+
+      allow create: if isUserActive() &&
+        request.resource.data.userUid == request.auth.uid &&
+        request.resource.data.announcementId is string &&
+        request.resource.data.announcementId.size() > 0 &&
+        readId == request.auth.uid + '_' + request.resource.data.announcementId;
+
+      allow update: if isUserActive() &&
+        ownsAnnouncementRead() &&
+        request.resource.data.userUid == resource.data.userUid &&
+        request.resource.data.announcementId == resource.data.announcementId &&
+        request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly(['readAt', 'updatedAt']);
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
     // 11. POSTULACIONES DE ASPIRANTES (/investorApplications/{appId})
     // =========================================================================
     match /investorApplications/{appId} {

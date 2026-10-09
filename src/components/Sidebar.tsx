@@ -23,6 +23,7 @@ import {
   LogOut,
   BarChart3,
   LifeBuoy,
+  Megaphone,
 } from 'lucide-react';
 import { EasyTradersLogo } from './EasyTradersLogo';
 import { useAuth } from '../context/AuthContext';
@@ -51,6 +52,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const { currentUser, isSuperAdmin, isSupportAgent, logout } = useAuth();
   const [showSwitchMenu, setShowSwitchMenu] = React.useState(false);
+  const [, forceStoreRefresh] = React.useReducer((value: number) => value + 1, 0);
+
+  React.useEffect(() => dataStore.subscribe(forceStoreRefresh), []);
 
   const isAdminUser = isSuperAdmin || currentUser?.role === 'ADMIN';
   const notifications = isAdminUser
@@ -59,6 +63,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     ? dataStore.getNotificationsForUser(currentUser.id)
     : [];
   const unreadCount = notifications.filter((n) => !n.isRead).length;
+  const announcementUnreadCount = notifications.filter(
+    (n) => n.type === 'ANNOUNCEMENT' && !n.isRead
+  ).length;
   const pendingAppsCount = dataStore.getPendingApplications().length;
 
   const handleNavClick = (tabKey: string) => {
@@ -222,6 +229,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </span>
                   )
                 )}
+              </button>
+
+              {/* 3.2 Comunicados */}
+              <button
+                onClick={() => handleNavClick('announcements')}
+                title="Comunicados"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
+                  activeTab === 'announcements'
+                    ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
+                }`}
+              >
+                <div className="w-6 h-6 flex items-center justify-center text-violet-400 shrink-0">
+                  <Megaphone className="w-4 h-4" />
+                </div>
+                {!isCollapsed && <span className="flex-1 tracking-wide truncate">Comunicados</span>}
               </button>
 
               {/* 4. Bitácoras (with blue 'Nuevo' badge) */}
@@ -447,7 +472,36 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 {!isCollapsed && <span className="flex-1 tracking-wide truncate">Estadísticas</span>}
               </button>
 
-              {/* 3.2 Mesa de Ayuda / Soporte */}
+              {/* 3.2 Comunicados */}
+              <button
+                onClick={() => handleNavClick('announcements')}
+                title="Comunicados"
+                className={`w-full flex items-center transition cursor-pointer relative ${
+                  isCollapsed ? 'justify-center p-3 rounded-xl' : 'justify-between px-3 py-2.5 rounded-xl text-sm font-semibold text-left'
+                } ${
+                  activeTab === 'announcements'
+                    ? 'bg-gradient-to-r from-[#241a08] via-[#2c2009] to-[#241a08] border border-amber-500/50 text-amber-200 shadow-lg'
+                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900/60 border border-transparent'
+                }`}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-6 h-6 flex items-center justify-center text-violet-400 shrink-0">
+                    <Megaphone className="w-4 h-4" />
+                  </div>
+                  {!isCollapsed && <span className="tracking-wide truncate">Comunicados</span>}
+                </div>
+                {announcementUnreadCount > 0 && (
+                  isCollapsed ? (
+                    <span className="absolute top-1.5 right-1.5 w-2.5 h-2.5 rounded-full bg-violet-400 ring-2 ring-[#070b13]" />
+                  ) : (
+                    <span className="min-w-5 h-5 px-1 rounded-full bg-violet-500 text-white text-[10px] font-mono font-bold flex items-center justify-center">
+                      {announcementUnreadCount > 99 ? '99+' : announcementUnreadCount}
+                    </span>
+                  )
+                )}
+              </button>
+
+              {/* 3.3 Mesa de Ayuda / Soporte */}
               <button
                 onClick={() => handleNavClick('support')}
                 title="Mesa de Ayuda"

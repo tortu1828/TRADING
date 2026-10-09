@@ -11254,6 +11254,490 @@ exports.adminPurgeOrphanReinvestmentsCallable = onCall(
 );
 
 /**
+ * ==========================================================================
+ * CENTRO DE COMUNICADOS
+ * ==========================================================================
+ * Los comunicados viven en /announcements/{announcementId}.
+ * El backend es la única autoridad de escritura para borradores/publicación/
+ * archivo. La publicación crea una notificación personal determinística para
+ * cada destinatario; el trigger onNotificationCreated existente se encarga de
+ * FCM/Push sin duplicar infraestructura.
+ */
+async function verifyAnnouncementSuperAdminPrivileges(request) {
+  if (!request.auth) {
+    throw new HttpsError(
+      "unauthenticated",
+      "Debes iniciar sesión para administrar comunicados."
+    );
+  }
+
+  const authUid = request.auth.uid;
+  const authEmail = String(request.auth.token?.email || "").toLowerCase();
+  const isStrictSuperAdmin =
+    authUid === "lpx4NLEEMkeh9EJFcG68oPMVdXF2" ||
+    authEmail === "juanes9802@gmail.com" ||
+    authEmail === "elcocalombiano1828@gmail.com" ||
+    request.auth.token?.superadmin === true;
+
+  if (!isStrictSuperAdmin) {
+    throw new HttpsError(
+      "permission-denied",
+      "Solo el SuperAdmin puede crear, publicar o archivar comunicados."
+    );
+  }
+
+  const userDocSnap = await db.collection("users").doc(authUid).get();
+  const createdByName =
+    (userDocSnap.exists && (userDocSnap.data()?.fullName || userDocSnap.data()?.displayName)) ||
+    authEmail ||
+    "Super Administrador";
+
+  return { authUid, authEmail, createdByName };
+}
+
+function normalizeAnnouncementId(value) {
+  const clean = String(value || "").trim();
+  if (!clean || clean.length > 180 || !/^[a-zA-Z0-9_-]+$/.test(clean)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "announcementId inválido."
+    );
+  }
+  return clean;
+}
+
+function validateAnnouncementInput(data) {
+  const title = typeof data.title === "string" ? data.title.trim() : "";
+  const body = typeof data.body === "string" ? data.body.trim() : "";
+  const kind = String(data.kind || "INFO").trim().toUpperCase();
+  const audienceType = String(data.audienceType || "ALL_ACTIVE").trim().toUpperCase();
+  const targetCategory = data.targetCategory ? String(data.targetCategory).trim().toUpperCase() : null;
+  const targetUids = Array.isArray(data.targetUids)
+    ? Array.from(new Set(data.targetUids.map((uid) => String(uid || "").trim()).filter(Boolean)))
+    : [];
+
+  if (title.length < 3 || title.length > 120) {
+    throw new HttpsError(
+      "invalid-argument",
+      "El título debe tener entre 3 y 120 caracteres."
+    );
+  }
+
+  if (body.length < 5 || body.length > 4000) {
+    throw new HttpsError(
+      "invalid-argument",
+      "El comunicado debe tener entre 5 y 4000 caracteres."
+    );
+  }
+
+  if (!["INFO", "IMPORTANT", "UPDATE", "NEWS"].includes(kind)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Tipo de comunicado inválido."
+    );
+  }
+
+  if (!["ALL_ACTIVE", "CATEGORY", "USERS"].includes(audienceType)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Tipo de audiencia inválido."
+    );
+  }
+
+  if (audienceType === "CATEGORY" && !["AZUL", "VERDE", "NEGRA"].includes(targetCategory)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "La categoría de destino es inválida."
+    );
+  }
+
+  if (audienceType === "USERS" && targetUids.length === 0) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Debes seleccionar al menos un inversionista."
+    );
+  }
+
+  if (targetUids.length > 1000) {
+    throw new HttpsError(
+      "invalid-argument",
+      "La selección contiene demasiados destinatarios."
+    );
+  }
+
+  return {
+    title,
+    body,
+    kind,
+    audienceType,
+    targetCategory,
+    targetUids,
+  };
+}
+
+async function resolveAnnouncementRecipients(audienceType, targetCategory, requestedTargetUids) {
+  const activeUsersSnap = await db
+    .collection("users")
+    .where("role", "==", "USER")
+    .where("status", "==", "ACTIVE")
+    .get();
+
+  const requestedSet = new Set(requestedTargetUids || []);
+  const recipients = [];
+
+  activeUsersSnap.forEach((userDoc) => {
+    const userData = userDoc.data() || {};
+    const uid = userDoc.id;
+
+    if (audienceType === "CATEGORY" && String(userData.category || "").toUpperCase() !== targetCategory) {
+      return;
+    }
+
+    if (audienceType === "USERS" && !requestedSet.has(uid)) {
+      return;
+    }
+
+    recipients.push({ uid, data: userData });
+  });
+
+  return recipients;
+}
+
+exports.adminSaveAnnouncementDraftCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const { authUid, createdByName } = await verifyAnnouncementSuperAdminPrivileges(request);
+    const data = request.data || {};
+    const announcementId = normalizeAnnouncementId(data.announcementId);
+    const payload = validateAnnouncementInput(data);
+    const ref = db.collection("announcements").doc(announcementId);
+
+    await db.runTransaction(async (transaction) => {
+      const existingSnap = await transaction.get(ref);
+      const existing = existingSnap.exists ? (existingSnap.data() || {}) : null;
+
+      if (existing && ["PUBLISHED", "PUBLISHING", "ARCHIVED"].includes(existing.status)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Solo los borradores pueden modificarse."
+        );
+      }
+
+      const now = admin.firestore.FieldValue.serverTimestamp();
+      transaction.set(
+        ref,
+        {
+          id: announcementId,
+          title: payload.title,
+          body: payload.body,
+          kind: payload.kind,
+          status: "DRAFT",
+          audienceType: payload.audienceType,
+          targetCategory: payload.audienceType === "CATEGORY" ? payload.targetCategory : null,
+          requestedTargetUids: payload.audienceType === "USERS" ? payload.targetUids : [],
+          authorizedUids: [],
+          isPublicToActiveUsers: false,
+          targetUsersCount: 0,
+          createdByUid: existing?.createdByUid || authUid,
+          createdByName: existing?.createdByName || createdByName,
+          createdAt: existing?.createdAt || now,
+          updatedAt: now,
+          clientRequestId: String(data.clientRequestId || "").trim() || null,
+        },
+        { merge: true }
+      );
+    });
+
+    return {
+      success: true,
+      announcementId,
+      status: "DRAFT",
+      message: "Borrador de comunicado guardado correctamente.",
+    };
+  }
+);
+
+exports.adminPublishAnnouncementCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+    timeoutSeconds: 300,
+  },
+  async (request) => {
+    const { authUid, createdByName } = await verifyAnnouncementSuperAdminPrivileges(request);
+    const data = request.data || {};
+    const announcementId = normalizeAnnouncementId(data.announcementId);
+    const payload = validateAnnouncementInput(data);
+    const clientRequestId = String(data.clientRequestId || "").trim();
+
+    if (!clientRequestId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "clientRequestId es obligatorio."
+      );
+    }
+
+    const announcementRef = db.collection("announcements").doc(announcementId);
+    const existingSnap = await announcementRef.get();
+    if (existingSnap.exists) {
+      const existing = existingSnap.data() || {};
+      if (existing.status === "ARCHIVED") {
+        throw new HttpsError(
+          "failed-precondition",
+          "Un comunicado archivado no puede publicarse nuevamente."
+        );
+      }
+      if (existing.status === "PUBLISHED") {
+        return {
+          success: true,
+          announcementId,
+          status: "PUBLISHED",
+          targetUsersCount: Number(existing.targetUsersCount || 0),
+          createdNotificationsCount: Number(existing.createdNotificationsCount || 0),
+          notificationsAlreadyExistedCount: Number(existing.notificationsAlreadyExistedCount || 0),
+          message: "El comunicado ya había sido publicado.",
+        };
+      }
+    }
+
+    const recipients = await resolveAnnouncementRecipients(
+      payload.audienceType,
+      payload.targetCategory,
+      payload.targetUids
+    );
+
+    if (recipients.length === 0) {
+      throw new HttpsError(
+        "failed-precondition",
+        "No hay inversionistas activos para los destinatarios seleccionados."
+      );
+    }
+
+    const authorizedUids = recipients.map((recipient) => recipient.uid);
+    const isPublicToActiveUsers = payload.audienceType === "ALL_ACTIVE";
+    const now = admin.firestore.FieldValue.serverTimestamp();
+
+    await announcementRef.set(
+      {
+        id: announcementId,
+        title: payload.title,
+        body: payload.body,
+        kind: payload.kind,
+        status: "PUBLISHING",
+        audienceType: payload.audienceType,
+        targetCategory: payload.audienceType === "CATEGORY" ? payload.targetCategory : null,
+        requestedTargetUids: payload.audienceType === "USERS" ? payload.targetUids : [],
+        authorizedUids: isPublicToActiveUsers ? [] : authorizedUids,
+        isPublicToActiveUsers,
+        targetUsersCount: recipients.length,
+        createdByUid: existingSnap.exists ? (existingSnap.data()?.createdByUid || authUid) : authUid,
+        createdByName: existingSnap.exists ? (existingSnap.data()?.createdByName || createdByName) : createdByName,
+        createdAt: existingSnap.exists ? (existingSnap.data()?.createdAt || now) : now,
+        updatedAt: now,
+        publishRequestedAt: now,
+        publishRequestedByUid: authUid,
+        publishRequestedByName: createdByName,
+        clientRequestId,
+      },
+      { merge: true }
+    );
+
+    const notificationPreview =
+      payload.body.length > 320
+        ? `${payload.body.slice(0, 317).trim()}...`
+        : payload.body;
+
+    let createdNotificationsCount = 0;
+    let notificationsAlreadyExistedCount = 0;
+    const chunkSize = 100;
+
+    for (let i = 0; i < recipients.length; i += chunkSize) {
+      const chunk = recipients.slice(i, i + chunkSize);
+
+      await Promise.all(
+        chunk.map(async ({ uid, data: userData }) => {
+          const notifId = `notif_announcement_${announcementId}_${uid}`;
+          const notifRef = db.collection("notifications").doc(notifId);
+          const canonicalNotif = {
+            id: notifId,
+            userId: uid,
+            userUid: uid,
+            userName: userData.fullName || "",
+            userEmail: userData.email || "",
+            userCode: userData.userCode || "",
+            cycleId: "",
+            type: "ANNOUNCEMENT",
+            title: payload.title,
+            message: notificationPreview,
+            targetType:
+              payload.audienceType === "ALL_ACTIVE"
+                ? "GLOBAL"
+                : payload.audienceType === "CATEGORY"
+                ? "CATEGORY"
+                : "CUSTOM_GROUP",
+            targetUserUid: uid,
+            targetUids: [uid],
+            targetCategory: payload.targetCategory || "ALL",
+            deliveryStatus: "PENDING",
+            isRead: false,
+            sentAt: admin.firestore.FieldValue.serverTimestamp(),
+            readAt: null,
+            hiddenByUser: false,
+            actionUrl: `/?tab=announcements&announcementId=${encodeURIComponent(announcementId)}`,
+            payload: {
+              announcementId,
+              announcementKind: payload.kind,
+              audienceType: payload.audienceType,
+              clientRequestId,
+            },
+          };
+
+          try {
+            await notifRef.create(canonicalNotif);
+            createdNotificationsCount++;
+          } catch (err) {
+            if (
+              err.code === 6 ||
+              String(err.message || "").includes("ALREADY_EXISTS") ||
+              String(err.message || "").includes("already exists")
+            ) {
+              notificationsAlreadyExistedCount++;
+              return;
+            }
+            throw err;
+          }
+        })
+      );
+    }
+
+    await announcementRef.update({
+      status: "PUBLISHED",
+      publishedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdNotificationsCount,
+      notificationsAlreadyExistedCount,
+    });
+
+    const auditId = `announcement_publish_${announcementId}`;
+    try {
+      await db.collection("auditLogs").doc(auditId).set(
+        {
+          id: auditId,
+          action: "ANNOUNCEMENT_PUBLISHED",
+          performedBy: authUid,
+          performedByUid: authUid,
+          performedByName: createdByName,
+          targetEntity: announcementId,
+          details: {
+            announcementId,
+            title: payload.title,
+            kind: payload.kind,
+            audienceType: payload.audienceType,
+            targetCategory: payload.targetCategory,
+            targetUsersCount: recipients.length,
+            createdNotificationsCount,
+            notificationsAlreadyExistedCount,
+            clientRequestId,
+          },
+          timestamp: new Date().toISOString(),
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (auditErr) {
+      console.error("[Announcements] No se pudo registrar auditoría de publicación:", auditErr);
+    }
+
+    return {
+      success: true,
+      announcementId,
+      status: "PUBLISHED",
+      targetUsersCount: recipients.length,
+      createdNotificationsCount,
+      notificationsAlreadyExistedCount,
+      message: "Comunicado publicado y notificaciones generadas correctamente.",
+    };
+  }
+);
+
+exports.adminArchiveAnnouncementCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const { authUid, createdByName } = await verifyAnnouncementSuperAdminPrivileges(request);
+    const data = request.data || {};
+    const announcementId = normalizeAnnouncementId(data.announcementId);
+    const ref = db.collection("announcements").doc(announcementId);
+    const snap = await ref.get();
+
+    if (!snap.exists) {
+      throw new HttpsError(
+        "not-found",
+        "El comunicado no existe."
+      );
+    }
+
+    const current = snap.data() || {};
+    if (current.status === "ARCHIVED") {
+      return {
+        success: true,
+        announcementId,
+        status: "ARCHIVED",
+        message: "El comunicado ya estaba archivado.",
+      };
+    }
+
+    if (current.status === "PUBLISHING") {
+      throw new HttpsError(
+        "failed-precondition",
+        "No se puede archivar mientras la publicación está en proceso."
+      );
+    }
+
+    await ref.update({
+      status: "ARCHIVED",
+      archivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      archivedByUid: authUid,
+      archivedByName: createdByName,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const auditId = `announcement_archive_${announcementId}_${Date.now()}`;
+    try {
+      await db.collection("auditLogs").doc(auditId).set({
+        id: auditId,
+        action: "ANNOUNCEMENT_ARCHIVED",
+        performedBy: authUid,
+        performedByUid: authUid,
+        performedByName: createdByName,
+        targetEntity: announcementId,
+        details: {
+          announcementId,
+          title: current.title || "",
+          clientRequestId: String(data.clientRequestId || "").trim() || null,
+        },
+        timestamp: new Date().toISOString(),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch (auditErr) {
+      console.error("[Announcements] No se pudo registrar auditoría de archivo:", auditErr);
+    }
+
+    return {
+      success: true,
+      announcementId,
+      status: "ARCHIVED",
+      message: "Comunicado archivado correctamente.",
+    };
+  }
+);
+
+/**
  * Callable administrativa para el envío masivo seguro, idempotente y reanudable de notificaciones globales.
  * Solo accesible para ADMIN/SUPERADMIN.
  */

@@ -59,6 +59,8 @@ export const LiveNotificationToast: React.FC<LiveNotificationToastProps> = ({ on
         return 'Nueva Solicitud de Aporte';
       case 'DISBURSEMENT':
         return 'Solicitud de Retiro';
+      case 'ANNOUNCEMENT':
+        return 'Nuevo Comunicado';
       default:
         return 'Notificación Recibida';
     }
@@ -72,6 +74,8 @@ export const LiveNotificationToast: React.FC<LiveNotificationToastProps> = ({ on
         return 'investor_applications';
       case 'DISBURSEMENT':
         return 'finances';
+      case 'ANNOUNCEMENT':
+        return 'announcements';
       case 'DAILY_TRADE':
       case 'MONTHLY_CLOSURE':
         return 'monthly_closure';
@@ -88,6 +92,8 @@ export const LiveNotificationToast: React.FC<LiveNotificationToastProps> = ({ on
         return 'Ver en Admisiones';
       case 'DISBURSEMENT':
         return 'Ver en Finanzas';
+      case 'ANNOUNCEMENT':
+        return 'Leer comunicado';
       case 'DAILY_TRADE':
       case 'MONTHLY_CLOSURE':
         return 'Ver Historial';

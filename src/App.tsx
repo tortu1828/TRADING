@@ -13,6 +13,7 @@ import { InvestorApplicationsView } from './components/InvestorApplicationsView'
 import { UserPortalView } from './components/UserPortalView';
 import { AdminStatisticsPanel } from './components/AdminStatisticsPanel';
 import { SupportTicketsView } from './components/SupportTicketsView';
+import { AnnouncementsView } from './components/AnnouncementsView';
 import { EditTRMModal } from './components/EditTRMModal';
 import { NotificationsModal } from './components/NotificationsModal';
 import { LiveNotificationToast } from './components/LiveNotificationToast';
@@ -149,6 +150,18 @@ const MainLayout: React.FC = () => {
     }
   }, [isSuperAdmin]);
 
+
+  // Deep-link para notificaciones Push de comunicados.
+  // Ejemplo: /?tab=announcements&announcementId=ann_xxx
+  React.useEffect(() => {
+    if (!currentUser || typeof window === 'undefined') return;
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('tab') === 'announcements') {
+      setActiveTab('announcements');
+    }
+  }, [currentUser?.uid, isSuperAdmin]);
+
   // If Firebase Auth is checking credentials
   if (isAuthLoading) {
     return (
@@ -201,6 +214,8 @@ const MainLayout: React.FC = () => {
         <main className="flex-1 max-w-7xl w-full mx-auto px-2.5 sm:px-6 lg:px-8 py-3.5 sm:py-6 pb-8">
           {activeTab === 'support' ? (
             <SupportTicketsView />
+          ) : activeTab === 'announcements' ? (
+            <AnnouncementsView />
           ) : isSuperAdmin && !activeTab.startsWith('portal') ? (
             <>
               {activeTab === 'dashboard' && <AdminDashboard onNavigate={setActiveTab} />}

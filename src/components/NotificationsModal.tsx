@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { X, Bell, CheckCircle2, Clock, DollarSign, ArrowRight, ShieldCheck, Smartphone, Sparkles, Trash2 } from 'lucide-react';
+import { X, Bell, CheckCircle2, Clock, DollarSign, ArrowRight, ShieldCheck, Smartphone, Sparkles, Trash2, Megaphone } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { dataStore } from '../lib/dataStore';
+import { firestoreService } from '../lib/firestoreService';
 import { NotificationItem } from '../types';
 import { PushDiagnosisPanel } from './PushDiagnosisPanel';
 import {
@@ -73,6 +74,9 @@ export function getNotificationDestination(
           ...(cycleId && { cycleId }),
         };
       }
+
+    case 'ANNOUNCEMENT':
+      return { tab: 'announcements' };
 
     case 'ADMIN_BROADCAST':
     default:
@@ -211,6 +215,26 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
 
   const handleNotificationClick = (notif: NotificationItem) => {
     dataStore.markNotificationAsRead(notif.id);
+
+    if (
+      notif.type === 'ANNOUNCEMENT' &&
+      notif.payload?.announcementId &&
+      currentUser?.uid
+    ) {
+      const announcementId = String(notif.payload.announcementId);
+      void firestoreService.markAnnouncementAsRead(
+        announcementId,
+        currentUser.uid
+      );
+
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href);
+        url.searchParams.set('tab', 'announcements');
+        url.searchParams.set('announcementId', announcementId);
+        window.history.replaceState({}, '', url.toString());
+      }
+    }
+
     const destination = getNotificationDestination(notif, isAdminUser);
     if (destination) {
       if (destination.cycleId && onSelectCycle) {
@@ -236,6 +260,22 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
       }
       for (const n of sharedUnread) {
         await dataStore.markNotificationAsRead(n.id);
+      }
+
+      if (currentUser?.uid) {
+        const unreadAnnouncements = notifications.filter(
+          (n) =>
+            !n.isRead &&
+            n.type === 'ANNOUNCEMENT' &&
+            n.payload?.announcementId
+        );
+
+        for (const notif of unreadAnnouncements) {
+          await firestoreService.markAnnouncementAsRead(
+            String(notif.payload.announcementId),
+            currentUser.uid
+          );
+        }
       }
     } catch (err) {
       console.error('Error al marcar todas como leídas:', err);
@@ -493,6 +533,8 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                             ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
                             : notif.type === 'REINVESTMENT'
                             ? 'bg-blue-500/20 border-blue-500/40 text-blue-400'
+                            : notif.type === 'ANNOUNCEMENT'
+                            ? 'bg-violet-500/20 border-violet-500/40 text-violet-300'
                             : notif.type === 'ADMIN_BROADCAST'
                             ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-400'
                             : 'bg-slate-800 border-slate-700 text-slate-300'
@@ -504,6 +546,8 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                           <DollarSign className="w-4 h-4" />
                         ) : notif.type === 'REINVESTMENT' ? (
                           <CheckCircle2 className="w-4 h-4" />
+                        ) : notif.type === 'ANNOUNCEMENT' ? (
+                          <Megaphone className="w-4 h-4" />
                         ) : notif.type === 'ADMIN_BROADCAST' ? (
                           <Bell className="w-4 h-4" />
                         ) : (
@@ -516,6 +560,11 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                           {isAdmission && (
                             <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-medium border border-amber-500/30">
                               Admisión
+                            </span>
+                          )}
+                          {notif.type === 'ANNOUNCEMENT' && (
+                            <span className="text-[10px] bg-violet-500/20 text-violet-300 px-2.5 py-0.5 rounded-full font-medium border border-violet-500/30">
+                              Comunicado
                             </span>
                           )}
                           {notif.type === 'ADMIN_BROADCAST' && (
@@ -538,7 +587,11 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                           <span>{new Date(notif.sentAt).toLocaleString('es-CO', { dateStyle: 'medium', timeStyle: 'short' })}</span>
                           {dest !== null && (
                             <span className="text-amber-400 flex items-center gap-1 hover:underline font-medium pointer-events-none">
-                              {notif.type === 'INVESTMENT_REQUEST' && isAdminUser ? 'Ir a Admisiones' : 'Ver detalle'} <ArrowRight className="w-3 h-3" />
+                              {notif.type === 'INVESTMENT_REQUEST' && isAdminUser
+                                ? 'Ir a Admisiones'
+                                : notif.type === 'ANNOUNCEMENT'
+                                ? 'Leer comunicado'
+                                : 'Ver detalle'} <ArrowRight className="w-3 h-3" />
                             </span>
                           )}
                         </div>

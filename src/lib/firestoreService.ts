@@ -35,6 +35,10 @@ import {
   SupportTicket,
   SupportTicketMessage,
   SupportInternalNote,
+  Announcement,
+  AnnouncementRead,
+  AnnouncementKind,
+  AnnouncementAudienceType,
 } from '../types';
 
 export const firestoreService = {
@@ -1887,6 +1891,236 @@ export const firestoreService = {
 
     const result = await callable(params);
     return result.data;
+  },
+
+  // ==========================================
+  // --- CENTRO DE COMUNICADOS ---
+  // ==========================================
+  async adminSaveAnnouncementDraft(params: {
+    announcementId: string;
+    title: string;
+    body: string;
+    kind: AnnouncementKind;
+    audienceType: AnnouncementAudienceType;
+    targetCategory?: BitacoraCategory | null;
+    targetUids?: string[];
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    announcementId: string;
+    status: string;
+    message: string;
+  }> {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      announcementId: string;
+      status: string;
+      message: string;
+    }>(functions, 'adminSaveAnnouncementDraftCallable');
+
+    const result = await callable(params);
+    return result.data;
+  },
+
+  async adminPublishAnnouncement(params: {
+    announcementId: string;
+    title: string;
+    body: string;
+    kind: AnnouncementKind;
+    audienceType: AnnouncementAudienceType;
+    targetCategory?: BitacoraCategory | null;
+    targetUids?: string[];
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    announcementId: string;
+    status: string;
+    targetUsersCount: number;
+    createdNotificationsCount: number;
+    notificationsAlreadyExistedCount: number;
+    message: string;
+  }> {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      announcementId: string;
+      status: string;
+      targetUsersCount: number;
+      createdNotificationsCount: number;
+      notificationsAlreadyExistedCount: number;
+      message: string;
+    }>(functions, 'adminPublishAnnouncementCallable');
+
+    const result = await callable(params);
+    return result.data;
+  },
+
+  async adminArchiveAnnouncement(params: {
+    announcementId: string;
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    announcementId: string;
+    status: string;
+    message: string;
+  }> {
+    const callable = httpsCallable<typeof params, {
+      success: boolean;
+      announcementId: string;
+      status: string;
+      message: string;
+    }>(functions, 'adminArchiveAnnouncementCallable');
+
+    const result = await callable(params);
+    return result.data;
+  },
+
+  listenAnnouncementsForAdmin(onUpdate: (items: Announcement[]) => void): () => void {
+    try {
+      return onSnapshot(
+        collection(db, 'announcements'),
+        (snapshot) => {
+          const items = snapshot.docs
+            .map((d) => ({ ...d.data(), id: d.id } as Announcement))
+            .sort((a, b) => {
+              const toMillis = (value: any) => {
+                if (!value) return 0;
+                if (typeof value?.toMillis === 'function') return value.toMillis();
+                if (typeof value?.toDate === 'function') return value.toDate().getTime();
+                const parsed = new Date(value).getTime();
+                return Number.isFinite(parsed) ? parsed : 0;
+              };
+              return toMillis(b.publishedAt || b.updatedAt || b.createdAt) - toMillis(a.publishedAt || a.updatedAt || a.createdAt);
+            });
+          onUpdate(items);
+        },
+        (error) => console.error('[FirestoreService] Error en snapshot de comunicados (Admin):', error)
+      );
+    } catch (err) {
+      console.error('[FirestoreService] Listener de comunicados (Admin) no disponible:', err);
+      return () => {};
+    }
+  },
+
+  listenAnnouncementsForUser(userUid: string, onUpdate: (items: Announcement[]) => void): () => void {
+    if (!userUid) return () => {};
+
+    let publicItems: Announcement[] = [];
+    let targetedItems: Announcement[] = [];
+
+    const toMillis = (value: any) => {
+      if (!value) return 0;
+      if (typeof value?.toMillis === 'function') return value.toMillis();
+      if (typeof value?.toDate === 'function') return value.toDate().getTime();
+      const parsed = new Date(value).getTime();
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    const mergeAndEmit = () => {
+      const map = new Map<string, Announcement>();
+      for (const item of [...publicItems, ...targetedItems]) {
+        if (item?.id && item.status === 'PUBLISHED') map.set(item.id, item);
+      }
+      const merged = Array.from(map.values()).sort(
+        (a, b) => toMillis(b.publishedAt || b.updatedAt || b.createdAt) - toMillis(a.publishedAt || a.updatedAt || a.createdAt)
+      );
+      onUpdate(merged);
+    };
+
+    let unsubPublic = () => {};
+    let unsubTargeted = () => {};
+
+    try {
+      const publicQuery = query(
+        collection(db, 'announcements'),
+        where('isPublicToActiveUsers', '==', true)
+      );
+      unsubPublic = onSnapshot(
+        publicQuery,
+        (snapshot) => {
+          publicItems = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as Announcement));
+          mergeAndEmit();
+        },
+        (error) => console.error('[FirestoreService] Error en comunicados públicos:', error)
+      );
+    } catch (err) {
+      console.error('[FirestoreService] Listener comunicados públicos no disponible:', err);
+    }
+
+    try {
+      const targetedQuery = query(
+        collection(db, 'announcements'),
+        where('authorizedUids', 'array-contains', userUid)
+      );
+      unsubTargeted = onSnapshot(
+        targetedQuery,
+        (snapshot) => {
+          targetedItems = snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as Announcement));
+          mergeAndEmit();
+        },
+        (error) => console.error('[FirestoreService] Error en comunicados dirigidos:', error)
+      );
+    } catch (err) {
+      console.error('[FirestoreService] Listener comunicados dirigidos no disponible:', err);
+    }
+
+    return () => {
+      unsubPublic();
+      unsubTargeted();
+    };
+  },
+
+  listenAnnouncementReadsForUser(userUid: string, onUpdate: (reads: AnnouncementRead[]) => void): () => void {
+    if (!userUid) return () => {};
+    try {
+      const q = query(
+        collection(db, 'announcementReads'),
+        where('userUid', '==', userUid)
+      );
+      return onSnapshot(
+        q,
+        (snapshot) => {
+          onUpdate(snapshot.docs.map((d) => ({ ...d.data(), id: d.id } as AnnouncementRead)));
+        },
+        (error) => console.error('[FirestoreService] Error en lecturas de comunicados:', error)
+      );
+    } catch (err) {
+      console.error('[FirestoreService] Listener de lecturas de comunicados no disponible:', err);
+      return () => {};
+    }
+  },
+
+  async markAnnouncementAsRead(announcementId: string, userUid: string): Promise<void> {
+    if (!announcementId || !userUid) return;
+    const nowIso = new Date().toISOString();
+    const readId = `${userUid}_${announcementId}`;
+
+    await setDoc(
+      doc(db, 'announcementReads', readId),
+      {
+        id: readId,
+        announcementId,
+        userUid,
+        readAt: nowIso,
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
+
+    // La notificación se crea con ID determinístico en el backend.
+    // Marcarla como leída mantiene sincronizado el badge del menú/campana.
+    try {
+      await updateDoc(
+        doc(db, 'notifications', `notif_announcement_${announcementId}_${userUid}`),
+        {
+          isRead: true,
+          readAt: nowIso,
+        }
+      );
+    } catch (err) {
+      // Si el usuario no tenía token/notificación histórica, la lectura del comunicado
+      // sigue siendo válida y no debe fallar por este paso auxiliar.
+      console.debug('[FirestoreService] Notificación de comunicado no disponible para sincronizar lectura:', err);
+    }
   },
 
   async adminUpdateCycleTrm(params: {
