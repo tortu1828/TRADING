@@ -193,6 +193,9 @@ export interface MonthlyCycle {
   startedByUid?: string | null;
   startedByName?: string | null;
   initialManagedCapitalCop?: number;
+  currentManagedCapitalCop?: number;
+  capitalAdjustmentsCount?: number;
+  lastCapitalAdjustmentAt?: string | null;
   initialActiveUsersCount?: number;
 
   // Fase 2A: Versión de cierre e integridad financiera de reconciliación
@@ -209,6 +212,9 @@ export interface CycleFinancialSummary {
   id: string; // Igual a cycleId
   cycleId: string;
   totalManagedCapital: number;
+  currentManagedCapitalCop?: number;
+  capitalAdjustmentsCount?: number;
+  lastCapitalAdjustmentAt?: string | null;
   totalUsersActive: number;
   calculatedUsersCount: number;
   totalGroupsCount: number;
@@ -312,9 +318,15 @@ export interface CycleUserResult {
   userCode: string;
   userName: string;
   email?: string;
-  cycleCapitalCop: number;
-  cycleCategory: BitacoraCategory;
-  groupCapitalCop: number;
+  cycleCapitalCop: number; // Capital congelado al inicio del ciclo (histórico)
+  initialCycleCapitalCop?: number; // Alias explícito del capital inicial para auditoría
+  currentCycleCapitalCop?: number; // Capital operativo vigente dentro del ciclo
+  cycleCategory: BitacoraCategory; // Categoría operativa vigente
+  initialCycleCategory?: BitacoraCategory; // Categoría al inicio del ciclo
+  groupCapitalCop: number; // Grupo operativo vigente
+  capitalAdjustmentCount?: number;
+  lastCapitalAdjustmentAt?: string | null;
+  lastCapitalAdjustmentId?: string | null;
   totalUsdOperated: number;
   trmUsed: number;
   totalGrossCop: number;
@@ -340,6 +352,29 @@ export interface CycleUserResult {
     updatedAt: string;
     reason: string;
   }[];
+}
+
+/**
+ * Ajuste de capital efectivo dentro de un ciclo operativo STARTED.
+ * Colección Firestore: capitalAdjustments/{adjustmentId}
+ */
+export interface CapitalAdjustment {
+  id: string;
+  cycleId: string;
+  userUid: string;
+  userCode: string;
+  userName: string;
+  adjustmentType: 'INCREASE' | 'DECREASE' | 'SET';
+  amountCop: number;
+  previousCapitalCop: number;
+  newCapitalCop: number;
+  previousCategory: BitacoraCategory;
+  newCategory: BitacoraCategory;
+  reason: string;
+  effectiveAt: string;
+  createdByUid: string;
+  createdByName: string;
+  clientRequestId: string;
 }
 
 /**

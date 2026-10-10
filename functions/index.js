@@ -837,6 +837,559 @@ exports.adminExecuteDailyOperation = onCall(
 );
 
 /**
+ * Ajuste autoritativo de capital durante un ciclo operativo STARTED.
+ *
+ * Reglas:
+ * - Solo SuperAdmin.
+ * - El ciclo debe ser el operationalCycleId autoritativo y estar STARTED.
+ * - No modifica dailyOperations históricas.
+ * - cycleCapitalCop conserva el capital congelado al inicio.
+ * - groupCapitalCop / currentCycleCapitalCop / cycleCategory pasan a ser
+ *   la base operativa vigente para trades posteriores.
+ * - Si existe una solicitud de reinversión activa del mismo usuario/ciclo,
+ *   el ajuste se bloquea para evitar drift financiero silencioso.
+ */
+exports.adminAdjustActiveCycleCapitalCallable = onCall(
+  {
+    region: "us-central1",
+    cors: true,
+  },
+  async (request) => {
+    const {
+      authUid,
+      createdByName,
+    } = await verifySuperAdminPrivileges(request);
+
+    // Este flujo es deliberadamente más estricto que otros callables administrativos:
+    // solo SuperAdmin canónico / claim superadmin / perfil SUPERADMIN.
+    const callerEmail =
+      String(request.auth?.token?.email || '').trim().toLowerCase();
+    const callerDoc = await db.collection('users').doc(authUid).get();
+    const callerData = callerDoc.exists ? (callerDoc.data() || {}) : {};
+    const isStrictSuperAdmin =
+      authUid === 'lpx4NLEEMkeh9EJFcG68oPMVdXF2' ||
+      callerEmail === 'juanes9802@gmail.com' ||
+      callerEmail === 'elcocalombiano1828@gmail.com' ||
+      request.auth?.token?.superadmin === true ||
+      request.auth?.token?.role === 'superadmin' ||
+      callerData.role === 'SUPERADMIN' ||
+      callerData.isSuperAdmin === true;
+
+    if (!isStrictSuperAdmin) {
+      throw new HttpsError(
+        'permission-denied',
+        'SUPERADMIN_REQUIRED: Solo el SuperAdmin puede ajustar capital dentro de un ciclo iniciado.'
+      );
+    }
+
+    const data = request.data || {};
+
+    const targetUid =
+      typeof data.targetUid === "string"
+        ? data.targetUid.trim()
+        : "";
+
+    const cycleId =
+      typeof data.cycleId === "string"
+        ? data.cycleId.trim()
+        : "";
+
+    const adjustmentType =
+      typeof data.adjustmentType === "string"
+        ? data.adjustmentType.trim().toUpperCase()
+        : "";
+
+    const reason =
+      typeof data.reason === "string"
+        ? data.reason.trim()
+        : "";
+
+    const rawRequestId =
+      typeof data.clientRequestId === "string"
+        ? data.clientRequestId.trim()
+        : "";
+
+    const cleanRequestId = rawRequestId
+      .replace(/[^a-zA-Z0-9_-]/g, "")
+      .slice(0, 100);
+
+    if (!targetUid) {
+      throw new HttpsError(
+        "invalid-argument",
+        "TARGET_UID_REQUIRED: Debes seleccionar un inversionista."
+      );
+    }
+
+    if (!cycleId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "CYCLE_ID_REQUIRED: No se identificó el ciclo operativo."
+      );
+    }
+
+    if (!['INCREASE', 'DECREASE', 'SET'].includes(adjustmentType)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_ADJUSTMENT_TYPE: Usa INCREASE, DECREASE o SET."
+      );
+    }
+
+    if (reason.length < 4) {
+      throw new HttpsError(
+        "invalid-argument",
+        "ADJUSTMENT_REASON_REQUIRED: Indica un motivo de al menos 4 caracteres."
+      );
+    }
+
+    if (!cleanRequestId) {
+      throw new HttpsError(
+        "invalid-argument",
+        "CLIENT_REQUEST_ID_REQUIRED: Falta el identificador idempotente de la solicitud."
+      );
+    }
+
+    const parsedAmount = Number(data.amountCop);
+    const parsedTargetCapital = Number(data.targetCapitalCop);
+
+    if (
+      adjustmentType !== 'SET' &&
+      (!Number.isFinite(parsedAmount) || parsedAmount <= 0)
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_ADJUSTMENT_AMOUNT: El valor del aporte o retiro debe ser mayor a cero."
+      );
+    }
+
+    if (
+      adjustmentType === 'SET' &&
+      (!Number.isFinite(parsedTargetCapital) || parsedTargetCapital < 2000000)
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "INVALID_TARGET_CAPITAL: El capital corregido debe ser igual o superior a $2.000.000 COP."
+      );
+    }
+
+    // Resolver de forma robusta el documento /users, porque algunas cuentas
+    // administrativas históricas pueden tener documentId distinto al Auth UID.
+    let userRef = db.collection("users").doc(targetUid);
+    let directUserSnap = await userRef.get();
+
+    if (!directUserSnap.exists) {
+      const byUidSnap = await db
+        .collection("users")
+        .where("uid", "==", targetUid)
+        .limit(2)
+        .get();
+
+      if (byUidSnap.empty) {
+        throw new HttpsError(
+          "not-found",
+          "TARGET_USER_NOT_FOUND: No se encontró el inversionista seleccionado."
+        );
+      }
+
+      if (byUidSnap.size !== 1) {
+        throw new HttpsError(
+          "failed-precondition",
+          "TARGET_USER_UID_AMBIGUOUS: Existen múltiples perfiles con el mismo UID."
+        );
+      }
+
+      userRef = byUidSnap.docs[0].ref;
+      directUserSnap = byUidSnap.docs[0];
+    }
+
+    const canonicalUid =
+      String(
+        (directUserSnap.data() || {}).uid ||
+        targetUid
+      ).trim();
+
+    const cycleRef =
+      db.collection("monthlyCycles").doc(cycleId);
+
+    const configRef =
+      db.collection("settings").doc("global_config");
+
+    const resultRef =
+      db.collection("cycleUserResults").doc(`${cycleId}_${canonicalUid}`);
+
+    const reinvestmentRef =
+      db.collection("reinvestments").doc(`${cycleId}_${canonicalUid}`);
+
+    const summaryRef =
+      db.collection("cycleFinancialSummaries").doc(cycleId);
+
+    const adjustmentId =
+      `capadj_${cycleId}_${canonicalUid}_${cleanRequestId}`;
+
+    const adjustmentRef =
+      db.collection("capitalAdjustments").doc(adjustmentId);
+
+    const auditRef =
+      db.collection("auditLogs").doc();
+
+    const nowIso = new Date().toISOString();
+
+    const txResult = await db.runTransaction(async (transaction) => {
+      // --------------------------
+      // READ PHASE
+      // --------------------------
+      const [
+        existingAdjustmentSnap,
+        userSnap,
+        cycleSnap,
+        configSnap,
+        resultSnap,
+        reinvestmentSnap,
+        summarySnap,
+      ] = await Promise.all([
+        transaction.get(adjustmentRef),
+        transaction.get(userRef),
+        transaction.get(cycleRef),
+        transaction.get(configRef),
+        transaction.get(resultRef),
+        transaction.get(reinvestmentRef),
+        transaction.get(summaryRef),
+      ]);
+
+      if (existingAdjustmentSnap.exists) {
+        const existing = existingAdjustmentSnap.data() || {};
+        return {
+          success: true,
+          idempotentReplay: true,
+          adjustmentId,
+          cycleId,
+          userUid: canonicalUid,
+          previousCapitalCop: Number(existing.previousCapitalCop || 0),
+          newCapitalCop: Number(existing.newCapitalCop || 0),
+          previousCategory: existing.previousCategory || "AZUL",
+          newCategory: existing.newCategory || "AZUL",
+          message: existing.message || "El ajuste ya había sido aplicado previamente.",
+        };
+      }
+
+      if (!userSnap.exists) {
+        throw new HttpsError("not-found", "TARGET_USER_NOT_FOUND");
+      }
+
+      if (!cycleSnap.exists) {
+        throw new HttpsError("not-found", "TARGET_CYCLE_NOT_FOUND");
+      }
+
+      if (!resultSnap.exists) {
+        throw new HttpsError(
+          "failed-precondition",
+          "CYCLE_USER_RESULT_NOT_FOUND: El usuario no pertenece al ciclo operativo actual."
+        );
+      }
+
+      const user = userSnap.data() || {};
+      const cycle = cycleSnap.data() || {};
+      const config = configSnap.exists ? (configSnap.data() || {}) : {};
+      const result = resultSnap.data() || {};
+
+      if (!isTradingParticipantProfile(user) || user.status !== "ACTIVE") {
+        throw new HttpsError(
+          "failed-precondition",
+          "TARGET_USER_NOT_ACTIVE_TRADING_PARTICIPANT: El perfil no está habilitado como participante financiero activo."
+        );
+      }
+
+      if (
+        (cycle.status !== "OPEN" && cycle.status !== "REOPENED") ||
+        cycle.operationalStatus !== "STARTED"
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "CYCLE_NOT_STARTED: El ajuste solo se permite durante un ciclo operativo STARTED."
+        );
+      }
+
+      if (cycle.isClosing === true) {
+        throw new HttpsError(
+          "failed-precondition",
+          "CYCLE_IS_CLOSING: No se puede modificar capital mientras el ciclo está en proceso de cierre."
+        );
+      }
+
+      if (config.operationalCycleId !== cycleId) {
+        throw new HttpsError(
+          "failed-precondition",
+          `OPERATIONAL_CYCLE_MISMATCH: El ciclo operativo autoritativo es ${config.operationalCycleId || "null"}.`
+        );
+      }
+
+      if (result.isCycleClosed === true) {
+        throw new HttpsError(
+          "failed-precondition",
+          "CYCLE_RESULT_ALREADY_CLOSED: El resultado del inversionista ya está cerrado."
+        );
+      }
+
+      // Una solicitud de reinversión ya radicada contiene snapshots de capital.
+      // Cambiar la base por debajo de ella produciría un conflicto al cierre.
+      if (reinvestmentSnap.exists) {
+        const reinv = reinvestmentSnap.data() || {};
+        const blockingStatuses = new Set([
+          "PENDING",
+          "APPROVED",
+          "PREAPPROVED",
+          "NEEDS_REVIEW",
+        ]);
+
+        if (
+          blockingStatuses.has(String(reinv.status || "").toUpperCase()) &&
+          reinv.appliedAtCycleClosure !== true
+        ) {
+          throw new HttpsError(
+            "failed-precondition",
+            "ACTIVE_REINVESTMENT_REQUEST_BLOCKS_CAPITAL_ADJUSTMENT: El inversionista tiene una solicitud de reinversión/aporte pendiente o aprobada para este ciclo. Resuélvela o recházala antes de modificar el capital operativo."
+          );
+        }
+      }
+
+      const resultCurrentCapital = Number(
+        result.currentCycleCapitalCop ??
+        result.groupCapitalCop ??
+        result.cycleCapitalCop ??
+        0
+      );
+
+      const userCurrentCapital = Number(user.currentCapital || 0);
+
+      if (
+        !Number.isFinite(resultCurrentCapital) ||
+        resultCurrentCapital < 2000000
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "INVALID_CURRENT_CYCLE_CAPITAL: El capital operativo vigente del resultado no es válido."
+        );
+      }
+
+      if (userCurrentCapital !== resultCurrentCapital) {
+        throw new HttpsError(
+          "failed-precondition",
+          `CAPITAL_STATE_MISMATCH: users.currentCapital ($${userCurrentCapital.toLocaleString("es-CO")}) no coincide con el capital operativo del ciclo ($${resultCurrentCapital.toLocaleString("es-CO")}). Requiere reconciliación antes del ajuste.`
+        );
+      }
+
+      let newCapitalCop = resultCurrentCapital;
+      let amountCop = 0;
+
+      if (adjustmentType === "INCREASE") {
+        amountCop = Math.round(parsedAmount);
+        newCapitalCop = resultCurrentCapital + amountCop;
+      } else if (adjustmentType === "DECREASE") {
+        amountCop = Math.round(parsedAmount);
+        newCapitalCop = resultCurrentCapital - amountCop;
+      } else {
+        newCapitalCop = Math.round(parsedTargetCapital);
+        amountCop = Math.abs(newCapitalCop - resultCurrentCapital);
+      }
+
+      if (
+        !Number.isFinite(newCapitalCop) ||
+        newCapitalCop < 2000000 ||
+        newCapitalCop > Number.MAX_SAFE_INTEGER
+      ) {
+        throw new HttpsError(
+          "invalid-argument",
+          "RESULTING_CAPITAL_OUT_OF_RANGE: El capital resultante debe ser igual o superior a $2.000.000 COP."
+        );
+      }
+
+      if (newCapitalCop === resultCurrentCapital) {
+        throw new HttpsError(
+          "invalid-argument",
+          "NO_CAPITAL_CHANGE: El nuevo capital es igual al capital actual."
+        );
+      }
+
+      const previousCategory =
+        result.cycleCategory ||
+        user.category ||
+        getCategoryForCapitalLocal(resultCurrentCapital);
+
+      const newCategory =
+        getCategoryForCapitalLocal(newCapitalCop);
+
+      const deltaCop =
+        newCapitalCop - resultCurrentCapital;
+
+      const initialCycleCapitalCop = Number(
+        result.initialCycleCapitalCop ??
+        result.cycleCapitalCop ??
+        resultCurrentCapital
+      );
+
+      const initialCycleCategory =
+        result.initialCycleCategory ||
+        getCategoryForCapitalLocal(initialCycleCapitalCop);
+
+      const currentManagedCapitalCop = Number(
+        cycle.currentManagedCapitalCop ??
+        cycle.initialManagedCapitalCop ??
+        0
+      );
+
+      const nextManagedCapitalCop =
+        currentManagedCapitalCop + deltaCop;
+
+      const nextAdjustmentCount =
+        Number(result.capitalAdjustmentCount || 0) + 1;
+
+      const adjustmentDoc = {
+        id: adjustmentId,
+        clientRequestId: cleanRequestId,
+        cycleId,
+        userUid: canonicalUid,
+        userId: canonicalUid,
+        userCode: user.userCode || result.userCode || "",
+        userName: user.fullName || result.userName || "",
+        userEmail: user.email || result.email || "",
+        adjustmentType,
+        amountCop,
+        deltaCop,
+        previousCapitalCop: resultCurrentCapital,
+        newCapitalCop,
+        previousCategory,
+        newCategory,
+        reason,
+        effectiveAt: nowIso,
+        createdAt: nowIso,
+        createdByUid: authUid,
+        createdByName,
+        historicalTradesModified: false,
+        initialCycleCapitalCop,
+        initialCycleCategory,
+        message: `Capital operativo actualizado de $${resultCurrentCapital.toLocaleString("es-CO")} a $${newCapitalCop.toLocaleString("es-CO")} COP.`,
+      };
+
+      // --------------------------
+      // WRITE PHASE
+      // --------------------------
+      transaction.update(userRef, {
+        currentCapital: newCapitalCop,
+        category: newCategory,
+        updatedAt: nowIso,
+        updatedBy: createdByName,
+        lastActiveCycleCapitalAdjustmentAt: nowIso,
+        lastActiveCycleCapitalAdjustmentId: adjustmentId,
+      });
+
+      transaction.update(resultRef, {
+        initialCycleCapitalCop,
+        initialCycleCategory,
+        currentCycleCapitalCop: newCapitalCop,
+        groupCapitalCop: newCapitalCop,
+        cycleCategory: newCategory,
+        capitalAdjustmentCount: nextAdjustmentCount,
+        lastCapitalAdjustmentAt: nowIso,
+        lastCapitalAdjustmentId: adjustmentId,
+        updatedAt: nowIso,
+      });
+
+      transaction.update(cycleRef, {
+        currentManagedCapitalCop: nextManagedCapitalCop,
+        capitalAdjustmentsCount:
+          Number(cycle.capitalAdjustmentsCount || 0) + 1,
+        lastCapitalAdjustmentAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      if (summarySnap.exists) {
+        transaction.set(
+          summaryRef,
+          {
+            currentManagedCapitalCop: nextManagedCapitalCop,
+            capitalAdjustmentsCount:
+              Number((summarySnap.data() || {}).capitalAdjustmentsCount || 0) + 1,
+            lastCapitalAdjustmentAt: nowIso,
+            updatedAt: nowIso,
+          },
+          { merge: true }
+        );
+      }
+
+      transaction.set(adjustmentRef, adjustmentDoc);
+
+      transaction.set(auditRef, {
+        id: auditRef.id,
+        action: "ACTIVE_CYCLE_CAPITAL_ADJUSTED",
+        performedBy: authUid,
+        performedByUid: authUid,
+        performedByName: createdByName,
+        cycleId,
+        targetEntity: canonicalUid,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        details: {
+          adjustmentId,
+          adjustmentType,
+          amountCop,
+          deltaCop,
+          previousCapitalCop: resultCurrentCapital,
+          newCapitalCop,
+          previousCategory,
+          newCategory,
+          reason,
+          initialCycleCapitalCop,
+          initialCycleCategory,
+          historicalTradesModified: false,
+        },
+      });
+
+      return {
+        success: true,
+        idempotentReplay: false,
+        adjustmentId,
+        cycleId,
+        userUid: canonicalUid,
+        previousCapitalCop: resultCurrentCapital,
+        newCapitalCop,
+        previousCategory,
+        newCategory,
+        message: adjustmentDoc.message,
+      };
+    });
+
+    if (!txResult.idempotentReplay) {
+      const notifId = `notif_capadj_${adjustmentId}_${canonicalUid}`;
+      await db.collection("notifications").doc(notifId).set({
+        id: notifId,
+        userId: canonicalUid,
+        userUid: canonicalUid,
+        userCode: directUserSnap.data()?.userCode || "",
+        userName: directUserSnap.data()?.fullName || "Inversionista",
+        cycleId,
+        type: "SYSTEM",
+        title: "💼 Capital operativo actualizado",
+        message: `Tu capital operativo fue actualizado de $${Number(txResult.previousCapitalCop).toLocaleString("es-CO")} a $${Number(txResult.newCapitalCop).toLocaleString("es-CO")} COP. El cambio aplica desde este momento y los trades anteriores no fueron modificados.`,
+        read: false,
+        isRead: false,
+        sentAt: nowIso,
+        createdAt: nowIso,
+        payload: {
+          adjustmentId,
+          previousCapitalCop: txResult.previousCapitalCop,
+          newCapitalCop: txResult.newCapitalCop,
+          previousCategory: txResult.previousCategory,
+          newCategory: txResult.newCategory,
+          effectiveAt: nowIso,
+        },
+      }, { merge: true }).catch((err) => {
+        console.warn("[adminAdjustActiveCycleCapitalCallable] No se pudo crear notificación:", err);
+      });
+    }
+
+    return txResult;
+  }
+);
+
+/**
  * Helper: Validar autenticación y privilegios estrictos de SuperAdmin
  */
 async function verifySuperAdminPrivileges(request) {
@@ -5368,12 +5921,18 @@ exports.submitReinvestmentRequestCallable = onCall(
 
       const resData = userResDocSnap.data() || {};
       const cycleProfitSnapshotCop = Number(resData.userProfitCop) || 0;
-      const cycleCapitalCop = Number(resData.cycleCapitalCop || 0);
+      const initialCycleCapitalCop = Number(resData.cycleCapitalCop || 0);
+      const effectiveCycleCapitalCop = Number(
+        resData.currentCycleCapitalCop ??
+        resData.groupCapitalCop ??
+        resData.cycleCapitalCop ??
+        0
+      );
 
-      if (currentCapitalSnapshotCop !== cycleCapitalCop) {
+      if (currentCapitalSnapshotCop !== effectiveCycleCapitalCop) {
         throw new HttpsError(
           "failed-precondition",
-          `CAPITAL_BASE_SNAPSHOT_MISMATCH: El capital actual registrado ($${currentCapitalSnapshotCop.toLocaleString("es-CO")}) no coincide con el capital base congelado del ciclo ($${cycleCapitalCop.toLocaleString("es-CO")}).`
+          `CAPITAL_BASE_SNAPSHOT_MISMATCH: El capital actual registrado ($${currentCapitalSnapshotCop.toLocaleString("es-CO")}) no coincide con el capital operativo vigente del ciclo ($${effectiveCycleCapitalCop.toLocaleString("es-CO")}).`
         );
       }
 
@@ -5523,6 +6082,7 @@ exports.submitReinvestmentRequestCallable = onCall(
 
         // Snapshots auditados de servidor
         currentCapitalSnapshotCop,
+        initialCycleCapitalSnapshotCop: initialCycleCapitalCop,
         cycleProfitSnapshotCop,
         reinvestableProfitCop,
         desiredCapitalIncreaseCop: modality === "CAPITAL_INJECTION" ? desiredIncrease : null,
@@ -10701,8 +11261,14 @@ exports.adminStartCycleCallable = onCall(
             userName: uProfile.fullName || "",
             email: uProfile.email || "",
             cycleCapitalCop: finalCapitalCop,
+            initialCycleCapitalCop: finalCapitalCop,
+            currentCycleCapitalCop: finalCapitalCop,
             cycleCategory: finalCategory,
+            initialCycleCategory: finalCategory,
             groupCapitalCop: finalCapitalCop,
+            capitalAdjustmentCount: 0,
+            lastCapitalAdjustmentAt: null,
+            lastCapitalAdjustmentId: null,
             totalUsdOperated: 0,
             trmUsed: null,
             totalGrossCop: 0,
@@ -10779,6 +11345,9 @@ exports.adminStartCycleCallable = onCall(
           startAttemptId: null,
           lastStartRequestId: clientRequestId || null,
           initialManagedCapitalCop: totalInitialCapitalCop,
+          currentManagedCapitalCop: totalInitialCapitalCop,
+          capitalAdjustmentsCount: 0,
+          lastCapitalAdjustmentAt: null,
           initialActiveUsersCount: cycleUserResultsToSet.length,
           updatedAt: nowIso,
         });
@@ -10801,6 +11370,9 @@ exports.adminStartCycleCallable = onCall(
         transaction.set(summaryRef, {
           cycleId: targetCycleId,
           initialManagedCapitalCop: totalInitialCapitalCop,
+          currentManagedCapitalCop: totalInitialCapitalCop,
+          capitalAdjustmentsCount: 0,
+          lastCapitalAdjustmentAt: null,
           initialActiveUsersCount: cycleUserResultsToSet.length,
           totalGroupsCount: 0,
           calculatedGroupsCount: 0,

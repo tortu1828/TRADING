@@ -148,6 +148,16 @@ service cloud.firestore {
     }
 
     // =========================================================================
+    // 6B. AJUSTES DE CAPITAL EN CICLO ACTIVO (/capitalAdjustments/{adjustmentId})
+    // =========================================================================
+    match /capitalAdjustments/{adjustmentId} {
+      allow read: if isAdmin() || (
+        isAuthenticated() && resource.data.userUid == request.auth.uid
+      );
+      allow create, update, delete: if false; // Solo Cloud Functions autoritativas
+    }
+
+    // =========================================================================
     // 7. SOLICITUDES DE REINVERSIÓN (/reinvestments/{reqId})
     // =========================================================================
     match /reinvestments/{reqId} {

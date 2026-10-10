@@ -181,21 +181,15 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
 
   const allGroups: CategoryGroupInfo[] = [...blueGroups, ...greenGroups, ...blackGroups];
 
-  // Claves de grupos operativos activos actuales
-  const activeGroupKeys = new Set(allGroups.map((g) => `${g.category}_${g.groupCapitalCop}`));
-
-  // Cálculos consolidados para Cierre Operativo Global y Notificaciones vinculados estrictamente a grupos activos
+  // Operaciones pendientes del ciclo completo.
+  // IMPORTANTE: no se filtran por los grupos vigentes porque un usuario puede
+  // cambiar de capital dentro del mismo ciclo. Los trades anteriores deben
+  // seguir contando y cerrándose con sus destinatarios históricos.
   const allActiveOps = dataStore
-    .getDailyOperations(
-      currentCycle.cycleId
-    )
-    .filter(
-      (op) =>
-        !(op as any).globalClosedAt &&
-        activeGroupKeys.has(
-          `${op.category}_${op.groupCapitalCop}`
-        )
-    );
+    .getDailyOperations(currentCycle.cycleId)
+    .filter((op) => !(op as any).globalClosedAt);
+
+  const activeFinancialUsers = dataStore.getActiveUsers();
 
   const globalActiveUsdTotal =
     allActiveOps.reduce(
@@ -274,28 +268,13 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
     }>();
 
   allActiveOps.forEach((op) => {
-
-    const group =
-      allGroups.find(
-        (candidate) =>
-          candidate.category ===
-            op.category &&
-          Number(
-            candidate.groupCapitalCop
-          ) ===
-            Number(
-              op.groupCapitalCop
-            )
-      );
-
-    if (!group) {
-      return;
-    }
-
+    // authorizedUids de cada trade es la autoridad histórica.
+    // Resolver contra todos los participantes activos evita perder un trade
+    // anterior cuando el inversionista ya cambió de grupo/capital.
     const recipients =
       dataStore.resolveOperationRecipients(
         op,
-        group.users
+        activeFinancialUsers
       );
 
     recipients.forEach((user) => {
@@ -463,10 +442,8 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
     );
 
 
-  const totalOperationsCount = allGroups.reduce((acc, g) => {
-    const ops = dataStore.getDailyOperations(currentCycle.cycleId, g.category, g.groupCapitalCop);
-    return acc + ops.length;
-  }, 0);
+  const totalOperationsCount =
+    dataStore.getDailyOperations(currentCycle.cycleId).length;
 
   const totalUsdAcrossGroups =
     operatedUsersList.reduce(

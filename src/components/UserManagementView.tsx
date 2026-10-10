@@ -99,6 +99,14 @@ export const UserManagementView: React.FC = () => {
   } | null>(null);
   const [copiedModalField, setCopiedModalField] = useState<string | null>(null);
 
+  // Ajuste de capital dentro de ciclo operativo STARTED
+  const [capitalAdjustUser, setCapitalAdjustUser] = useState<UserProfile | null>(null);
+  const [capitalAdjustType, setCapitalAdjustType] = useState<'INCREASE' | 'DECREASE' | 'SET'>('INCREASE');
+  const [capitalAdjustValue, setCapitalAdjustValue] = useState('');
+  const [capitalAdjustReason, setCapitalAdjustReason] = useState('');
+  const [capitalAdjustError, setCapitalAdjustError] = useState<string | null>(null);
+  const [isAdjustingCapital, setIsAdjustingCapital] = useState(false);
+
   // Estados para Prueba Directa de Push FCM
   const [testPushUser, setTestPushUser] = useState<UserProfile | null>(null);
   const [isSendingTestPush, setIsSendingTestPush] = useState(false);
@@ -155,6 +163,16 @@ export const UserManagementView: React.FC = () => {
   const [selfAdminConfigSuccess, setSelfAdminConfigSuccess] = useState<string | null>(null);
 
   const config = dataStore.getConfig();
+  const operationalCycleId = config?.operationalCycleId || '';
+  const operationalCycle = operationalCycleId
+    ? dataStore.getCycleById(operationalCycleId)
+    : null;
+  const canAdjustActiveCycleCapital =
+    isSuperAdmin &&
+    !!operationalCycle &&
+    operationalCycle.status !== 'CLOSED' &&
+    operationalCycle.operationalStatus === 'STARTED';
+
   const preparingCycleId = config?.preparingCycleId;
   const preparingCycle = preparingCycleId ? dataStore.getCycleById(preparingCycleId) : null;
   const hasValidFutureCycle = isCycleValidForFutureEnrollment(
@@ -451,6 +469,101 @@ export const UserManagementView: React.FC = () => {
     setFormSupportReadUserContext(user.permissions?.supportReadUserContext === true);
     setFormSupportReadOperationalContext(user.permissions?.supportReadOperationalContext === true);
     setFormError(null);
+  };
+
+  const handleOpenCapitalAdjustment = (user: UserProfile) => {
+    setCapitalAdjustUser(user);
+    setCapitalAdjustType('INCREASE');
+    setCapitalAdjustValue('');
+    setCapitalAdjustReason('');
+    setCapitalAdjustError(null);
+  };
+
+  const handleSubmitCapitalAdjustment = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!capitalAdjustUser || !operationalCycleId) {
+      setCapitalAdjustError('No se encontró el inversionista o el ciclo operativo actual.');
+      return;
+    }
+
+    const rawValue = Number(capitalAdjustValue.replace(/[^0-9.]/g, ''));
+
+    if (!Number.isFinite(rawValue) || rawValue <= 0) {
+      setCapitalAdjustError(
+        capitalAdjustType === 'SET'
+          ? 'Ingresa el nuevo capital válido.'
+          : 'Ingresa un valor de ajuste mayor a cero.'
+      );
+      return;
+    }
+
+    const currentCapital = Number(capitalAdjustUser.currentCapital || 0);
+    const proposedCapital =
+      capitalAdjustType === 'INCREASE'
+        ? currentCapital + rawValue
+        : capitalAdjustType === 'DECREASE'
+          ? currentCapital - rawValue
+          : rawValue;
+
+    if (proposedCapital < 2_000_000) {
+      setCapitalAdjustError('El capital resultante no puede ser inferior a $2.000.000 COP.');
+      return;
+    }
+
+    if (proposedCapital === currentCapital) {
+      setCapitalAdjustError('El nuevo capital es igual al capital actual.');
+      return;
+    }
+
+    if (capitalAdjustReason.trim().length < 4) {
+      setCapitalAdjustError('Escribe un motivo breve para dejar trazabilidad del ajuste.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `¿Confirmas este ajuste de capital?\n\n` +
+      `${capitalAdjustUser.fullName}\n` +
+      `Capital actual: ${formatCOP(currentCapital)}\n` +
+      `Nuevo capital: ${formatCOP(proposedCapital)}\n` +
+      `Bitácora: ${capitalAdjustUser.category} → ${getCategoryForCapital(proposedCapital)}\n\n` +
+      `El cambio aplicará inmediatamente a los NUEVOS trades. Los trades anteriores no serán modificados.`
+    );
+
+    if (!confirmed) return;
+
+    setIsAdjustingCapital(true);
+    setCapitalAdjustError(null);
+    setReconcileErrorMsg(null);
+    setReconcileSuccessMsg(null);
+
+    try {
+      const result = await firestoreService.adminAdjustActiveCycleCapitalCallable({
+        targetUid: capitalAdjustUser.uid || capitalAdjustUser.id,
+        cycleId: operationalCycleId,
+        adjustmentType: capitalAdjustType,
+        amountCop: capitalAdjustType === 'SET' ? undefined : Math.round(rawValue),
+        targetCapitalCop: capitalAdjustType === 'SET' ? Math.round(rawValue) : undefined,
+        reason: capitalAdjustReason.trim(),
+        clientRequestId: crypto.randomUUID(),
+      });
+
+      setCapitalAdjustUser(null);
+      setCapitalAdjustValue('');
+      setCapitalAdjustReason('');
+      setReconcileSuccessMsg(
+        `${result.message} ${result.previousCategory !== result.newCategory ? `Bitácora: ${result.previousCategory} → ${result.newCategory}.` : `Continúa en bitácora ${result.newCategory}.`}`
+      );
+      setTimeout(() => setReconcileSuccessMsg(null), 8000);
+    } catch (err: any) {
+      const rawMessage = err?.message || 'No se pudo ajustar el capital operativo.';
+      const friendlyMessage = rawMessage.includes('ACTIVE_REINVESTMENT_REQUEST_BLOCKS_CAPITAL_ADJUSTMENT')
+        ? 'No se puede ajustar el capital porque este inversionista tiene una solicitud de reinversión o aporte pendiente/aprobada para el ciclo. Debes resolverla o rechazarla primero.'
+        : rawMessage;
+      setCapitalAdjustError(friendlyMessage);
+    } finally {
+      setIsAdjustingCapital(false);
+    }
   };
 
   const handleReconcileUser = async (user: UserProfile) => {
@@ -1609,13 +1722,24 @@ ${directLink}
                     </div>
                   </div>
 
-                  <button
-                    onClick={() => handleOpenEdit(user)}
-                    className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition cursor-pointer"
-                    title="Editar inversionista"
-                  >
-                    <Edit2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    {canAdjustActiveCycleCapital && user.status === 'ACTIVE' && (user.role === 'USER' || user.participatesInTrading === true) && (
+                      <button
+                        onClick={() => handleOpenCapitalAdjustment(user)}
+                        className="p-2 rounded-xl bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 hover:text-white border border-emerald-500/40 transition cursor-pointer"
+                        title="Ajustar capital en ciclo activo"
+                      >
+                        <DollarSign className="w-4 h-4" />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleOpenEdit(user)}
+                      className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition cursor-pointer"
+                      title="Editar inversionista"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 text-xs">
@@ -1905,6 +2029,17 @@ ${directLink}
                         </button>
                       )}
 
+                      {canAdjustActiveCycleCapital && user.status === 'ACTIVE' && (user.role === 'USER' || user.participatesInTrading === true) && (
+                        <button
+                          onClick={() => handleOpenCapitalAdjustment(user)}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/40 text-emerald-300 hover:text-white transition cursor-pointer"
+                          title="Ajustar capital desde este momento dentro del ciclo activo"
+                        >
+                          <DollarSign className="w-3.5 h-3.5" />
+                          <span>Ajustar capital</span>
+                        </button>
+                      )}
+
                       {/* Botón Probar Push para SuperAdmin en Desktop */}
                       {isSuperAdmin && user.status === 'ACTIVE' && (
                         <button
@@ -1943,6 +2078,177 @@ ${directLink}
           </table>
         </div>
       </div>
+
+      {/* MODAL: Ajuste de Capital en Ciclo Activo */}
+      {capitalAdjustUser && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm overflow-y-auto">
+          <form
+            onSubmit={handleSubmitCapitalAdjustment}
+            className="bg-slate-900 border border-emerald-500/30 rounded-2xl w-full max-w-lg p-6 shadow-2xl relative text-slate-100 space-y-5"
+          >
+            <button
+              type="button"
+              onClick={() => !isAdjustingCapital && setCapitalAdjustUser(null)}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-800 transition"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 pr-10">
+              <div className="w-11 h-11 rounded-xl bg-emerald-950 border border-emerald-500/30 flex items-center justify-center text-emerald-300">
+                <DollarSign className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-100">Ajustar capital operativo</h3>
+                <p className="text-xs text-slate-400">
+                  {capitalAdjustUser.fullName} · {capitalAdjustUser.userCode}
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
+                <span className="text-[10px] uppercase font-bold text-slate-500">Capital vigente</span>
+                <span className="block mt-1 font-mono font-black text-slate-100">
+                  {formatCOP(capitalAdjustUser.currentCapital)}
+                </span>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800">
+                <span className="text-[10px] uppercase font-bold text-slate-500">Bitácora actual</span>
+                <span className="block mt-1 font-mono font-black text-emerald-300">
+                  {capitalAdjustUser.category}
+                </span>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-2">Tipo de ajuste</label>
+              <div className="grid grid-cols-3 gap-2">
+                {([
+                  ['INCREASE', 'Aporte'],
+                  ['DECREASE', 'Retiro'],
+                  ['SET', 'Corrección'],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => {
+                      setCapitalAdjustType(value);
+                      setCapitalAdjustValue('');
+                      setCapitalAdjustError(null);
+                    }}
+                    className={`px-3 py-2 rounded-xl border text-xs font-bold transition ${
+                      capitalAdjustType === value
+                        ? 'bg-emerald-950 border-emerald-500/50 text-emerald-300'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                {capitalAdjustType === 'SET' ? 'Nuevo capital total' : capitalAdjustType === 'INCREASE' ? 'Valor del aporte' : 'Valor del retiro'}
+              </label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-mono">$</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={capitalAdjustValue}
+                  onChange={(e) => setCapitalAdjustValue(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-7 pr-3 py-2.5 font-mono font-bold text-slate-100 focus:outline-none focus:border-emerald-500"
+                  placeholder={capitalAdjustType === 'SET' ? '25000000' : '5000000'}
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            {(() => {
+              const value = Number(capitalAdjustValue || 0);
+              const current = Number(capitalAdjustUser.currentCapital || 0);
+              const next = capitalAdjustType === 'INCREASE'
+                ? current + value
+                : capitalAdjustType === 'DECREASE'
+                  ? current - value
+                  : value;
+              const isValid = Number.isFinite(next) && next >= 2_000_000 && next !== current;
+              return (
+                <div className={`p-3 rounded-xl border ${isValid ? 'bg-emerald-950/30 border-emerald-500/30' : 'bg-slate-950 border-slate-800'}`}>
+                  <div className="flex items-center justify-between gap-3 text-xs">
+                    <span className="text-slate-400">Capital efectivo después del ajuste</span>
+                    <strong className={isValid ? 'text-emerald-300 font-mono' : 'text-slate-500 font-mono'}>
+                      {isValid ? formatCOP(next) : '—'}
+                    </strong>
+                  </div>
+                  {isValid && (
+                    <div className="flex items-center justify-between gap-3 text-xs mt-2 pt-2 border-t border-slate-800/70">
+                      <span className="text-slate-400">Bitácora desde ese momento</span>
+                      <strong className="text-emerald-300 font-mono">
+                        {capitalAdjustUser.category} → {getCategoryForCapital(next)}
+                      </strong>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">Motivo / soporte del movimiento</label>
+              <textarea
+                value={capitalAdjustReason}
+                onChange={(e) => setCapitalAdjustReason(e.target.value)}
+                rows={3}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-emerald-500 resize-none"
+                placeholder="Ej: Aporte adicional recibido y confirmado el día de hoy."
+              />
+            </div>
+
+            <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 text-[11px] text-amber-200 leading-relaxed">
+              <strong>Aplicación inmediata:</strong> los nuevos trades usarán el capital actualizado. Los trades ya registrados conservarán su capital, TRM y destinatarios históricos.
+            </div>
+
+            {capitalAdjustError && (
+              <div className="p-3 rounded-xl bg-rose-950/70 border border-rose-500/40 text-xs text-rose-200 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{capitalAdjustError}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={isAdjustingCapital}
+                onClick={() => setCapitalAdjustUser(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-bold text-slate-200 disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={isAdjustingCapital}
+                className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-extrabold disabled:opacity-50 flex items-center gap-2"
+              >
+                {isAdjustingCapital ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                    Aplicando...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    Confirmar ajuste
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* MODAL: Add / Edit User */}
       {(isAddModalOpen || editingUser) && (

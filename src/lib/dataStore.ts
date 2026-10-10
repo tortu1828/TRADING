@@ -1226,7 +1226,7 @@ class DataStore {
     // Agrupar usuarios por categoría y capital exacto
     const map = new Map<string, { category: BitacoraCategory; groupCapitalCop: number; users: UserProfile[] }>();
 
-    if (isClosedCycle || isStartedCycle) {
+    if (isClosedCycle) {
       // CICLO CERRADO: Snapshot histórico inmutable.
       // Reconstruir grupos desde los cálculos guardados de dicho ciclo cerrado
       groupCalculations.forEach((calc) => {
@@ -1244,7 +1244,7 @@ class DataStore {
             phone: '',
             role: 'USER',
             status: 'ACTIVE',
-            currentCapital: r.cycleCapitalCop || r.groupCapitalCop,
+            currentCapital: r.groupCapitalCop || r.currentCycleCapitalCop || r.cycleCapitalCop,
             currency: 'COP',
             category: r.cycleCategory,
             userPercentage: r.userPercentage,
@@ -1335,8 +1335,68 @@ class DataStore {
           existingGroup.users.push(user);
         }
       });
+    } else if (isStartedCycle) {
+      // CICLO STARTED: autoridad operativa = cycleUserResults vigente.
+      // Un ajuste de capital dentro del ciclo mueve al usuario de grupo
+      // sin reescribir dailyOperations históricas.
+      cycleUserResults.forEach((r) => {
+        const capital = Number(
+          r.currentCycleCapitalCop ??
+          r.groupCapitalCop ??
+          r.cycleCapitalCop ??
+          0
+        );
+
+        if (!capital) return;
+
+        const category =
+          r.cycleCategory ||
+          getCategoryForCapital(capital);
+
+        const key = `${category}_${capital}`;
+
+        const user: UserProfile = {
+          id: r.userId,
+          uid: r.userUid || r.userId,
+          userCode: r.userCode,
+          fullName: r.userName,
+          email: r.email,
+          phone: '',
+          role: 'USER',
+          status: 'ACTIVE',
+          currentCapital: capital,
+          currency: 'COP',
+          category,
+          userPercentage: r.userPercentage,
+          adminPercentage: r.adminPercentage,
+          paymentMethod: '',
+          paymentDetails: '',
+          createdAt: r.calculatedAt || '',
+          entryDate: '',
+        };
+
+        if (!map.has(key)) {
+          map.set(key, {
+            category,
+            groupCapitalCop: capital,
+            users: [],
+          });
+        }
+
+        const group = map.get(key)!;
+        const alreadyIncluded = group.users.some(
+          (existingUser) =>
+            (user.uid && existingUser.uid === user.uid) ||
+            (user.id && existingUser.id === user.id) ||
+            (user.userCode && existingUser.userCode === user.userCode)
+        );
+
+        if (!alreadyIncluded) {
+          group.users.push(user);
+        }
+      });
     } else {
-      // CICLO ACTIVO: Vista operativa actual.
+      // CICLO ACTIVO NO STARTED: Vista operativa desde perfiles actuales.
       // Regla estricta: active USER con capital X -> grupo X existe.
       // 0 USER ACTIVE -> 0 grupos activos.
       // dailyOperations huérfanas/históricas -> NO crean tarjetas activas.
@@ -2117,8 +2177,9 @@ class DataStore {
 
       const capital =
         Number(
-          result.cycleCapitalCop ||
+          result.currentCycleCapitalCop ||
           result.groupCapitalCop ||
+          result.cycleCapitalCop ||
           operation.groupCapitalCop ||
           0
         );

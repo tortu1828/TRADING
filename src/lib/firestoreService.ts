@@ -349,6 +349,50 @@ export const firestoreService = {
     return response.data;
   },
 
+  /**
+   * Ajuste autoritativo de capital durante un ciclo operativo STARTED.
+   * El servidor actualiza users + cycleUserResults + auditoría de forma atómica.
+   */
+  async adminAdjustActiveCycleCapitalCallable(params: {
+    targetUid: string;
+    cycleId: string;
+    adjustmentType: 'INCREASE' | 'DECREASE' | 'SET';
+    amountCop?: number;
+    targetCapitalCop?: number;
+    reason: string;
+    clientRequestId: string;
+  }): Promise<{
+    success: boolean;
+    adjustmentId: string;
+    cycleId: string;
+    userUid: string;
+    previousCapitalCop: number;
+    newCapitalCop: number;
+    previousCategory: BitacoraCategory;
+    newCategory: BitacoraCategory;
+    message: string;
+    idempotentReplay?: boolean;
+  }> {
+    const callable = httpsCallable(
+      functions,
+      'adminAdjustActiveCycleCapitalCallable'
+    );
+
+    const response = await callable(params);
+    return response.data as {
+      success: boolean;
+      adjustmentId: string;
+      cycleId: string;
+      userUid: string;
+      previousCapitalCop: number;
+      newCapitalCop: number;
+      previousCategory: BitacoraCategory;
+      newCategory: BitacoraCategory;
+      message: string;
+      idempotentReplay?: boolean;
+    };
+  },
+
   async saveUser(user: UserProfile) {
     const targetUid = user.uid || user.id;
 
