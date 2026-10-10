@@ -19,6 +19,7 @@ import { NotificationsModal } from './components/NotificationsModal';
 import { LiveNotificationToast } from './components/LiveNotificationToast';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { LoginView } from './components/LoginView';
+import { AppSplash } from './components/AppSplash';
 import { fetchLiveTRM } from './lib/trmService';
 import { dataStore } from './lib/dataStore';
 import { ensureAutoNotificationPermission } from './lib/pushNotifications';
@@ -274,6 +275,7 @@ export default function App() {
   return (
     <AuthProvider>
       <MainLayout />
+      <AppSplash />
     </AuthProvider>
   );
 }
