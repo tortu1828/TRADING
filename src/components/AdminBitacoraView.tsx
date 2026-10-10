@@ -1095,6 +1095,69 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
               );
             };
 
+            // Totales acumulados del usuario durante TODO el ciclo.
+            // Esto conserva a la vista los trades históricos aunque el usuario
+            // cambie de capital/categoría dentro del mismo ciclo.
+            const calculateUserTradeTotalsForCycle = (user: UserProfile) => {
+              const rawUserPct =
+                user.userPercentage !== undefined ? user.userPercentage : 75;
+              const rawAdminPct =
+                user.adminPercentage !== undefined ? user.adminPercentage : 25;
+              const userPct = rawUserPct <= 1 ? rawUserPct * 100 : rawUserPct;
+              const adminPct = rawAdminPct <= 1 ? rawAdminPct * 100 : rawAdminPct;
+              const userKey = String(user.uid || user.id || user.userCode || '').trim();
+
+              return allActiveOps.reduce(
+                (acc, op) => {
+                  const applies = dataStore
+                    .resolveOperationRecipients(op, activeFinancialUsers)
+                    .some(
+                      (recipient) =>
+                        String(
+                          recipient.uid || recipient.id || recipient.userCode || ''
+                        ).trim() === userKey
+                    );
+
+                  if (!applies) return acc;
+
+                  const usd = Number(op.amountUsd || 0);
+                  const grossCop = resolveOperationGrossCop(op);
+                  const operationTrm = usd !== 0 ? grossCop / usd : 0;
+                  const calc = calculateUserMonthlyResult(
+                    usd,
+                    operationTrm,
+                    userPct,
+                    adminPct
+                  );
+
+                  acc.usdOperated += calc.usdOperated;
+                  acc.grossCop += calc.grossCop;
+                  acc.userProfitCop += calc.userProfitCop;
+                  acc.userProfitUsd += calc.userProfitUsd;
+                  acc.adminCommissionCop += calc.adminCommissionCop;
+                  acc.adminCommissionUsd += calc.adminCommissionUsd;
+
+                  if (
+                    Number(op.groupCapitalCop || 0) !== Number(group.groupCapitalCop || 0) ||
+                    op.category !== group.category
+                  ) {
+                    acc.hasPreviousCapitalTrades = true;
+                  }
+
+                  return acc;
+                },
+                {
+                  usdOperated: 0,
+                  grossCop: 0,
+                  userProfitCop: 0,
+                  userProfitUsd: 0,
+                  adminCommissionCop: 0,
+                  adminCommissionUsd: 0,
+                  hasPreviousCapitalTrades: false,
+                }
+              );
+            };
+
             const userTradeRows = users.map((user) => ({
               user,
               totals: calculateUserTradeTotalsForGroup(user),
@@ -1276,9 +1339,14 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                               : `Inversionistas con trades aplicados (${recipientUsersCount} de ${users.length})`}
                           </span>
                         </div>
-                        <span className="text-[11px] font-mono text-slate-400">
-                          Capital Base Consolidado: {formatCOP(group.groupCapitalCop * Math.max(1, users.length))}
-                        </span>
+                        <div className="text-right">
+                          <span className="text-[11px] font-mono text-slate-400 block">
+                            Capital Base Consolidado: {formatCOP(group.groupCapitalCop * Math.max(1, users.length))}
+                          </span>
+                          <span className="text-[9px] text-slate-500 block mt-0.5">
+                            La tabla acumula todo el ciclo; el historial inferior muestra este capital.
+                          </span>
+                        </div>
                       </div>
 
                       {users.length === 0 ? (
@@ -1292,8 +1360,8 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                               <tr>
                                 <th className="py-2.5 px-3">Inversionista</th>
                                 <th className="py-2.5 px-3">Capital Base</th>
-                                <th className="py-2.5 px-3">USD Operado</th>
-                                <th className="py-2.5 px-3">Bruto COP</th>
+                                <th className="py-2.5 px-3">USD Acum. Ciclo</th>
+                                <th className="py-2.5 px-3">Bruto Acum. Ciclo</th>
                                 <th className="py-2.5 px-3">Ganancia Cliente</th>
                                 <th className="py-2.5 px-3">Comisión Admin</th>
                                 <th className="py-2.5 px-3 text-center">Estado</th>
@@ -1301,7 +1369,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                             </thead>
                             <tbody className="divide-y divide-slate-800/60 font-mono">
                               {users.map((user, idx) => {
-                                const calc = calculateUserTradeTotalsForGroup(user);
+                                const calc = calculateUserTradeTotalsForCycle(user);
 
                                 return (
                                   <tr key={user.id} className="hover:bg-slate-800/30 transition">
@@ -1317,6 +1385,11 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                                           <span className="text-[10px] text-slate-400 font-mono">
                                             {user.userCode} {user.documentId ? `• CC ${user.documentId}` : ''}
                                           </span>
+                                          {calc.hasPreviousCapitalTrades && (
+                                            <span className="block text-[9px] text-amber-400/90 font-mono mt-0.5">
+                                              Incluye trades con capital anterior
+                                            </span>
+                                          )}
                                         </div>
                                       </div>
                                     </td>
