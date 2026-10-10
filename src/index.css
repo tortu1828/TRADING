@@ -48,364 +48,109 @@ input, select, textarea, button {
 }
 
 /* ============================================================
-   EASY TRADERS — Brand splash
-   - Se muestra una vez por sesión.
-   - No interfiere con Auth/Firebase: la app carga por debajo.
-   - Sin librerías de animación.
+   EASY TRADERS — Splash simple
+   - Logo oficial centrado.
+   - Barra de carga visible durante ~3.2 s.
+   - La aplicación carga por debajo y el splash se retira solo.
    ============================================================ */
 .et-splash {
   position: fixed;
   inset: 0;
   z-index: 2147483000;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 50% 47%, rgba(30, 64, 175, 0.13), transparent 34%),
-    radial-gradient(circle at 50% 86%, rgba(14, 165, 233, 0.08), transparent 27%),
-    #05080f;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0f1720;
   opacity: 1;
   visibility: visible;
   isolation: isolate;
-  animation: etSplashIn 220ms ease-out both;
 }
 
 .et-splash--leaving {
   pointer-events: none;
-  animation: etSplashOut 460ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: etSimpleSplashOut 360ms ease forwards;
 }
 
-.et-splash__stage {
-  position: relative;
-  width: min(78vw, 430px);
+.et-splash__simple-stage {
+  width: min(78vw, 320px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+}
+
+.et-splash__full-logo {
+  width: min(70vw, 280px);
   aspect-ratio: 1;
-  display: grid;
-  place-items: center;
-  transform: translateY(-1.5vh);
-}
-
-.et-splash__logo-wrap {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 1;
-  display: grid;
-  place-items: center;
-  filter: drop-shadow(0 22px 46px rgba(0, 0, 0, 0.38));
-  animation: etLogoLift 880ms cubic-bezier(0.16, 1, 0.3, 1) 80ms both;
-}
-
-.et-splash__mark {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
+  object-fit: cover;
+  border-radius: 9999px;
+  display: block;
   user-select: none;
   -webkit-user-drag: none;
-  opacity: 0;
-  transform: scale(0.88);
-  filter:
-    drop-shadow(0 0 8px rgba(255, 255, 255, 0.22))
-    drop-shadow(0 0 22px rgba(56, 189, 248, 0.14));
-  animation: etMarkIn 760ms cubic-bezier(0.16, 1, 0.3, 1) 120ms forwards;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
 }
 
-.et-splash__wordmark-mask {
-  position: absolute;
-  left: 16.7%;
-  top: 60.8%;
-  width: 66.6%;
-  height: 9%;
+.et-splash__progress-track {
+  width: min(64vw, 240px);
+  height: 5px;
   overflow: hidden;
-  opacity: 0;
-  animation: etWordMaskIn 700ms cubic-bezier(0.22, 1, 0.36, 1) 740ms forwards;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
-.et-splash__wordmark {
+.et-splash__progress-bar {
   width: 100%;
   height: 100%;
-  object-fit: contain;
-  user-select: none;
-  -webkit-user-drag: none;
-  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.16));
-  transform: translateY(18%);
-  animation: etWordLift 700ms cubic-bezier(0.22, 1, 0.36, 1) 740ms forwards;
+  border-radius: inherit;
+  transform-origin: left center;
+  transform: scaleX(0);
+  background: linear-gradient(90deg, #f8fafc 0%, #dbeafe 55%, #7dd3fc 100%);
+  box-shadow: 0 0 12px rgba(125, 211, 252, 0.42);
+  animation: etSimpleProgress 3200ms cubic-bezier(0.22, 0.7, 0.22, 1) forwards;
 }
 
-.et-splash__tagline {
-  position: absolute;
-  left: 21%;
-  top: 69.7%;
-  width: 58%;
-  height: auto;
-  object-fit: contain;
-  user-select: none;
-  -webkit-user-drag: none;
-  opacity: 0;
-  transform: translateY(7px);
-  animation: etTaglineIn 420ms ease-out 1120ms forwards;
+@keyframes etSimpleProgress {
+  0% { transform: scaleX(0); }
+  18% { transform: scaleX(0.14); }
+  52% { transform: scaleX(0.56); }
+  82% { transform: scaleX(0.88); }
+  100% { transform: scaleX(1); }
 }
 
-.et-splash__halo {
-  position: absolute;
-  width: 86%;
-  aspect-ratio: 1;
-  border-radius: 9999px;
-  background: radial-gradient(
-    circle,
-    rgba(56, 189, 248, 0.08) 0%,
-    rgba(37, 99, 235, 0.035) 48%,
-    transparent 70%
-  );
-  opacity: 0;
-  transform: scale(0.75);
-  filter: blur(12px);
-  animation: etHaloIn 950ms ease-out 120ms forwards;
-}
-
-.et-splash__shine {
-  position: absolute;
-  top: 9%;
-  bottom: 8%;
-  left: -38%;
-  width: 23%;
-  transform: skewX(-17deg);
-  opacity: 0;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.055),
-    rgba(125, 211, 252, 0.2),
-    rgba(255, 255, 255, 0.05),
-    transparent
-  );
-  filter: blur(1px);
-  animation: etShine 620ms ease-in-out 1180ms forwards;
-  pointer-events: none;
-}
-
-.et-splash__floor-light {
-  position: absolute;
-  left: 50%;
-  bottom: 5.5%;
-  width: 35%;
-  height: 2px;
-  transform: translateX(-50%) scaleX(0.25);
-  border-radius: 9999px;
-  opacity: 0;
-  background: rgba(125, 211, 252, 0.95);
-  box-shadow:
-    0 0 8px rgba(125, 211, 252, 0.85),
-    0 0 24px rgba(14, 165, 233, 0.48),
-    0 0 52px rgba(37, 99, 235, 0.28);
-  animation: etFloorLight 620ms ease-out 1260ms forwards;
-}
-
-.et-splash__ambient {
-  position: absolute;
-  border-radius: 9999px;
-  filter: blur(80px);
-  opacity: 0;
-  pointer-events: none;
-}
-
-.et-splash__ambient--one {
-  width: 34vw;
-  height: 34vw;
-  min-width: 260px;
-  min-height: 260px;
-  left: -10vw;
-  top: 8vh;
-  background: rgba(29, 78, 216, 0.075);
-  animation: etAmbient 1500ms ease-out 180ms forwards;
-}
-
-.et-splash__ambient--two {
-  width: 28vw;
-  height: 28vw;
-  min-width: 220px;
-  min-height: 220px;
-  right: -9vw;
-  bottom: -4vh;
-  background: rgba(14, 165, 233, 0.055);
-  animation: etAmbient 1500ms ease-out 340ms forwards;
-}
-
-@keyframes etSplashIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@keyframes etSplashOut {
-  0% {
+@keyframes etSimpleSplashOut {
+  from {
     opacity: 1;
     visibility: visible;
   }
-  100% {
+  to {
     opacity: 0;
     visibility: hidden;
   }
 }
 
-@keyframes etLogoLift {
-  from {
-    transform: translateY(10px);
-  }
-  to {
-    transform: translateY(0);
-  }
-}
-
-@keyframes etMarkIn {
-  0% {
-    opacity: 0;
-    transform: scale(0.88);
-    filter:
-      blur(2px)
-      drop-shadow(0 0 0 rgba(56, 189, 248, 0));
-  }
-  58% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1);
-    filter:
-      blur(0)
-      drop-shadow(0 0 8px rgba(255, 255, 255, 0.22))
-      drop-shadow(0 0 22px rgba(56, 189, 248, 0.14));
-  }
-}
-
-@keyframes etWordMaskIn {
-  0% {
-    opacity: 0;
-    clip-path: inset(0 50% 0 50%);
-  }
-  18% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 1;
-    clip-path: inset(0 0 0 0);
-  }
-}
-
-@keyframes etWordLift {
-  from { transform: translateY(18%); }
-  to { transform: translateY(0); }
-}
-
-@keyframes etTaglineIn {
-  from {
-    opacity: 0;
-    transform: translateY(7px);
-    letter-spacing: 0.08em;
-  }
-  to {
-    opacity: 0.82;
-    transform: translateY(0);
-    letter-spacing: 0;
-  }
-}
-
-@keyframes etHaloIn {
-  from {
-    opacity: 0;
-    transform: scale(0.75);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@keyframes etShine {
-  0% {
-    left: -38%;
-    opacity: 0;
-  }
-  18% {
-    opacity: 0.9;
-  }
-  78% {
-    opacity: 0.7;
-  }
-  100% {
-    left: 116%;
-    opacity: 0;
-  }
-}
-
-@keyframes etFloorLight {
-  0% {
-    opacity: 0;
-    transform: translateX(-50%) scaleX(0.25);
-  }
-  48% {
-    opacity: 0.95;
-  }
-  100% {
-    opacity: 0.45;
-    transform: translateX(-50%) scaleX(1);
-  }
-}
-
-@keyframes etAmbient {
-  from {
-    opacity: 0;
-    transform: scale(0.8);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
 @media (max-width: 480px) {
-  .et-splash__stage {
-    width: min(88vw, 360px);
+  .et-splash__simple-stage {
+    width: min(84vw, 300px);
+    gap: 24px;
   }
 
-  .et-splash__floor-light {
-    bottom: 4%;
-    width: 42%;
+  .et-splash__full-logo {
+    width: min(72vw, 250px);
+  }
+
+  .et-splash__progress-track {
+    width: min(62vw, 220px);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .et-splash,
-  .et-splash--leaving,
-  .et-splash__logo-wrap,
-  .et-splash__mark,
-  .et-splash__wordmark-mask,
-  .et-splash__wordmark,
-  .et-splash__tagline,
-  .et-splash__halo,
-  .et-splash__shine,
-  .et-splash__floor-light,
-  .et-splash__ambient {
+  .et-splash__progress-bar,
+  .et-splash--leaving {
     animation: none !important;
-    transition: none !important;
   }
 
-  .et-splash__mark,
-  .et-splash__wordmark-mask,
-  .et-splash__tagline,
-  .et-splash__halo {
-    opacity: 1 !important;
-    transform: none !important;
-    clip-path: none !important;
-  }
-
-  .et-splash__tagline {
-    opacity: 0.82 !important;
-  }
-
-  .et-splash__shine,
-  .et-splash__floor-light,
-  .et-splash__ambient {
-    display: none !important;
+  .et-splash__progress-bar {
+    transform: scaleX(1);
   }
 }
-
