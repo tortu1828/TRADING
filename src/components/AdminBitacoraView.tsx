@@ -191,6 +191,31 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
 
   const activeFinancialUsers = dataStore.getActiveUsers();
 
+  // RESULTADOS AUTORITATIVOS DEL CICLO POR USUARIO.
+  // Estos acumulados sobreviven a un cambio de capital dentro del mismo ciclo
+  // y son la fuente correcta para la fila financiera del inversionista.
+  const cycleUserResults =
+    dataStore.getUserResults(currentCycle.cycleId);
+
+  const cycleResultByUserKey =
+    new Map<string, (typeof cycleUserResults)[number]>();
+
+  cycleUserResults.forEach((result) => {
+    [
+      result.userUid,
+      result.userId,
+      result.userCode,
+      result.email?.toLowerCase(),
+    ]
+      .filter(Boolean)
+      .forEach((key) => {
+        cycleResultByUserKey.set(
+          String(key).trim().toLowerCase(),
+          result
+        );
+      });
+  });
+
   const globalActiveUsdTotal =
     allActiveOps.reduce(
       (sum, op) =>
@@ -1096,9 +1121,73 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
             };
 
             // Totales acumulados del usuario durante TODO el ciclo.
-            // Esto conserva a la vista los trades históricos aunque el usuario
-            // cambie de capital/categoría dentro del mismo ciclo.
+            // FUENTE AUTORITATIVA: cycleUserResults.
+            // El backend incrementa estos acumulados por destinatario cuando se
+            // registra cada trade y el ajuste de capital NO los reinicia. Por eso
+            // siguen siendo correctos aunque el usuario cambie de grupo/capital.
             const calculateUserTradeTotalsForCycle = (user: UserProfile) => {
+              const candidateKeys = [
+                user.uid,
+                user.id,
+                user.userCode,
+                user.email?.toLowerCase(),
+              ]
+                .filter(Boolean)
+                .map((key) =>
+                  String(key).trim().toLowerCase()
+                );
+
+              const storedResult =
+                candidateKeys
+                  .map((key) =>
+                    cycleResultByUserKey.get(key)
+                  )
+                  .find(Boolean);
+
+              if (storedResult) {
+                const initialCapital = Number(
+                  storedResult.initialCycleCapitalCop ??
+                  storedResult.cycleCapitalCop ??
+                  0
+                );
+
+                const currentCapital = Number(
+                  storedResult.currentCycleCapitalCop ??
+                  storedResult.groupCapitalCop ??
+                  storedResult.cycleCapitalCop ??
+                  0
+                );
+
+                return {
+                  usdOperated: Number(
+                    storedResult.totalUsdOperated || 0
+                  ),
+                  grossCop: Number(
+                    storedResult.totalGrossCop || 0
+                  ),
+                  userProfitCop: Number(
+                    storedResult.userProfitCop || 0
+                  ),
+                  userProfitUsd: Number(
+                    storedResult.userProfitUsd || 0
+                  ),
+                  adminCommissionCop: Number(
+                    storedResult.adminCommissionCop || 0
+                  ),
+                  adminCommissionUsd: Number(
+                    storedResult.adminCommissionUsd || 0
+                  ),
+                  hasPreviousCapitalTrades:
+                    Number(storedResult.capitalAdjustmentCount || 0) > 0 ||
+                    (
+                      initialCapital > 0 &&
+                      currentCapital > 0 &&
+                      initialCapital !== currentCapital
+                    ),
+                };
+              }
+
+              // Compatibilidad de seguridad para ciclos legacy sin cycleUserResult.
               const rawUserPct =
                 user.userPercentage !== undefined ? user.userPercentage : 75;
               const rawAdminPct =
@@ -1157,6 +1246,16 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                 }
               );
             };
+
+            const cycleUserTradeRows = users.map((user) => ({
+              user,
+              totals: calculateUserTradeTotalsForCycle(user),
+            }));
+
+            const cycleRecipientUsersCount =
+              cycleUserTradeRows.filter(
+                ({ totals }) => totals.usdOperated > 0
+              ).length;
 
             const userTradeRows = users.map((user) => ({
               user,
@@ -1336,7 +1435,7 @@ export const AdminBitacoraView: React.FC<AdminBitacoraViewProps> = ({ onNavigate
                           <span>
                             {isIndividual
                               ? 'Inversionista que recibe la liquidación (1 persona)'
-                              : `Inversionistas con trades aplicados (${recipientUsersCount} de ${users.length})`}
+                              : `Inversionistas con trades aplicados (${cycleRecipientUsersCount} de ${users.length})`}
                           </span>
                         </div>
                         <div className="text-right">
