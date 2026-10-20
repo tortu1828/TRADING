@@ -1,7 +1,7 @@
 // Service Worker importable para Firebase Cloud Messaging (FCM) y PWA
 // Se ejecuta importado por /sw.js generado por Workbox
 
-const SW_PUSH_VERSION = "push-bg-test-1";
+const SW_PUSH_VERSION = "push-recovery-2026-10-v2";
 
 // Listener para verificar versión del Service Worker desde la PWA en desarrollo
 self.addEventListener('message', (event) => {

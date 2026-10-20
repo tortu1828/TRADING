@@ -203,9 +203,10 @@ export async function ensurePushRegistration(options: {
   forceRepair?: boolean;
   userId?: string;
 } = {}): Promise<EnsurePushRegistrationResult> {
-  const currentUid = options.userId || auth.currentUser?.uid;
-  if (!currentUid) {
-    return { success: false, token: null, error: 'No se detectó un usuario autenticado activo.' };
+  const authenticatedUid = auth.currentUser?.uid;
+  const currentUid = options.userId || authenticatedUid;
+  if (!authenticatedUid || !currentUid || currentUid !== authenticatedUid) {
+    return { success: false, token: null, error: 'No hay sesión Firebase Auth coincidente para registrar el dispositivo.' };
   }
 
   // Protección de concurrencia: si hay una operación en progreso para el mismo UID, reusar promesa
@@ -239,6 +240,10 @@ export async function ensurePushRegistration(options: {
       }
 
       const messaging = getMessaging(app);
+      // Capturar la identidad PREVIA antes de deleteToken/getToken.
+      // Si la rotación tiene éxito, se limpiará solo ese registro antiguo.
+      const previousToken = localStorage.getItem(PUSH_TOKEN_KEY);
+      const previousUid = localStorage.getItem(PUSH_LAST_REGISTERED_UID);
 
       // Si se fuerza una reparación excepcional o rotación
       if (options.forceRepair) {
@@ -250,7 +255,6 @@ export async function ensurePushRegistration(options: {
         } catch (delErr) {
           console.warn('[Push] Error al invalidar token FCM anterior:', delErr);
         }
-        localStorage.removeItem(PUSH_TOKEN_KEY);
       }
 
       // Obtener token FCM canónico mediante el SDK
@@ -274,9 +278,7 @@ export async function ensurePushRegistration(options: {
         return { success: false, token: null, error: 'El servidor de Google (FCM) devolvió un token vacío.' };
       }
 
-      const tokenId = getDeviceTokenId(fcmToken);
       const { browser, platform } = getDeviceMetadata();
-      const tokenDocRef = doc(db, 'users', currentUid, 'pushTokens', tokenId);
 
       // Metadatos auxiliares de localStorage
       const lastRegisteredUid = localStorage.getItem(PUSH_LAST_REGISTERED_UID);
@@ -292,7 +294,7 @@ export async function ensurePushRegistration(options: {
       if (lastRegisteredUid === currentUid && lastTokenFingerprint === currentFingerprint) {
         try {
           const { getDoc } = await import('firebase/firestore');
-          const docSnap = await getDoc(tokenDocRef);
+          const docSnap = await getDoc(doc(db, 'users', currentUid, 'pushTokens', getDeviceTokenId(fcmToken)));
           if (!docSnap.exists()) {
             if (!hasAutorepairedThisSession) {
               needsControlledAutorepair = true;
@@ -313,7 +315,7 @@ export async function ensurePushRegistration(options: {
         } catch (delErr) {
           console.warn('[Push] Error al invalidar token FCM en autoreparación:', delErr);
         }
-        localStorage.removeItem(PUSH_TOKEN_KEY);
+        // Conservar metadatos locales hasta que el nuevo registro sea persistido.
 
         // Volver a obtener token fresco
         try {
@@ -334,6 +336,16 @@ export async function ensurePushRegistration(options: {
         }
       }
 
+      // Nunca escribir un token para una sesión que cerró o cambió durante getToken.
+      if (auth.currentUser?.uid !== currentUid) {
+        return { success: false, token: null, error: 'La sesión Firebase cambió durante el registro push.' };
+      }
+
+      // IMPORTANTE: getToken puede devolver otro token después de deleteToken.
+      // Recalcular el ID después de la autoreparación, nunca antes.
+      const tokenId = getDeviceTokenId(fcmToken);
+      const tokenDocRef = doc(db, 'users', currentUid, 'pushTokens', tokenId);
+
       // Escribir/sincronizar el token con Firestore de forma segura
       try {
         await setDoc(tokenDocRef, {
@@ -350,6 +362,17 @@ export async function ensurePushRegistration(options: {
           token: null,
           error: fsErr?.message || 'Error de escritura en base de datos Firestore.',
         };
+      }
+
+      // Eliminar solamente el documento del token ANTERIOR de este mismo usuario,
+      // y únicamente una vez que el token nuevo se guardó correctamente.
+      // Los demás dispositivos y sus tokens no se tocan.
+      if (previousToken && previousToken !== fcmToken && previousUid === currentUid) {
+        try {
+          await deleteDoc(doc(db, 'users', currentUid, 'pushTokens', getDeviceTokenId(previousToken)));
+        } catch (cleanupError) {
+          console.warn('[Push] No se pudo retirar el token anterior; el servidor lo depurará si es inválido:', cleanupError);
+        }
       }
 
       // Guardar metadata local auxiliar
@@ -456,32 +479,28 @@ export async function initializeForegroundMessaging(): Promise<boolean> {
  * Obtiene de forma segura la registración activa del Service Worker PWA
  * sin provocar un cuelgue o bloqueo infinito si el SW tarda en responder.
  */
-export async function getActivePwaRegistration(timeoutMs = 5000): Promise<ServiceWorkerRegistration | null> {
+export async function getActivePwaRegistration(timeoutMs = 12000): Promise<ServiceWorkerRegistration | null> {
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
     return null;
   }
 
+  // La PWA registra /sw.js durante el bootstrap. Esperar instalación / activación
+  // con límite, para no bloquear el inicio si el navegador tarda o está offline.
   try {
+    const scope = new URL('/', window.location.href).href;
+    const existing = await navigator.serviceWorker.getRegistration(scope);
+    if (existing?.active) return existing;
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<null>((resolve) => {
-      setTimeout(() => {
-        if (process.env.NODE_ENV !== 'production') {
-          console.warn('[Push] Timeout esperando navigator.serviceWorker.ready');
-        }
-        resolve(null);
-      }, timeoutMs);
+      timeoutHandle = setTimeout(() => resolve(null), timeoutMs);
     });
-
-    const readyPromise = navigator.serviceWorker.ready.then((reg) => {
-      if (process.env.NODE_ENV !== 'production') {
-        console.log('[Push] Service Worker PWA activo detectado:', reg.scope, reg.active?.scriptURL);
-      }
-      return reg;
-    });
-
-    const registration = await Promise.race([readyPromise, timeoutPromise]);
-    return registration;
+    const ready = navigator.serviceWorker.ready.catch(() => null);
+    const registration = await Promise.race([ready, timeoutPromise]);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    return registration?.active ? registration : null;
   } catch (err) {
-    console.warn('[Push] Error al consultar Service Worker ready:', err);
+    console.warn('[Push] Error consultando Service Worker PWA:', err);
     return null;
   }
 }

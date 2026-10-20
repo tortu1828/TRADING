@@ -2980,6 +2980,39 @@ function buildWebPushDataMessage(tokens, params) {
 }
 
 /**
+ * Envío habitual con payload de notificación visible en background.
+ * El SW conserva el modo Data-only para pruebas; cuando existe notification,
+ * onBackgroundMessage evita un showNotification adicional.
+ */
+function buildVisibleWebPushMessage(tokens, params) {
+  const { title = "EasyTraders", body = "", type = "GENERAL", notifId = "", tag = "", url = "/" } = params || {};
+  const titleText = String(title || "EasyTraders");
+  const bodyText = String(body || "");
+  return {
+    tokens,
+    notification: { title: titleText, body: bodyText },
+    data: {
+      title: titleText,
+      body: bodyText,
+      type: String(type || "GENERAL"),
+      notifId: String(notifId || ""),
+      tag: String(tag || ""),
+      url: String(url || "/"),
+    },
+    webpush: {
+      headers: { Urgency: "high" },
+      notification: {
+        title: titleText,
+        body: bodyText,
+        icon: "/favicon.png",
+        badge: "/apple-touch-icon.png",
+        ...(tag ? { tag: String(tag) } : {}),
+      },
+    },
+  };
+}
+
+/**
  * Cloud Function para el despacho idempotente de Notificaciones Push (FCM).
  * Trigger: onDocumentCreated en la colección notifications/{notifId}
  */
@@ -3013,7 +3046,7 @@ exports.onNotificationCreated = onDocumentCreated(
         const currentStatus = data.deliveryStatus;
 
         // Si ya está en proceso o ya fue enviada, abortar inmediatamente
-        if (currentStatus === "PROCESSING" || currentStatus === "SENT") {
+        if (["PROCESSING", "SENT", "PARTIAL", "NO_DEVICES", "FAILED"].includes(currentStatus)) {
           console.warn(
             `[Push Notification] Transacción abortada. La notificación ${notifId} ya se encuentra en estado: ${currentStatus}`
           );
@@ -3115,12 +3148,12 @@ exports.onNotificationCreated = onDocumentCreated(
 
       const tokensList = Array.from(tokensMap.keys());
 
-      // Si no hay dispositivos registrados para el destinatario
+      // Sin tokens no hubo despacho. No marcar como SENT.
+      // El documento permanece en historial; no se reenvía automáticamente.
       if (tokensList.length === 0) {
-        console.log(`[Push Notification] No se encontraron tokens FCM registrados para ${notifId}`);
+        console.log(`[Push Notification] Sin dispositivos registrados para ${notifId}`);
         await notifRef.update({
-          deliveryStatus: "SENT", // Se marca completada para no reintentar
-          sentAt: admin.firestore.FieldValue.serverTimestamp(),
+          deliveryStatus: "NO_DEVICES",
           deliverySummary: {
             totalTokens: 0,
             successCount: 0,
@@ -3134,14 +3167,14 @@ exports.onNotificationCreated = onDocumentCreated(
       console.log(`[Push Notification] Despachando a ${tokensList.length} dispositivos para ${notifId}`);
 
       // =========================================================================
-      // 3. DESPACHO MULTICAST DATA-ONLY CON COLLAPSE KEY DETERMINÍSTICO
+      // 3. DESPACHO FCM VISIBLE EN SEGUNDO PLANO (SIN DUPLICADOS)
       // =========================================================================
       const collapseKey = `notif_${notifId}`;
       const payloadTitle = String(notifData.title || "EasyTraders Gestor de Capital");
       const payloadBody = String(notifData.message || notifData.body || "");
       const actionUrl = String(notifData.actionUrl || notifData.url || "/");
 
-      const multicastMessage = buildWebPushDataMessage(tokensList, {
+      const multicastMessage = buildVisibleWebPushMessage(tokensList, {
         title: payloadTitle,
         body: payloadBody,
         type: String(notifData.type || "GENERAL"),
@@ -3180,19 +3213,27 @@ exports.onNotificationCreated = onDocumentCreated(
       }
 
       // =========================================================================
-      // 5. CIERRE Y ACTUALIZACIÓN ATÓMICA A 'SENT'
+      // 5. Registrar el resultado real de aceptación por FCM.
+      // SENT significa aceptada por FCM, NO visualizada por el teléfono.
+      // Sin reenvíos automáticos para no duplicar avisos financieros.
       // =========================================================================
+      const finalStatus = response.successCount === 0
+        ? "FAILED"
+        : response.failureCount > 0 ? "PARTIAL" : "SENT";
       await notifRef.update({
-        deliveryStatus: "SENT",
-        sentAt: admin.firestore.FieldValue.serverTimestamp(),
+        deliveryStatus: finalStatus,
+        ...(response.successCount > 0
+          ? { sentAt: admin.firestore.FieldValue.serverTimestamp() }
+          : { failedAt: admin.firestore.FieldValue.serverTimestamp() }),
         deliverySummary: {
           totalTokens: tokensList.length,
           successCount: response.successCount,
           failureCount: response.failureCount,
+          note: "FCM acceptance is not proof of device display",
         },
       });
 
-      console.log(`[Push Notification] Notificación ${notifId} marcada exitosamente como SENT.`);
+      console.log(`[Push Notification] Notificación ${notifId} finalizada con estado ${finalStatus}.`);
     } catch (dispatchError) {
       console.error(`[Push Notification Error] Fallo crítico despachando ${notifId}:`, dispatchError);
       await notifRef.update({

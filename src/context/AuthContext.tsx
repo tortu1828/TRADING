@@ -181,17 +181,79 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsubscribeAuth();
   }, []);
 
-  // Automatically register / update token in Firestore when currentUser updates
+  // PUSH RECOVERY: mantener el dispositivo asociado exclusivamente al UID
+  // autenticado, incluso si un administrador cambia el perfil visible.
+  // Recuperar registros purgados tras actualizar la PWA sin reinstalarla.
   useEffect(() => {
-    if (currentUser) {
-      const activeUid = currentUser.uid || currentUser.id;
-      if (activeUid) {
-        ensurePushRegistration({ userId: activeUid }).catch((err) => {
-          console.warn('[Push] Error en registro push canónico automático en AuthContext:', err);
-        });
+    const uid = auth.currentUser?.uid;
+    if (!uid || !currentUser || typeof window === 'undefined' || !('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
+
+    let cancelled = false;
+    let busy = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastSuccessAt = 0;
+    let failureIndex = 0;
+    const retryDelays = [10000, 30000, 120000, 300000];
+
+    const attempt = async () => {
+      if (cancelled || busy || Notification.permission !== 'granted' || !navigator.onLine) return;
+      if (auth.currentUser?.uid !== uid) return;
+      // No consultar FCM en cada focus si se verificó hace unos minutos.
+      if (lastSuccessAt && Date.now() - lastSuccessAt < 5 * 60 * 1000) return;
+
+      busy = true;
+      try {
+        const result = await ensurePushRegistration({ userId: uid });
+        if (cancelled) return;
+        if (result.success) {
+          lastSuccessAt = Date.now();
+          failureIndex = 0;
+          if (retryTimer) clearTimeout(retryTimer);
+          retryTimer = undefined;
+        } else {
+          console.warn('[Push Recovery] Registro pendiente:', result.error);
+          if (!retryTimer) {
+            const wait = retryDelays[Math.min(failureIndex++, retryDelays.length - 1)];
+            retryTimer = setTimeout(() => {
+              retryTimer = undefined;
+              void attempt();
+            }, wait);
+          }
+        }
+      } catch (err) {
+        console.warn('[Push Recovery] Reintentando registro en siguiente oportunidad:', err);
+        if (!cancelled && !retryTimer) {
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined;
+            void attempt();
+          }, retryDelays[Math.min(failureIndex++, retryDelays.length - 1)]);
+        }
+      } finally {
+        busy = false;
       }
-    }
-  }, [currentUser]);
+    };
+
+    const onReturn = () => {
+      if (document.visibilityState === 'visible') void attempt();
+    };
+    const interval = window.setInterval(onReturn, 30 * 60 * 1000);
+    window.addEventListener('focus', onReturn);
+    window.addEventListener('online', onReturn);
+    document.addEventListener('visibilitychange', onReturn);
+    navigator.serviceWorker?.addEventListener('controllerchange', onReturn);
+    void attempt();
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      window.clearInterval(interval);
+      window.removeEventListener('focus', onReturn);
+      window.removeEventListener('online', onReturn);
+      document.removeEventListener('visibilitychange', onReturn);
+      navigator.serviceWorker?.removeEventListener('controllerchange', onReturn);
+    };
+  }, [currentUser?.uid, currentUser?.id]);
 
   const switchUser = (userId: string) => {
     const activeFbUser = auth.currentUser;
