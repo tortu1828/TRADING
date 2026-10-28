@@ -93,6 +93,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
 
   // Send Notifications Confirmation Modal
   const [showNotifyModal, setShowNotifyModal] = useState<boolean>(false);
+  const [showMissingUsersModal, setShowMissingUsersModal] = useState<boolean>(false);
   const [notifyError, setNotifyError] = useState<string | null>(null);
   const [notifySuccess, setNotifySuccess] = useState<boolean>(false);
 
@@ -210,6 +211,23 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
   const missingUsers = isClosed
     ? []
     : eligibleActiveUsers.filter((u) => !calculatedEligibleUids.has(u.uid || u.id));
+
+  // Solo diagnóstico visual: nunca usar coincidencias de código/correo
+  // para contar como procesado un UID distinto ni crear resultados automáticamente.
+  const getMissingUserDiagnostic = (user: UserProfile): string => {
+    const legacyMatch = rawUserResults.find((result) =>
+      (user.userCode && result.userCode && result.userCode.toLowerCase() === user.userCode.toLowerCase()) ||
+      (user.email && result.email && result.email.toLowerCase() === user.email.toLowerCase())
+    );
+
+    if (legacyMatch) {
+      return 'Existe un resultado con el mismo código o correo, pero con un UID diferente. Revisar identificación antes del cierre.';
+    }
+    if (user.entryCycleId && user.entryCycleId !== selectedCycleId) {
+      return `Sin resultado en este ciclo; ciclo de ingreso registrado: ${user.entryCycleId}. Verificar si le corresponde participar.`;
+    }
+    return 'No se encontró un resultado individual de este inversionista en el ciclo. Revisar su inclusión y registro contable.';
+  };
 
   // Top KPI calculations:
   // Si está CERRADO usa los agregados históricos o el consolidado snapshot.
@@ -1093,9 +1111,20 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             <p className="text-xs sm:text-base font-black text-slate-100 font-mono tracking-tight truncate">
               {Math.round(progressPercentage)}%
             </p>
-            <span className="text-[9px] sm:text-[10px] text-slate-500 font-mono truncate block">
-              {calculatedUsersCount}/{totalActiveUsers} users
-            </span>
+            {!isClosed && missingUsers.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => setShowMissingUsersModal(true)}
+                title="Ver inversionistas faltantes del ciclo"
+                className="text-[10px] sm:text-[11px] text-amber-300 font-mono underline decoration-dotted underline-offset-2 text-left min-h-[28px] cursor-pointer hover:text-amber-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400"
+              >
+                {calculatedUsersCount}/{totalActiveUsers} · Ver faltantes
+              </button>
+            ) : (
+              <span className="text-[9px] sm:text-[10px] text-slate-500 font-mono block">
+                {calculatedUsersCount}/{totalActiveUsers} users
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -1143,15 +1172,20 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
         </div>
 
         {!is100Percent && missingUsers.length > 0 && (
-          <div className="mt-2.5 p-2.5 rounded-xl bg-amber-950/30 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between">
-            <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowMissingUsersModal(true)}
+            className="mt-2.5 w-full min-h-[48px] p-2.5 rounded-xl bg-amber-950/30 hover:bg-amber-950/50 border border-amber-500/30 text-amber-300 text-xs flex flex-wrap items-center justify-between gap-2 text-left cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400"
+            aria-label={`Ver ${missingUsers.length} inversionistas faltantes del ciclo`}
+          >
+            <span className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
-              <span>
-                Faltan <strong>{missingUsers.length}</strong> usuarios por calcular antes de enviar notificaciones o congelar el ciclo.
-              </span>
-            </div>
-            <span className="text-[11px] font-mono text-amber-400/80">Revisa las bitácoras abajo ↓</span>
-          </div>
+              <span>Faltan <strong>{missingUsers.length}</strong> usuarios por verificar antes de cerrar el ciclo.</span>
+            </span>
+            <span className="flex items-center gap-1 font-bold underline underline-offset-2">
+              Ver quién falta <ChevronRight className="w-4 h-4" />
+            </span>
+          </button>
         )}
       </div>
 
@@ -2120,47 +2154,63 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
               Resumen Consolidado del Mes ({currentCycle.name})
             </h3>
           </div>
-          <span className="text-xs text-slate-400 font-mono">
-            {calculatedUsersCount} de {totalActiveUsers} usuarios procesados
-          </span>
+          {!isClosed && missingUsers.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setShowMissingUsersModal(true)}
+              className="min-h-[40px] text-xs text-amber-300 hover:text-amber-200 font-mono underline underline-offset-2 cursor-pointer text-right focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400"
+            >
+              {calculatedUsersCount} de {totalActiveUsers} usuarios · Ver faltantes
+            </button>
+          ) : (
+            <span className="text-xs text-slate-400 font-mono">
+              {calculatedUsersCount} de {totalActiveUsers} usuarios procesados
+            </span>
+          )}
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
           <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[11px] text-slate-400 uppercase font-semibold">Capital Total</span>
             <p className="text-base font-bold text-slate-100 font-mono mt-1">
-              {formatCOP(currentCycle.totalManagedCapital)}
+              {formatCOP(totalManagedCapital)}
             </p>
           </div>
 
           <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[11px] text-slate-400 uppercase font-semibold">Total USD Operado</span>
             <p className="text-base font-bold text-emerald-400 font-mono mt-1">
-              {formatUSD(currentCycle.totalGrossUsd)}
+              {formatUSD(totalUsdOperated)}
             </p>
           </div>
 
           <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[11px] text-slate-400 uppercase font-semibold">Total COP Generado</span>
             <p className="text-base font-bold text-slate-200 font-mono mt-1">
-              {formatCOP(currentCycle.totalGrossCop)}
+              {formatCOP(totalGrossCop)}
             </p>
           </div>
 
           <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[11px] text-slate-400 uppercase font-semibold">Ganancias Clientes</span>
             <p className="text-base font-bold text-indigo-300 font-mono mt-1">
-              {formatCOP(currentCycle.totalUsersProfitCop)}
+              {formatCOP(totalUserProfitCop)}
             </p>
           </div>
 
           <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
             <span className="text-[11px] text-slate-400 uppercase font-semibold">Comisión Admin</span>
             <p className="text-base font-bold text-amber-400 font-mono mt-1">
-              {formatCOP(currentCycle.totalAdminCommissionCop)}
+              {formatCOP(totalAdminCommissionCop)}
             </p>
           </div>
         </div>
+
+        {!isClosed && (
+          <p className="text-[11px] text-slate-500">
+            Resumen parcial calculado desde los resultados individuales registrados. Los importes definitivos quedan fijados al cerrar el ciclo.
+          </p>
+        )}
 
         {/* Master Execution Action Bar from Mockup */}
         <div className="flex flex-col lg:flex-row items-center justify-between gap-4 pt-4 border-t border-slate-800">
@@ -2168,7 +2218,18 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             <div className="flex items-center gap-2 bg-slate-950 px-3.5 py-2 rounded-xl border border-slate-800">
               <div className={`w-2 h-2 rounded-full ${is100Percent ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
               <span className="text-slate-400">Usuarios Calculados:</span>
-              <strong className="text-slate-100 font-bold">{calculatedUsersCount} / {totalActiveUsers}</strong>
+              {!isClosed && missingUsers.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setShowMissingUsersModal(true)}
+                  className="text-amber-300 hover:text-amber-200 font-bold underline underline-offset-2 min-h-[36px] px-1 cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400"
+                  title="Ver los inversionistas pendientes de este ciclo"
+                >
+                  {calculatedUsersCount} / {totalActiveUsers}
+                </button>
+              ) : (
+                <strong className="text-slate-100 font-bold">{calculatedUsersCount} / {totalActiveUsers}</strong>
+              )}
               <span className={is100Percent ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
                 ({Math.round(progressPercentage)}%)
               </span>
@@ -2279,6 +2340,102 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
           </div>
         )}
       </div>
+
+      {/* Detalle de la diferencia entre usuarios activos y resultados del ciclo.
+          Lectura solamente: no altera capital, operaciones, snapshots ni liquidaciones. */}
+      {showMissingUsersModal && !isClosed && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-5 bg-black/85 backdrop-blur-sm"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowMissingUsersModal(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="missing-cycle-users-title"
+            className="w-full max-w-2xl max-h-[88vh] flex flex-col rounded-2xl border border-amber-500/30 bg-slate-900 shadow-2xl text-slate-100 overflow-hidden"
+          >
+            <div className="flex items-start justify-between gap-3 p-4 sm:p-5 border-b border-slate-700 bg-slate-950/60">
+              <div className="min-w-0">
+                <h3 id="missing-cycle-users-title" className="font-extrabold text-base flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+                  Inversionistas pendientes ({missingUsers.length})
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  {currentCycle.name} · {calculatedUsersCount} de {totalActiveUsers} con registro individual del ciclo
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowMissingUsersModal(false)}
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl hover:bg-slate-800 cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400"
+                aria-label="Cerrar detalle de inversionistas pendientes"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto p-4 sm:p-5 space-y-3">
+              <p className="text-xs text-slate-400">
+                Este listado muestra los usuarios activos sin un resultado asociado a su UID en el ciclo seleccionado.
+                La falta de registro no significa que se deba asignar una ganancia automáticamente.
+              </p>
+              {missingUsers.length === 0 ? (
+                <div className="p-4 rounded-xl bg-emerald-950/20 border border-emerald-500/30 text-emerald-300 text-sm">
+                  No hay inversionistas pendientes en el ciclo seleccionado.
+                </div>
+              ) : missingUsers.map((user) => (
+                <div
+                  key={user.uid || user.id}
+                  className="p-3.5 sm:p-4 rounded-xl border border-slate-700 bg-slate-950/65 space-y-2"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold break-words">{user.fullName || 'Inversionista sin nombre'}</p>
+                      <p className="text-[11px] text-blue-300 font-mono">{user.userCode || 'Sin código'}</p>
+                    </div>
+                    <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-amber-950/50 text-amber-300 border border-amber-500/30">
+                      Sin resultado asociado
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-xs text-slate-300">
+                    <p>Capital actual: <strong>{formatCOP(Number(user.currentCapital || 0))}</strong></p>
+                    <p>Bitácora: <strong>{user.category || 'Sin categoría'}</strong></p>
+                  </div>
+                  <p className="text-[11px] text-slate-400 break-all">UID: {user.uid || user.id}</p>
+                  <p className="text-[11px] text-amber-200/90">{getMissingUserDiagnostic(user)}</p>
+                </div>
+              ))}
+              <p className="text-xs text-amber-300/85 border-t border-slate-700 pt-3">
+                Antes del cierre, revisa si la persona debía pertenecer al ciclo y por qué falta su registro.
+                No se crearán resultados ni se cambiará el contador desde esta ventana.
+              </p>
+            </div>
+            <div className="p-3.5 sm:p-4 border-t border-slate-700 flex justify-end gap-2">
+              {onNavigate && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMissingUsersModal(false);
+                    onNavigate('bitacoras');
+                  }}
+                  className="min-h-[44px] px-4 rounded-xl border border-blue-500/40 bg-blue-950/30 text-blue-200 hover:bg-blue-900/40 text-xs font-bold cursor-pointer"
+                >
+                  Ver bitácoras
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowMissingUsersModal(false)}
+                className="min-h-[44px] px-4 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-100 text-xs font-bold cursor-pointer"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL: Group Detail & Correction */}
       {selectedGroupForDetail && (
