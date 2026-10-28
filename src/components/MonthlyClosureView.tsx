@@ -55,6 +55,89 @@ interface MonthlyClosureViewProps {
   onNavigate?: (tab: string) => void;
 }
 
+/**
+ * Conciliación de identidad del cierre ACTIVO. Los campos id/uid son alias
+ * verificables del mismo perfil en /users; correo y userCode son etiquetas,
+ * NUNCA pruebas suficientes para asociar una ganancia.
+ *
+ * En caso de colisión o duplicado se retienen advertencias y se EXCLUYEN
+ * esos resultados de los agregados, bloqueando el cierre hasta revisarlos.
+ * No realiza escrituras ni cambia los registros financieros almacenados.
+ */
+export function reconcileActiveCycleResults(
+  eligibleUsers: UserProfile[],
+  rawResults: CycleUserResult[]
+): {
+  matchedByUserIndex: Map<number, CycleUserResult>;
+  matchedResults: CycleUserResult[];
+  issues: string[];
+  conflictedUserIndexes: Set<number>;
+} {
+  const ownersByIdentifier = new Map<string, Set<number>>();
+  const issues: string[] = [];
+  const conflictedUserIndexes = new Set<number>();
+
+  eligibleUsers.forEach((user, index) => {
+    const identifiers = new Set([user.id, user.uid].filter(
+      (identifier): identifier is string => typeof identifier === 'string' && identifier.trim().length > 0
+    ).map((identifier) => identifier.trim()));
+    if (identifiers.size === 0) {
+      issues.push(`Perfil sin ID ni UID: ${user.userCode || user.fullName || index}.`);
+      conflictedUserIndexes.add(index);
+    }
+    identifiers.forEach((identifier) => {
+      if (!ownersByIdentifier.has(identifier)) ownersByIdentifier.set(identifier, new Set());
+      ownersByIdentifier.get(identifier)!.add(index);
+    });
+  });
+
+  ownersByIdentifier.forEach((indexes, identifier) => {
+    if (indexes.size > 1) {
+      issues.push(`Identificador ${identifier} compartido por ${indexes.size} perfiles activos.`);
+      indexes.forEach((index) => conflictedUserIndexes.add(index));
+    }
+  });
+
+  const resultsByUserIndex = new Map<number, CycleUserResult[]>();
+  rawResults.forEach((result) => {
+    const identifiers = new Set([result.userId, result.userUid].filter(
+      (identifier): identifier is string => typeof identifier === 'string' && identifier.trim().length > 0
+    ).map((identifier) => identifier.trim()));
+    const matchedIndexes = new Set<number>();
+    identifiers.forEach((identifier) => {
+      ownersByIdentifier.get(identifier)?.forEach((index) => matchedIndexes.add(index));
+    });
+
+    if (matchedIndexes.size === 0) {
+      issues.push(`Resultado ${result.id || result.userCode || '(sin ID)'} sin identidad asociable a un participante activo.`);
+    } else if (matchedIndexes.size > 1) {
+      issues.push(`Resultado ${result.id || result.userCode || '(sin ID)'} coincide con varios perfiles activos.`);
+      matchedIndexes.forEach((index) => conflictedUserIndexes.add(index));
+    } else {
+      const index = [...matchedIndexes][0];
+      if (!resultsByUserIndex.has(index)) resultsByUserIndex.set(index, []);
+      resultsByUserIndex.get(index)!.push(result);
+    }
+  });
+
+  const matchedByUserIndex = new Map<number, CycleUserResult>();
+  resultsByUserIndex.forEach((results, index) => {
+    if (results.length > 1) {
+      issues.push(`${results.length} resultados para ${eligibleUsers[index].userCode || eligibleUsers[index].fullName || 'un participante'}; revisión obligatoria para evitar doble conteo.`);
+      conflictedUserIndexes.add(index);
+    } else if (!conflictedUserIndexes.has(index)) {
+      matchedByUserIndex.set(index, results[0]);
+    }
+  });
+
+  return {
+    matchedByUserIndex,
+    matchedResults: [...matchedByUserIndex.values()],
+    issues,
+    conflictedUserIndexes,
+  };
+}
+
 export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNavigate }) => {
   const { currentUser, isSuperAdmin } = useAuth();
   const activeCycle = dataStore.getActiveCycle();
@@ -175,14 +258,14 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
         u.participatesInTrading === true
       )
   );
-  const eligibleActiveUids = new Set(eligibleActiveUsers.map((u) => u.uid || u.id));
+  // El resultado del ciclo puede estar indexado por el ID del documento
+  // (ej. usr_admin) mientras el perfil usa otro UID de Firebase Auth.
+  const identityReconciliation = reconcileActiveCycleResults(eligibleActiveUsers, rawUserResults);
+  const hasIdentityIssues = !isClosed && identityReconciliation.issues.length > 0;
 
   const userResults = usesFrozenCycleSnapshot
-    ? rawUserResults
-    : rawUserResults.filter((r) => {
-        const uid = r.userUid || r.userId;
-        return eligibleActiveUids.has(uid);
-      });
+    ? rawUserResults // Históricos: no reconciliar contra usuarios actuales.
+    : identityReconciliation.matchedResults;
 
   const totalActiveUsers = usesFrozenCycleSnapshot
     ? (
@@ -192,25 +275,20 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
       )
     : eligibleActiveUsers.length;
 
-  // calculatedEligibleUids: Set de UIDs únicos para evitar que duplicados sumen más de 100%
-  const calculatedEligibleUids = new Set(
-    userResults.map((r) => r.userUid || r.userId).filter(Boolean)
-  );
+  const calculatedUsersCount = usesFrozenCycleSnapshot
+    ? (currentCycle.calculatedUsersCount || rawUserResults.length)
+    : identityReconciliation.matchedByUserIndex.size;
 
-  const calculatedUsersCount = isClosed
-    ? (currentCycle.calculatedUsersCount || userResults.length)
-    : calculatedEligibleUids.size;
-
-  // Cálculo de progreso exacto sin parches de Math.min(100, ...)
   const progressPercentage = totalActiveUsers === 0
     ? 0
-    : (calculatedEligibleUids.size / totalActiveUsers) * 100;
+    : (calculatedUsersCount / totalActiveUsers) * 100;
 
-  const is100Percent = totalActiveUsers > 0 && calculatedEligibleUids.size >= totalActiveUsers;
+  const is100Percent =
+    totalActiveUsers > 0 && calculatedUsersCount === totalActiveUsers && !hasIdentityIssues;
 
-  const missingUsers = isClosed
+  const missingUsers = usesFrozenCycleSnapshot
     ? []
-    : eligibleActiveUsers.filter((u) => !calculatedEligibleUids.has(u.uid || u.id));
+    : eligibleActiveUsers.filter((_, index) => !identityReconciliation.matchedByUserIndex.has(index));
 
   // Solo diagnóstico visual: nunca usar coincidencias de código/correo
   // para contar como procesado un UID distinto ni crear resultados automáticamente.
@@ -220,8 +298,12 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
       (user.email && result.email && result.email.toLowerCase() === user.email.toLowerCase())
     );
 
+    const userIndex = eligibleActiveUsers.indexOf(user);
+    if (identityReconciliation.conflictedUserIndexes.has(userIndex)) {
+      return 'Conflicto de identidad o múltiples resultados vinculados. Revisar antes del cierre; no se cuentan automáticamente.';
+    }
     if (legacyMatch) {
-      return 'Existe un resultado con el mismo código o correo, pero con un UID diferente. Revisar identificación antes del cierre.';
+      return 'Existe un resultado con el mismo código o correo, pero sin identidad inequívoca. Revisar identificación antes del cierre.';
     }
     if (user.entryCycleId && user.entryCycleId !== selectedCycleId) {
       return `Sin resultado en este ciclo; ciclo de ingreso registrado: ${user.entryCycleId}. Verificar si le corresponde participar.`;
@@ -582,6 +664,16 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
       setStatusMessage({
         type: 'error',
         text: 'No se pudo resolver el identificador canónico del ciclo a cerrar.',
+      });
+      return;
+    }
+
+    if (!is100Percent || hasIdentityIssues) {
+      setStatusMessage({
+        type: 'error',
+        text: hasIdentityIssues
+          ? 'Cierre bloqueado: se detectaron resultados sin identidad, duplicados o identificadores ambiguos. Revisa las alertas del cierre.'
+          : `Cierre bloqueado: solo ${calculatedUsersCount} de ${totalActiveUsers} inversionistas tienen resultado individual verificable.`,
       });
       return;
     }
@@ -1143,7 +1235,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   : 'bg-amber-950 text-amber-300 border border-amber-500/40'
               }`}
             >
-              {is100Percent ? '100% COMPLETO ✓' : `${Math.round(progressPercentage)}% PROCESADO`}
+              {hasIdentityIssues ? 'REVISIÓN DE IDENTIDAD' : is100Percent ? '100% COMPLETO ✓' : `${Math.round(progressPercentage)}% PROCESADO`}
             </span>
           </div>
 
@@ -1160,6 +1252,26 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             </span>
           </div>
         </div>
+
+        {hasIdentityIssues && (
+          <div role="alert" className="mt-3 rounded-xl border border-rose-500/50 bg-rose-950/30 p-3 text-xs text-rose-200">
+            <div className="flex items-center gap-2 font-bold mb-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              Cierre bloqueado: {identityReconciliation.issues.length} conflicto(s) de identidad en los resultados.
+            </div>
+            <ul className="list-disc pl-5 space-y-1 break-words">
+              {identityReconciliation.issues.slice(0, 5).map((issue, index) => (
+                <li key={index}>{issue}</li>
+              ))}
+              {identityReconciliation.issues.length > 5 && (
+                <li>Hay {identityReconciliation.issues.length - 5} conflicto(s) adicionales que también deben revisarse.</li>
+              )}
+            </ul>
+            <p className="mt-2 text-rose-100/80">
+              No se suman resultados ambiguos ni duplicados. No cambies los UID ni crees resultados desde esta pantalla.
+            </p>
+          </div>
+        )}
 
         {/* Progress Bar */}
         <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
@@ -2304,8 +2416,10 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                   : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
               }`}
               title={
-                !is100Percent
-                  ? 'Debes calcular todos los usuarios antes de cerrar el ciclo'
+                hasIdentityIssues
+                  ? 'Cierre bloqueado por resultados sin identidad verificable, ambiguos o duplicados'
+                  : !is100Percent
+                  ? 'Debes verificar los resultados de todos los usuarios antes de cerrar el ciclo'
                   : isClosing
                   ? 'Cierre en proceso...'
                   : hasUnresolvedRequests
@@ -2314,7 +2428,7 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
               }
             >
               <Lock className="w-4 h-4 shrink-0" />
-              <span className="text-center">{isClosing ? '⏳ PROCESANDO CIERRE...' : hasUnresolvedRequests ? '🔒 CIERRE BLOQUEADO (SOLICITUDES)' : '🔒 CERRAR CICLO'}</span>
+              <span className="text-center">{isClosing ? '⏳ PROCESANDO CIERRE...' : hasIdentityIssues ? '🔒 CIERRE BLOQUEADO (IDENTIDAD)' : hasUnresolvedRequests ? '🔒 CIERRE BLOQUEADO (SOLICITUDES)' : '🔒 CERRAR CICLO'}</span>
             </button>
           </div>
         </div>
@@ -2378,8 +2492,8 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
             </div>
             <div className="overflow-y-auto p-4 sm:p-5 space-y-3">
               <p className="text-xs text-slate-400">
-                Este listado muestra los usuarios activos sin un resultado asociado a su UID en el ciclo seleccionado.
-                La falta de registro no significa que se deba asignar una ganancia automáticamente.
+                Este listado muestra los participantes sin un único resultado verificable por su ID interno o UID de autenticación.
+                Un conflicto de identidad no autoriza a crear otra ganancia ni a editar el UID automáticamente.
               </p>
               {missingUsers.length === 0 ? (
                 <div className="p-4 rounded-xl bg-emerald-950/20 border border-emerald-500/30 text-emerald-300 text-sm">
@@ -2482,7 +2596,11 @@ export const MonthlyClosureView: React.FC<MonthlyClosureViewProps> = ({ onNaviga
                     </thead>
                     <tbody className="divide-y divide-slate-800 font-mono">
                       {selectedGroupForDetail.users.map((user) => {
-                        const res = userResults.find((r) => r.userId === user.id);
+                        const res = usesFrozenCycleSnapshot
+                          ? userResults.find((r) => r.userId === user.id)
+                          : identityReconciliation.matchedByUserIndex.get(eligibleActiveUsers.findIndex(
+                              (eligible) => eligible.id === user.id && eligible.uid === user.uid
+                            ));
                         return (
                           <tr key={user.id} className="hover:bg-slate-950/50">
                             <td className="p-2.5 font-sans">
