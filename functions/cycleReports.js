@@ -359,14 +359,15 @@ async function createCycleReportSnapshot(db, admin, cycleId, closureAttemptId, a
     const userCode = ur.userCode || profile.userCode || "S/C";
     const userNameSnapshot = ur.userName || ur.fullName || profile.fullName || "Inversionista";
 
-    let rawCategory = (ur.category || ur.bitacoraCategory || profile.category || "AZUL").toUpperCase();
+    let rawCategory = String(ur.cycleCategory || ur.initialCycleCategory || ur.category || ur.bitacoraCategory || profile.category || "AZUL").toUpperCase();
     if (!["AZUL", "VERDE", "NEGRA"].includes(rawCategory)) {
       rawCategory = "AZUL";
     }
     const cycleCategory = rawCategory;
 
-    const cycleCapitalCop = Math.round(Number(ur.capitalCop || ur.currentCapitalCop || ur.groupCapitalCop || 0));
-    const groupCapitalCop = Math.round(Number(ur.groupCapitalCop || cycleCapitalCop || 0));
+    // Capital individual congelado del ciclo; nunca inferirlo del capital agregado del grupo.
+    const cycleCapitalCop = Math.round(Number(ur.cycleCapitalCop ?? ur.initialCycleCapitalCop ?? ur.capitalCop ?? ur.currentCapitalCop ?? 0));
+    const groupCapitalCop = Math.round(Number(ur.groupCapitalCop ?? cycleCapitalCop));
     const userPercentage = Number(ur.userPercentage !== undefined ? ur.userPercentage : (profile.userPercentage || 75));
     const adminPercentage = Number(ur.adminPercentage !== undefined ? ur.adminPercentage : (profile.adminPercentage || 25));
     const usdOp = Number(ur.totalUsdOperated || 0);
@@ -949,7 +950,7 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
   doc.rect(MARGIN, curY, CONTENT_WIDTH, 42).fillAndStroke("#fefce8", "#fef08a");
   doc.fillColor("#854d0e").font("Helvetica-Bold").fontSize(8).text("CERTIFICACIÓN DE INMUTABILIDAD Y PROTECCIÓN DE DATOS:", MARGIN + 12, curY + 8);
   doc.fillColor("#713f12").font("Helvetica").fontSize(7).text(
-    `Este reporte fue compilado y congelado por el motor de transacciones de EasyTraders24 en la fecha de cierre. Los valores financieros, TRM ($${metadata.trmApplied || 0}) y participaciones registradas son definitivas e inmodificables. No admiten recálculo dinámico con base en saldos futuros o mutaciones posteriores de perfiles.`,
+    `Este reporte congela la TRM ($${metadata.trmApplied || 0}) y las liquidaciones individuales al cierre. El valor a desembolsar es ganancia no reinvertida; NO acredita que una transferencia esté pendiente o pagada. No admite recálculo dinámico desde perfiles mutables.`,
     MARGIN + 12,
     curY + 20,
     { width: CONTENT_WIDTH - 24, lineGap: 2 }
@@ -1008,7 +1009,29 @@ async function generateCycleReportPdfBuffer(db, cycleId, versionId) {
     const ROW_HEIGHT = 16;
     const MAX_PAGE_Y = PAGE_HEIGHT - MARGIN - 20;
 
+    let previousGroupCapital = null;
+    bObj.list.sort((a, b) =>
+      Number(a.groupCapitalCop || a.cycleCapitalCop || 0) - Number(b.groupCapitalCop || b.cycleCapitalCop || 0) ||
+      String(a.userCode || "").localeCompare(String(b.userCode || ""))
+    );
     bObj.list.forEach((u, uIdx) => {
+      const capitalGroup = Number(u.groupCapitalCop || u.cycleCapitalCop || 0);
+      if (previousGroupCapital !== capitalGroup) {
+        const groupUsers = bObj.list.filter((member) => Number(member.groupCapitalCop || member.cycleCapitalCop || 0) === capitalGroup);
+        if (rowY + ROW_HEIGHT + 23 > MAX_PAGE_Y) {
+          doc.addPage();
+          rowY = drawUserTableHeader(MARGIN, bObj.name, bObj.color);
+        }
+        doc.rect(MARGIN, rowY, CONTENT_WIDTH, 23).fill("#e2e8f0");
+        const groupedDisbursement = groupUsers.reduce((sum, member) => sum + Number(member.profitToDisburseCop || 0), 0);
+        const groupedProfit = groupUsers.reduce((sum, member) => sum + Number(member.userProfitCop || 0), 0);
+        doc.fillColor(C_TEXT_MAIN).font("Helvetica-Bold").fontSize(7.5).text(
+          `GRUPO ${formatCop(capitalGroup)}  |  ${groupUsers.length} invers.  |  Ganancia: ${formatCop(groupedProfit)}  |  A desembolsar: ${formatCop(groupedDisbursement)}`,
+          MARGIN + 9, rowY + 6, { width: CONTENT_WIDTH - 18 }
+        );
+        rowY += 23;
+        previousGroupCapital = capitalGroup;
+      }
       if (rowY + ROW_HEIGHT > MAX_PAGE_Y) {
         doc.addPage();
         rowY = drawUserTableHeader(MARGIN, bObj.name, bObj.color);

@@ -224,6 +224,58 @@ export const CycleReportViewer: React.FC = () => {
     });
   }, [userSnapshots, activeBitacoraTab, modalityFilter, searchTerm]);
 
+  // Agrupación exclusivamente visual a partir de los snapshots oficiales inmutables.
+  // El USD es atribuido a participantes; no equivale necesariamente a trades únicos del grupo.
+  const paymentGroups = useMemo(() => {
+    if (activeBitacoraTab === 'RESUMEN' || activeBitacoraTab === 'TODOS') return [];
+    const groups = new Map<number, CycleReportUserSnapshot[]>();
+    for (const user of filteredUsers) {
+      const capital = Number(user.groupCapitalCop ?? user.cycleCapitalCop ?? 0);
+      const key = Number.isFinite(capital) && capital > 0 ? capital : 0;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(user);
+    }
+    return Array.from(groups, ([capital, users]) => ({
+      capital,
+      users: [...users].sort((a, b) =>
+        (a.userCode || '').localeCompare(b.userCode || '', 'es')),
+      capitalConsolidado: users.reduce((sum, u) => sum + Number(u.cycleCapitalCop || 0), 0),
+      usdAtribuido: users.reduce((sum, u) => sum + Number(u.totalUsdOperated || 0), 0),
+      brutoCop: users.reduce((sum, u) => sum + Number(u.totalGrossCop || 0), 0),
+      gananciaCop: users.reduce((sum, u) => sum + Number(u.userProfitCop || 0), 0),
+      comisionCop: users.reduce((sum, u) => sum + Number(u.adminCommissionCop || 0), 0),
+      reinvertidoCop: users.reduce((sum, u) => sum + Number(u.profitAppliedCop || 0), 0),
+      desembolsoCop: users.reduce((sum, u) => sum + Number(u.profitToDisburseCop || 0), 0),
+    })).sort((a, b) => a.capital - b.capital);
+  }, [filteredUsers, activeBitacoraTab]);
+
+  // Exportación exclusivamente de lectura desde el snapshot vigente seleccionado.
+  const handleExportPaymentsCsv = () => {
+    if (!currentMetadata || !selectedCycleId || !selectedVersionId || filteredUsers.length === 0) return;
+    const safeCell = (value: string | number) => {
+      const raw = String(value ?? '');
+      // Evitar ejecución de fórmulas al abrir nombres/códigos en Excel.
+      const escaped = /^[\s]*[=+@-]/.test(raw) && typeof value === 'string' ? `'${raw}` : raw;
+      return `"${escaped.replace(/"/g, '""')}"`;
+    };
+    const headers = ['Ciclo', 'Versión', 'TRM cierre COP/USD', 'Bitácora', 'Grupo COP', 'Código',
+      'Inversionista', 'Capital individual COP', 'USD atribuidos', 'Bruto COP',
+      'Ganancia cliente COP', 'Comisión admin COP', 'Reinvertido COP', 'A desembolsar COP', 'Pago confirmado'];
+    const rows = filteredUsers.map((u) => [selectedCycleId, selectedVersionId, currentMetadata.trmApplied,
+      u.cycleCategory, u.groupCapitalCop, u.userCode, u.userNameSnapshot,
+      u.cycleCapitalCop, u.totalUsdOperated, u.totalGrossCop, u.userProfitCop,
+      u.adminCommissionCop, u.profitAppliedCop, u.profitToDisburseCop, 'NO VERIFICADO']);
+    const content = '\uFEFF' + [headers, ...rows].map(row => row.map(safeCell).join(';')).join('\r\n');
+    const url = window.URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8;' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Pagos_${selectedCycleId}_${selectedVersionId}_${activeBitacoraTab}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+  };
+
   // SEGURIDAD ZERO-TRUST: Si no es SuperAdmin, bloquear con pantalla explícita
   if (!isSuperAdmin) {
     return (
@@ -540,7 +592,7 @@ export const CycleReportViewer: React.FC = () => {
               <span className="text-base lg:text-lg font-bold text-amber-400 block">
                 {formatCOP(currentMetadata.totalDisbursementCop)}
               </span>
-              <span className="text-[10px] text-amber-500/70 mt-1 block">Retiro efectivo/banco</span>
+              <span className="text-[10px] text-amber-500/70 mt-1 block">Ganancia por desembolsar; pago no verificado</span>
             </div>
 
             <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 col-span-2 md:col-span-2">
@@ -775,8 +827,103 @@ export const CycleReportViewer: React.FC = () => {
               </div>
             )}
 
+            {/* Informe de pagos agrupado por capital dentro de la bitácora seleccionada. */}
+            {(activeBitacoraTab === 'AZUL' || activeBitacoraTab === 'VERDE' || activeBitacoraTab === 'NEGRA') && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-sm font-bold text-white">Liquidación individual por grupo — Bitácora {activeBitacoraTab}</h4>
+                  <button type="button" onClick={handleExportPaymentsCsv} disabled={filteredUsers.length === 0}
+                    className="px-3 py-1.5 text-xs font-bold bg-slate-800 border border-slate-600 rounded-lg text-amber-300 hover:bg-slate-700 disabled:opacity-40">
+                    Exportar pagos (CSV / Excel)
+                  </button>
+                  <span className="text-xs font-mono text-amber-300">
+                    TRM definitiva del cierre: {formatCOP(currentMetadata.trmApplied)} / USD
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Valores del informe oficial congelado al cierre. «A desembolsar» es la ganancia
+                  después de reinversión, no confirma que una transferencia siga pendiente ni que ya se haya pagado.
+                  Los USD mostrados son los asignados a cada inversionista; no representan necesariamente
+                  el volumen único de trades ejecutados por el grupo.
+                </p>
+                {paymentGroups.length === 0 ? (
+                  <div className="rounded-xl border border-slate-800 p-6 text-center text-slate-400 text-sm">
+                    No hay grupos con los filtros seleccionados.
+                  </div>
+                ) : paymentGroups.map((group) => (
+                  <details key={`${activeBitacoraTab}_${group.capital}`} className="group rounded-xl border border-slate-700 bg-slate-950/60" open={paymentGroups.length === 1}>
+                    <summary className="cursor-pointer list-none p-4 flex flex-wrap items-center justify-between gap-3 hover:bg-slate-800/40 rounded-xl">
+                      <div className="flex items-center gap-2">
+                        <ChevronRight className="h-4 w-4 text-amber-400 transition-transform group-open:rotate-90" />
+                        <div>
+                          <div className="text-sm font-bold text-white">
+                            Grupo {group.capital > 0 ? formatCOP(group.capital) : 'sin capital identificado'}
+                          </div>
+                          <div className="text-xs text-slate-400">
+                            {group.users.length} inversionista(s) · Capital conjunto {formatCOP(group.capitalConsolidado)}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs font-mono">
+                        <span className="text-blue-300">USD atribuidos: {formatUSD(group.usdAtribuido)}</span>
+                        <span className="text-emerald-300">Ganancia: {formatCOP(group.gananciaCop)}</span>
+                        <span className="text-amber-300 font-bold">A desembolsar: {formatCOP(group.desembolsoCop)}</span>
+                      </div>
+                    </summary>
+                    <div className="border-t border-slate-800 p-3 space-y-3">
+                      <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+                        {[
+                          ['Bruto COP', group.brutoCop],
+                          ['Ganancia clientes', group.gananciaCop],
+                          ['Comisión admin', group.comisionCop],
+                          ['Reinvertido', group.reinvertidoCop],
+                          ['A desembolsar', group.desembolsoCop],
+                        ].map(([label, value]) => (
+                          <div key={String(label)} className="rounded-lg bg-slate-900 border border-slate-800 p-2">
+                            <div className="text-[10px] text-slate-400">{label}</div>
+                            <div className="text-xs text-white font-bold font-mono">{formatCOP(Number(value))}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs text-slate-300 min-w-[820px]">
+                          <thead className="text-[10px] uppercase text-slate-400 border-b border-slate-700">
+                            <tr>
+                              <th className="p-2">Inversionista</th>
+                              <th className="p-2 text-right">USD propio</th>
+                              <th className="p-2 text-right">Bruto COP</th>
+                              <th className="p-2 text-right">Ganancia</th>
+                              <th className="p-2 text-right">Comisión admin</th>
+                              <th className="p-2 text-right">Reinvertido</th>
+                              <th className="p-2 text-right text-amber-400">A desembolsar</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800">
+                            {group.users.map((u, idx) => (
+                              <tr key={`${u.userUid}_${idx}`}>
+                                <td className="p-2">
+                                  <span className="font-semibold text-white block">{u.userNameSnapshot}</span>
+                                  <span className="text-[10px] text-slate-500">{u.userCode}</span>
+                                </td>
+                                <td className="p-2 text-right font-mono">{formatUSD(u.totalUsdOperated)}</td>
+                                <td className="p-2 text-right font-mono">{formatCOP(u.totalGrossCop)}</td>
+                                <td className="p-2 text-right font-mono text-emerald-400">{formatCOP(u.userProfitCop)}</td>
+                                <td className="p-2 text-right font-mono">{formatCOP(u.adminCommissionCop)}</td>
+                                <td className="p-2 text-right font-mono">{formatCOP(u.profitAppliedCop)}</td>
+                                <td className="p-2 text-right font-bold font-mono text-amber-400">{formatCOP(u.profitToDisburseCop)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </details>
+                ))}
+              </div>
+            )}
+
             {/* TAB: Listado Detallado de Usuarios (Azul, Verde, Negra o Todos) */}
-            {activeBitacoraTab !== 'RESUMEN' && (
+            {activeBitacoraTab === 'TODOS' && (
               <div className="overflow-x-auto rounded-xl border border-slate-800">
                 <table className="w-full text-left text-xs text-slate-300">
                   <thead className="text-[10px] uppercase tracking-wider bg-slate-950 text-slate-400 border-b border-slate-800">
