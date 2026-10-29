@@ -153,6 +153,16 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
     }
   }, [propSelectedCycleId]);
 
+  // Al entrar a reinversion durante PREPARING, seleccionar automaticamente
+  // el ciclo cerrado de origen en vez de la ficha del ciclo sucesor.
+  useEffect(() => {
+    if (currentTab === 'reinvestment' && isCloseToStartCase &&
+        selectedCycleId === preparingCycleId) {
+      const sourceId = getCloseToStartSourceId();
+      if (sourceId) setSelectedCycleId(sourceId);
+    }
+  }, [currentTab, isCloseToStartCase, selectedCycleId, preparingCycleId]);
+
   // Fail-safe initialization to activeCycleId
   useEffect(() => {
     if (activeCycle && (!selectedCycleId || !dataStore.getCycleById(selectedCycleId))) {
@@ -320,6 +330,13 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
   // FINANCIAL SNAPSHOTS FOR REINVESTMENT
   const selectedCycleObj = allCycles.find((c) => c.cycleId === selectedCycleId);
   const isCycleClosing = selectedCycleObj?.isClosing === true;
+  // Después de cerrar A, la radicación todavía corresponde a A y se dirige
+  // exclusivamente al sucesor B en preparación. Nunca a un ciclo antiguo.
+  const canSubmitForSelectedCycle =
+    (selectedCycleId === activeCycle?.cycleId && selectedCycleObj?.operationalStatus === 'STARTED' && selectedCycleObj?.status !== 'CLOSED') ||
+    (isCloseToStartCase && selectedCycleObj?.status === 'CLOSED' &&
+      selectedCycleObj?.nextCycleId === preparingCycleId &&
+      dataStore.getCycleById(preparingCycleId || '')?.operationalStatus === 'PREPARING');
 
   // Solo presentación: la lógica interna continúa usando cycleId.
   const getCycleDisplayName = (cycleId?: string | null) => {
@@ -405,8 +422,8 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
 
   const handleOpenCard1Modal = () => {
     setReinvestError(null);
-    if (selectedCycleId !== activeCycle?.cycleId) {
-      setReinvestError('Solo se pueden radicar solicitudes de reinversión en el ciclo operativo activo.');
+    if (!canSubmitForSelectedCycle) {
+      setReinvestError('Selecciona el último ciclo cerrado que tenga su siguiente ciclo en preparación.');
       return;
     }
     if (isCycleClosing) {
@@ -435,8 +452,8 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
 
   const handleOpenCard2Modal = () => {
     setReinvestError(null);
-    if (selectedCycleId !== activeCycle?.cycleId) {
-      setReinvestError('Solo se pueden radicar solicitudes de reinversión en el ciclo operativo activo.');
+    if (!canSubmitForSelectedCycle) {
+      setReinvestError('Selecciona el último ciclo cerrado que tenga su siguiente ciclo en preparación.');
       return;
     }
     if (isCycleClosing) {
@@ -464,8 +481,8 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
 
   const handleConfirmSubmit = async () => {
     if (!reinvestModalConfig) return;
-    if (selectedCycleId !== activeCycle?.cycleId) {
-      setReinvestError('Solo se pueden radicar solicitudes de reinversión en el ciclo operativo activo.');
+    if (!canSubmitForSelectedCycle) {
+      setReinvestError('Selecciona el último ciclo cerrado que tenga su siguiente ciclo en preparación.');
       return;
     }
     setIsSubmittingReinvest(true);
@@ -501,7 +518,9 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
         setReinvestSuccessMessage(null);
       }, 4000);
     } catch (err: any) {
-      setReinvestError(err.message || 'Error al radicar la solicitud de reinversión.');
+      // Mostrar el rechazo dentro de la ventana de confirmación, no detrás.
+      // El usuario debe poder leer el mensaje y corregir o cancelar.
+      setReinvestError(err?.message || 'Error al radicar la solicitud. No se guardó ninguna solicitud local.');
     } finally {
       setIsSubmittingReinvest(false);
     }
@@ -1504,12 +1523,12 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
               <button
                 type="button"
                 onClick={handleOpenCard1Modal}
-                disabled={reinvestableProfitCop < 1_000_000 || !!pendingRequestForCycle || isCycleClosing || (selectedCycleId !== activeCycle?.cycleId && !isCloseToStartCase)}
+                disabled={reinvestableProfitCop < 1_000_000 || !!pendingRequestForCycle || isCycleClosing || !canSubmitForSelectedCycle}
                 className="w-full py-3 bg-teal-600 hover:bg-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-bold text-xs shadow-lg shadow-teal-600/20 transition cursor-pointer flex items-center justify-center gap-2 mt-4"
               >
                 <Coins className="w-4 h-4" />
                 <span>
-                  {selectedCycleId !== activeCycle?.cycleId && !isCloseToStartCase
+                  {!canSubmitForSelectedCycle
                     ? 'Solo Disponible en Ciclo Activo'
                     : isCycleClosing
                     ? 'Cierre en Proceso (Bloqueado)'
@@ -1630,12 +1649,12 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
               <button
                 type="button"
                 onClick={handleOpenCard2Modal}
-                disabled={!!pendingRequestForCycle || isCycleClosing || (selectedCycleId !== activeCycle?.cycleId && !isCloseToStartCase)}
+                disabled={!!pendingRequestForCycle || isCycleClosing || !canSubmitForSelectedCycle}
                 className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-bold text-xs shadow-lg shadow-blue-600/20 transition cursor-pointer flex items-center justify-center gap-2 mt-4"
               >
                 <Wallet className="w-4 h-4" />
                 <span>
-                  {selectedCycleId !== activeCycle?.cycleId && !isCloseToStartCase
+                  {!canSubmitForSelectedCycle
                     ? 'Solo Disponible en Ciclo Activo'
                     : isCycleClosing
                     ? 'Cierre en Proceso (Bloqueado)'
@@ -1769,6 +1788,12 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
                   </button>
                 </div>
 
+                {reinvestError && (
+                  <div role="alert" className="p-3 rounded-xl border border-red-500/60 bg-red-950/70 text-red-200 text-xs">
+                    {reinvestError}
+                  </div>
+                )}
+
                 <div className="space-y-3 text-xs">
                   <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1 font-mono">
                     <div className="flex justify-between text-slate-400">
@@ -1825,7 +1850,7 @@ export const UserPortalView: React.FC<UserPortalViewProps> = ({
                   </div>
 
                   <div className="p-3 rounded-xl bg-blue-950/40 border border-blue-500/30 text-blue-200/90 text-[11px] leading-relaxed">
-                    <strong>Importante:</strong> Esta solicitud será procesada formalmente por el administrador. El capital del inversionista no mutará de inmediato; se aplicará oficialmente durante el cierre del ciclo operativo (APPROVED ≠ APPLIED).
+                    <strong>Importante:</strong> Radicar no modifica el capital ni efectúa pagos. Si el ciclo de origen ya cerró, la solicitud requerirá verificar desembolsos anteriores y el aumento aprobado se aplicará al inicio del ciclo siguiente, no al cierre ya realizado.
                   </div>
                 </div>
 

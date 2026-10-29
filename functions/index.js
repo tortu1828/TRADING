@@ -5884,23 +5884,20 @@ exports.submitReinvestmentRequestCallable = onCall(
         throw new HttpsError("not-found", `El ciclo especificado (${sourceCycleId}) no existe.`);
       }
       const cycleData = cycleDocSnap.data() || {};
-      if (cycleData.status === "CLOSED" || cycleData.isClosing === true) {
-        throw new HttpsError(
-          "failed-precondition",
-          "El ciclo se encuentra en proceso de cierre. Ya no se admiten nuevas solicitudes para este periodo."
-        );
+      // Una solicitud posterior al cierre pertenece al ciclo A ya cerrado,
+      // pero SOLO puede radicarse mientras su sucesor B siga en PREPARING.
+      const isPostClosureRequest = cycleData.status === "CLOSED";
+      if (cycleData.isClosing === true) {
+        throw new HttpsError("failed-precondition", "El cierre transaccional sigue en proceso. No se pueden radicar solicitudes.");
       }
-      if (cycleData.status !== "OPEN" && cycleData.status !== "REOPENED") {
-        throw new HttpsError(
-          "failed-precondition",
-          `El ciclo (${sourceCycleId}) no se encuentra abierto/activo para solicitudes (estado actual: ${cycleData.status || "DESCONOCIDO"}). Solo ciclos con estado OPEN o REOPENED admiten nuevas radicaciones.`
-        );
+      if (!isPostClosureRequest && cycleData.status !== "OPEN" && cycleData.status !== "REOPENED") {
+        throw new HttpsError("failed-precondition", `Ciclo origen no elegible: ${cycleData.status || "DESCONOCIDO"}.`);
       }
-      if (cycleData.operationalStatus !== "STARTED") {
-        throw new HttpsError(
-          "failed-precondition",
-          `SOURCE_NOT_STARTED: El ciclo origen ${sourceCycleId} debe estar en estado operativo STARTED para recibir solicitudes de reinversión (estado operativo actual: ${cycleData.operationalStatus || "UNDEFINED"}).`
-        );
+      if (!isPostClosureRequest && cycleData.operationalStatus !== "STARTED") {
+        throw new HttpsError("failed-precondition", `SOURCE_NOT_STARTED: El ciclo ${sourceCycleId} no está STARTED.`);
+      }
+      if (isPostClosureRequest && !(Number(cycleData.closureVersion) > 0)) {
+        throw new HttpsError("failed-precondition", "CLOSURE_NOT_FINAL: No hay versión de cierre definitiva para el ciclo origen.");
       }
       if (!cycleData.nextCycleId || typeof cycleData.nextCycleId !== "string" || !cycleData.nextCycleId.trim()) {
         throw new HttpsError(
@@ -5926,11 +5923,17 @@ exports.submitReinvestmentRequestCallable = onCall(
           `TARGET_CYCLE_NOT_OPEN: El ciclo sucesor (${targetCycleId}) no se encuentra abierto (estado actual: ${targetCycleData.status || "UNKNOWN"}).`
         );
       }
-      if (targetCycleData.operationalStatus !== "PREPARING") {
+      if (targetCycleData.operationalStatus !== "PREPARING" || targetCycleData.isStarting === true) {
         throw new HttpsError(
           "failed-precondition",
-          `TARGET_CYCLE_NOT_PREPARING: El ciclo sucesor (${targetCycleId}) debe estar en estado operativo PREPARING (estado actual: ${targetCycleData.operationalStatus || "UNKNOWN"}).`
+          `TARGET_CYCLE_NOT_PREPARING: El ciclo sucesor (${targetCycleId}) ya no está disponible para solicitudes.`
         );
+      }
+      if (isPostClosureRequest && (
+        Number(targetCycleData.sourceClosureVersion) !== Number(cycleData.closureVersion) ||
+        targetCycleData.preparationNeedsReview === true
+      )) {
+        throw new HttpsError("failed-precondition", "STALE_PREPARATION_STATE: El siguiente ciclo requiere conciliar la versión de cierre antes de radicar solicitudes.");
       }
       if (targetCycleData.previousCycleId !== sourceCycleId.trim()) {
         throw new HttpsError(
@@ -5961,6 +5964,9 @@ exports.submitReinvestmentRequestCallable = onCall(
       }
 
       const resData = userResDocSnap.data() || {};
+      if (isPostClosureRequest && resData.isCycleClosed !== true) {
+        throw new HttpsError("failed-precondition", "CYCLE_RESULT_NOT_FINAL: Falta la liquidación definitiva del inversionista.");
+      }
       const cycleProfitSnapshotCop = Number(resData.userProfitCop) || 0;
       const initialCycleCapitalCop = Number(resData.cycleCapitalCop || 0);
       const effectiveCycleCapitalCop = Number(
@@ -6115,6 +6121,11 @@ exports.submitReinvestmentRequestCallable = onCall(
         userEmail: userData.email || "",
         sourceCycleId: sourceCycleId.trim(),
         targetCycleId: targetCycleId,
+        postClosureRequest: isPostClosureRequest,
+        sourceClosureVersion: isPostClosureRequest ? Number(cycleData.closureVersion) : null,
+        // El inicio de B requiere el capital asegurado, no solo el capital previo.
+        securedNextCapitalCop: isPostClosureRequest ? currentCapitalSnapshotCop + profitAppliedCop : null,
+        projectedNextCapitalCop: isPostClosureRequest ? projectedCapitalCop : null,
         fundingReconciliationStatus: "OK",
         fundingReconciliationReason: null,
         modality,
@@ -6149,6 +6160,8 @@ exports.submitReinvestmentRequestCallable = onCall(
         resolvedByUid: null,
         rejectionReason: null,
         appliedAtCycleClosure: false,
+        profitPayoutReviewedAt: null,
+        profitPayoutReviewedByUid: null,
         appliedAt: null,
         ...(previousRejectionHistory.length > 0 ? { rejectionHistory: previousRejectionHistory, resubmittedAt: nowIso } : {}),
       };
@@ -6251,7 +6264,7 @@ exports.adminResolveReinvestmentCallable = onCall(
       throw new HttpsError("permission-denied", "Solo administradores autorizados pueden aprobar o rechazar solicitudes.");
     }
 
-    const { reinvestmentId, action, rejectionReason } = request.data || {};
+    const { reinvestmentId, action, rejectionReason, confirmNoPriorProfitPayout } = request.data || {};
     if (!reinvestmentId || typeof reinvestmentId !== "string") {
       throw new HttpsError("invalid-argument", "reinvestmentId es obligatorio.");
     }
@@ -6305,11 +6318,18 @@ exports.adminResolveReinvestmentCallable = onCall(
           "El ciclo está en proceso de cierre transaccional. No se pueden modificar solicitudes hasta que finalice o se libere el cierre."
         );
       }
-      if (cycleAData.status === "CLOSED") {
-        throw new HttpsError(
-          "failed-precondition",
-          "El ciclo de origen ya se encuentra cerrado. No se pueden modificar solicitudes de ciclos finalizados."
-        );
+      const isPostClosureRequest = cycleAData.status === "CLOSED";
+      if (isPostClosureRequest) {
+        if (reinvData.postClosureRequest !== true ||
+            !(Number(reinvData.sourceClosureVersion) > 0) ||
+            Number(reinvData.sourceClosureVersion) !== Number(cycleAData.closureVersion)) {
+          throw new HttpsError("failed-precondition", "CLOSED_SOURCE_REQUEST_INVALID: No es una solicitud poscierre verificada.");
+        }
+        if (cycleBData.status !== "OPEN" || cycleBData.operationalStatus !== "PREPARING" ||
+            cycleBData.isStarting === true || cycleBData.preparationNeedsReview === true ||
+            Number(cycleBData.sourceClosureVersion) !== Number(cycleAData.closureVersion)) {
+          throw new HttpsError("failed-precondition", "El ciclo siguiente ya no está en preparación o requiere conciliación.");
+        }
       }
 
       if (reinvData.status === "APPLIED" || reinvData.appliedAtCycleClosure === true) {
@@ -6318,6 +6338,36 @@ exports.adminResolveReinvestmentCallable = onCall(
 
       const cashInjectionCop = Number(reinvData.cashInjectionCop || 0);
       const isCapitalInjectionWithCash = reinvData.modality === "CAPITAL_INJECTION" && cashInjectionCop > 0;
+      const profitAppliedCop = Number(reinvData.profitAppliedCop || 0);
+      const isApprovalAction = ["APPROVE", "PREAPPROVE", "CONFIRM_CASH_AND_APPROVE"].includes(action);
+      // Las ganancias de un ciclo cerrado pueden haber sido desembolsadas.
+      // La administración confirma explícitamente que no se pagaron y se revisan
+      // también los desembolsos guardados (no confiar solo en el cliente).
+      if (isPostClosureRequest && isApprovalAction && profitAppliedCop > 0) {
+        const disbSnap = await transaction.get(
+          db.collection("disbursements").where("sourceCycleId", "==", sourceCycleId)
+        );
+        const blocked = disbSnap.docs.some((d) => {
+          const payout = d.data() || {};
+          return (payout.userUid === reinvData.userUid || payout.userId === reinvData.userId) &&
+            String(payout.disbursementSource || "PROFIT").toUpperCase() === "PROFIT" &&
+            payout.status !== "REJECTED";
+        });
+        if (blocked) {
+          throw new HttpsError("failed-precondition", "PROFIT_PAYOUT_EXISTS: Existe un desembolso de ganancias del ciclo. Resolverlo antes de aprobar la reinversión.");
+        }
+        const alreadyVerified = Boolean(reinvData.profitPayoutReviewedAt && reinvData.profitPayoutReviewedByUid);
+        if (!alreadyVerified && confirmNoPriorProfitPayout !== true) {
+          throw new HttpsError("failed-precondition", "CONFIRM_PROFIT_NOT_PAID: La administración debe verificar que esas ganancias no fueron pagadas ni comprometidas fuera de la aplicación.");
+        }
+        const resultSnap = await transaction.get(
+          db.collection("cycleUserResults").doc(`${sourceCycleId}_${reinvData.userUid || reinvData.userId}`)
+        );
+        if (!resultSnap.exists || resultSnap.data()?.isCycleClosed !== true ||
+            profitAppliedCop > Number(resultSnap.data()?.userProfitCop || 0)) {
+          throw new HttpsError("failed-precondition", "PROFIT_RESULT_MISMATCH: La ganancia final no respalda el monto solicitado.");
+        }
+      }
 
       // VALIDACIONES POR ACCIÓN
       if (action === "APPROVE") {
@@ -6358,6 +6408,10 @@ exports.adminResolveReinvestmentCallable = onCall(
         resolvedBy: adminName,
         resolvedByUid: authUid,
       };
+      if (isPostClosureRequest && isApprovalAction && profitAppliedCop > 0) {
+        updateFields.profitPayoutReviewedAt = reinvData.profitPayoutReviewedAt || nowIso;
+        updateFields.profitPayoutReviewedByUid = reinvData.profitPayoutReviewedByUid || authUid;
+      }
 
       if (action === "APPROVE") {
         newStatus = "APPROVED";
@@ -6437,7 +6491,7 @@ exports.adminResolveReinvestmentCallable = onCall(
     if (action === "APPROVE" || action === "CONFIRM_CASH_AND_APPROVE") {
       deterministicNotifId = `notif_reinv_${reinvestmentId}_v${requestVersion}_APPROVED`;
       notifTitle = "¡Solicitud Aprobada!";
-      notifMsg = `Tu solicitud de ${modalityLabel} fue aprobada. Tu nuevo capital proyectado (${reinvData.projectedCategory}) se aplicará al cierre formal del ciclo.`;
+      notifMsg = `Tu solicitud de ${modalityLabel} fue aprobada. Tu capital proyectado (${reinvData.projectedCategory}) se aplicará en el siguiente ciclo operativo, sujeto a las verificaciones financieras.`;
     } else if (action === "PREAPPROVE") {
       deterministicNotifId = `notif_reinv_${reinvestmentId}_v${requestVersion}_PREAPPROVED`;
       notifTitle = "¡Solicitud Preaprobada!";
@@ -11150,6 +11204,32 @@ exports.adminStartCycleCallable = onCall(
       if (hasUnresolvedRecon) {
         await safelyReleaseStartLock();
         throw new HttpsError("failed-precondition", `UNRESOLVED_FUNDING_RECONCILIATION: Existen solicitudes con conciliación pendiente (NEEDS_REVIEW).`);
+      }
+
+      // GUARD post-cierre: jamás aplicar ganancias poscierre si existen pagos
+      // de utilidades en el ciclo previo, o si falta la verificación administrativa.
+      const postCloseApproved = Array.from(reinvDocsMap.values()).filter(
+        (r) => r.status === "APPROVED" && r.postClosureRequest === true && Number(r.profitAppliedCop || 0) > 0
+      );
+      if (postCloseApproved.length > 0) {
+        const profitDisbsSnap = await db.collection("disbursements").where("sourceCycleId", "==", sourceCycleId).get();
+        for (const req of postCloseApproved) {
+          if (!req.profitPayoutReviewedAt || !req.profitPayoutReviewedByUid ||
+              Number(req.sourceClosureVersion) !== Number(cycleBData.sourceClosureVersion) ||
+              Number(req.securedNextCapitalCop) !== Number(req.currentCapitalSnapshotCop) + Number(req.profitAppliedCop)) {
+            await safelyReleaseStartLock();
+            throw new HttpsError("failed-precondition", `POST_CLOSE_PROFIT_NOT_RECONCILED: Solicitud ${req.id} sin conciliación válida.`);
+          }
+          const paidConflict = profitDisbsSnap.docs.some((d) => {
+            const disb = d.data() || {};
+            return (disb.userUid === req.userUid || disb.userId === req.userId) &&
+              String(disb.disbursementSource || "PROFIT").toUpperCase() === "PROFIT" && disb.status !== "REJECTED";
+          });
+          if (paidConflict) {
+            await safelyReleaseStartLock();
+            throw new HttpsError("failed-precondition", `POST_CLOSE_PROFIT_PAYOUT_CONFLICT: Solicitud ${req.id} tiene desembolso incompatible.`);
+          }
+        }
       }
 
       // GUARD 5: Pending or Needs Review requests

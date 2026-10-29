@@ -848,6 +848,7 @@ export const firestoreService = {
     reinvestmentId: string;
     action: 'APPROVE' | 'PREAPPROVE' | 'CONFIRM_CASH_AND_APPROVE' | 'REJECT' | 'NEEDS_REVIEW';
     rejectionReason?: string;
+    confirmNoPriorProfitPayout?: boolean;
   }): Promise<{ success: boolean; reinvestment: ReinvestmentRequest; message: string }> {
     const callable = httpsCallable(functions, 'adminResolveReinvestmentCallable');
     const response = await callable(payload);

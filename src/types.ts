@@ -440,6 +440,10 @@ export interface ReinvestmentRequest {
   userEmail?: string;
   sourceCycleId: string;
   targetCycleId?: string;
+  postClosureRequest?: boolean;
+  sourceClosureVersion?: number | null;
+  profitPayoutReviewedAt?: string | null;
+  profitPayoutReviewedByUid?: string | null;
   modality: ReinvestmentModality;
   clientRequestId?: string | null;
 

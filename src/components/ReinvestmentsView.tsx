@@ -335,12 +335,17 @@ export const ReinvestmentsView: React.FC = () => {
 
   // Actions
   const handlePreapprove = async (req: ReinvestmentRequest) => {
+    const needsProfitReview = req.postClosureRequest === true && Number(req.profitAppliedCop || 0) > 0;
+    if (needsProfitReview && !window.confirm(
+      `CONFIRMACIÓN FINANCIERA: ¿Verificaste que las ganancias del ciclo cerrado de ${req.userName} NO han sido pagadas ni comprometidas por fuera de EasyTraders? Si no estás seguro, cancela y revisa Tesorería.`
+    )) return;
     try {
       setActionLoadingId(req.id);
       await dataStore.preapproveReinvestment(
         req.id,
         currentUser?.uid || 'admin_root_uid',
-        currentUser?.fullName || 'Administrador Principal'
+        currentUser?.fullName || 'Administrador Principal',
+        needsProfitReview
       );
       setStatusMessage({
         type: 'success',
@@ -380,12 +385,17 @@ export const ReinvestmentsView: React.FC = () => {
   };
 
   const handleDirectApprove = async (req: ReinvestmentRequest) => {
+    const needsProfitReview = req.postClosureRequest === true && Number(req.profitAppliedCop || 0) > 0;
+    if (needsProfitReview && !window.confirm(
+      `CONFIRMACIÓN FINANCIERA: ¿Verificaste que las ganancias del ciclo cerrado de ${req.userName} NO han sido pagadas ni comprometidas por fuera de EasyTraders? Si no estás seguro, cancela y revisa Tesorería.`
+    )) return;
     try {
       setActionLoadingId(req.id);
       await dataStore.approveReinvestment(
         req.id,
         currentUser?.uid || 'admin_root_uid',
-        currentUser?.fullName || 'Administrador Principal'
+        currentUser?.fullName || 'Administrador Principal',
+        needsProfitReview
       );
       setStatusMessage({
         type: 'success',

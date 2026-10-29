@@ -4389,7 +4389,8 @@ class DataStore {
   public async preapproveReinvestment(
     requestId: string,
     adminUid: string = 'admin_root_uid',
-    adminName: string = 'Administrador Principal'
+    adminName: string = 'Administrador Principal',
+    confirmNoPriorProfitPayout: boolean = false
   ) {
     const reqIndex = this.reinvestments.findIndex((r) => r.id === requestId);
     if (reqIndex < 0) throw new Error('Solicitud no encontrada.');
@@ -4400,6 +4401,7 @@ class DataStore {
     const res = await firestoreService.adminResolveReinvestmentCallable({
       reinvestmentId: req.id,
       action: 'PREAPPROVE',
+      confirmNoPriorProfitPayout,
     });
 
     if (res && res.reinvestment) {
@@ -4459,7 +4461,8 @@ class DataStore {
   public async approveReinvestment(
     requestId: string,
     adminUid: string = 'admin_root_uid',
-    adminName: string = 'Administrador Principal'
+    adminName: string = 'Administrador Principal',
+    confirmNoPriorProfitPayout: boolean = false
   ) {
     const reqIndex = this.reinvestments.findIndex((r) => r.id === requestId);
     if (reqIndex < 0) throw new Error('Solicitud no encontrada.');
@@ -4475,6 +4478,7 @@ class DataStore {
     const res = await firestoreService.adminResolveReinvestmentCallable({
       reinvestmentId: req.id,
       action: 'APPROVE',
+      confirmNoPriorProfitPayout,
     });
 
     if (res && res.reinvestment) {
